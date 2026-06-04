@@ -1,0 +1,15 @@
+name: Kubernetes Bundle - Resources
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    uses: kube-kaptain/buildon-github-actions/.github/workflows/kubernetes-bundle-resources.yaml@1.1.37
+    permissions:
+      contents: write
+      packages: write
+      checks: write

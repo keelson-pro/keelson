@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${ProjectName}-configmap-checksum
+  namespace: ${Environment}
+data:
+  # Per-registry credential bindings. The map key is the registry host; by
+  # convention, for auth-mode "secret" the Kubernetes Secret holding the
+  # dockerconfigjson is named after the host (the map key itself). An optional
+  # "namespace" field overrides the namespace the Secret is looked up in
+  # (default: Keelson's own namespace).
+  registries.yaml: |
+    registries:
+      ${EnvironmentDockerRegistry}:
+        auth-mode: ${Keelson/AuthMode}
