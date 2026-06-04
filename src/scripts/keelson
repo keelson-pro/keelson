@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Keelson main entrypoint. Long-running: watch + periodic scan.
+# Logic lives in lib/; this file orchestrates.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/log.bash
+source "${SCRIPT_DIR}/lib/log.bash"
+# shellcheck source=lib/policy.bash
+source "${SCRIPT_DIR}/lib/policy.bash"
+# shellcheck source=lib/image.bash
+source "${SCRIPT_DIR}/lib/image.bash"
+# shellcheck source=lib/annotations.bash
+source "${SCRIPT_DIR}/lib/annotations.bash"
+# shellcheck source=lib/workload.bash
+source "${SCRIPT_DIR}/lib/workload.bash"
+# shellcheck source=lib/registry.bash
+source "${SCRIPT_DIR}/lib/registry.bash"
+# shellcheck source=lib/eligibility.bash
+source "${SCRIPT_DIR}/lib/eligibility.bash"
+# shellcheck source=lib/managedfields.bash
+source "${SCRIPT_DIR}/lib/managedfields.bash"
+# shellcheck source=lib/update.bash
+source "${SCRIPT_DIR}/lib/update.bash"
+# shellcheck source=lib/state.bash
+source "${SCRIPT_DIR}/lib/state.bash"
+# shellcheck source=lib/scan.bash
+source "${SCRIPT_DIR}/lib/scan.bash"
+# shellcheck source=lib/queue.bash
+source "${SCRIPT_DIR}/lib/queue.bash"
+# shellcheck source=lib/watch.bash
+source "${SCRIPT_DIR}/lib/watch.bash"
+# shellcheck source=lib/loop.bash
+source "${SCRIPT_DIR}/lib/loop.bash"
+
+WATCHER_PIDS=()
+
+usage() {
+    cat <<'USAGE'
+Usage: keelson [--help]
+
+Run the Keelson controller. Streams watch events for managed workloads,
+runs a periodic full scan, and patches workloads when a newer tag meets
+the configured policy.
+
+Configuration is via env (see KEELSON_* in KeelsonConfigurationDesign.md).
+USAGE
+}
+
+shutdown() {
+    log_info shutdown signal="${1:-unknown}"
+    local pid
+    for pid in "${WATCHER_PIDS[@]:-}"; do
+        if [ -n "$pid" ]; then
+            kill "$pid" 2>/dev/null || true
+        fi
+    done
+    exit 0
+}
+
+main() {
+    case "${1:-}" in
+        -h|--help) usage; return 0 ;;
+    esac
+
+    log_info boot \
+        version="${KEELSON_VERSION:-dev}" \
+        scope="${KEELSON_SCOPE:-cluster}" \
+        config-mode="${KEELSON_CONFIG_MODE:-keelson}" \
+        poll-interval="${KEELSON_POLL_INTERVAL:-60}" \
+        dry-run="${KEELSON_DRY_RUN:-0}"
+
+    trap 'shutdown TERM' TERM
+    trap 'shutdown INT' INT
+
+    queue_init
+    state_init || log_warn state-init-failed continuing-without-dedupe=1
+
+    local pid
+    while IFS= read -r pid; do
+        [ -n "$pid" ] && WATCHER_PIDS+=("$pid")
+    done < <(watch_start_all)
+
+    loop_mark_ready
+    loop_run
+}
+
+main "$@"

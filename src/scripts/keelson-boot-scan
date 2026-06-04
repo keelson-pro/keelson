@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# One-shot scan. Default dry-run; --apply patches workloads in place.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/log.bash
+source "${SCRIPT_DIR}/lib/log.bash"
+# shellcheck source=lib/policy.bash
+source "${SCRIPT_DIR}/lib/policy.bash"
+# shellcheck source=lib/image.bash
+source "${SCRIPT_DIR}/lib/image.bash"
+# shellcheck source=lib/annotations.bash
+source "${SCRIPT_DIR}/lib/annotations.bash"
+# shellcheck source=lib/workload.bash
+source "${SCRIPT_DIR}/lib/workload.bash"
+# shellcheck source=lib/registry.bash
+source "${SCRIPT_DIR}/lib/registry.bash"
+# shellcheck source=lib/eligibility.bash
+source "${SCRIPT_DIR}/lib/eligibility.bash"
+# shellcheck source=lib/managedfields.bash
+source "${SCRIPT_DIR}/lib/managedfields.bash"
+# shellcheck source=lib/update.bash
+source "${SCRIPT_DIR}/lib/update.bash"
+# shellcheck source=lib/state.bash
+source "${SCRIPT_DIR}/lib/state.bash"
+# shellcheck source=lib/scan.bash
+source "${SCRIPT_DIR}/lib/scan.bash"
+
+usage() {
+    cat <<'USAGE'
+Usage: keelson-boot-scan [--apply] [--help]
+
+Scan the cluster (or namespace, per KEELSON_SCOPE) for Keelson-managed
+workloads. Parse the current tag, query the registry, evaluate policy,
+and either log what would be updated (default) or patch the workloads.
+
+  --apply   Strategic-merge patch updatable workloads to the winning tag.
+            Default is dry-run: log-only, no kube writes.
+USAGE
+}
+
+main() {
+    local apply=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help) usage; return 0 ;;
+            --apply)   apply=1; shift ;;
+            *) printf 'unknown arg: %s\n' "$1" >&2; return 64 ;;
+        esac
+    done
+
+    if [ "$apply" -eq 1 ]; then
+        state_init || log_warn state-init-failed continuing-without-dedupe=1
+    fi
+
+    scan_run "$apply"
+
+    if [ "$apply" -eq 1 ]; then
+        state_flush || true
+    fi
+}
+
+main "$@"

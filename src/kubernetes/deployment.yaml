@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${ProjectName}
+  namespace: ${Environment}
+spec:
+  # Single replica + Recreate strategy: Keelson is the sole writer to keelson-state,
+  # and the directory-based work queue lives on the pod filesystem.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ${ProjectName}
+  template:
+    metadata:
+      labels:
+        app: ${ProjectName}
+    spec:
+      serviceAccountName: ${ProjectName}
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ${ProjectName}
+          image: ${Keelson/EnvironmentDockerRegistryAndNamespace}/keelson/keelson-package:${Keelson/PackageVersion}
+          imagePullPolicy: IfNotPresent
+          command: ["keelson"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: KEELSON_LOG_FORMAT
+              value: "${Keelson/LogFormat}"
+            - name: KEELSON_LOG_LEVEL
+              value: "${Keelson/LogLevel}"
+            - name: KEELSON_SCOPE
+              value: "${Keelson/Scope}"
+            - name: KEELSON_CONFIG_MODE
+              value: "${Keelson/ConfigMode}"
+            - name: KEELSON_RESPECT_SA_PULL_SECRETS
+              value: "${Keelson/RespectServiceAccountPullSecrets}"
+          volumeMounts:
+            - name: config
+              mountPath: /configmap
+              readOnly: true
+            - name: work
+              mountPath: /keelson/work
+            - name: home
+              mountPath: /home/keelson
+      volumes:
+        - name: config
+          configMap:
+            name: ${ProjectName}-configmap-checksum
+            optional: true
+        - name: work
+          emptyDir: {}
+        - name: home
+          emptyDir: {}

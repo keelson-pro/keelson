@@ -1,0 +1,33 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ${ProjectName}-role-checksum
+  namespace: ${Environment}
+rules:
+  # Workloads Keelson reads, watches, and updates the image on (scoped to this namespace)
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+
+  # Trigger a one-off Job from a CronJob — kubectl create job --from=cronjob/<name>
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create"]
+
+  # State ConfigMap (keelson-state) and central config ConfigMaps (keelson-registries, keelson-notifications)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "patch", "update"]
+
+  # Per-registry credential Secrets and the listener token Secret
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+
+  # Workload ServiceAccounts (for KEELSON_RESPECT_SA_PULL_SECRETS imagePullSecrets walk)
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get"]

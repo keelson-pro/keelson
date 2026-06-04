@@ -30,3 +30,10 @@ illustrates the issue. No progress in over 7 years since the ticket was opened.
 ## Tech stack
 
 Bash, kubectl, yq 4, skopeo. Everything runs in containers. Tests: BATS. Lint: shellcheck.
+
+
+## Configuration
+
+See [Configuration.md](Configuration.md) for environment variables, the
+`registries.yaml` shape and auth modes, and the per-workload annotations
+Keelson honours.
