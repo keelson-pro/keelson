@@ -119,9 +119,9 @@ SH
     KEELSON_WATCH_MAX_ITERATIONS=2 KEELSON_WATCHER_RECONNECT_INITIAL=1 \
         run emit watch_run_kind Deployment
     [ "$status" -eq 0 ]
-    # Two iterations -> two watch-start log lines.
-    [ "$(printf '%s\n' "$output" | grep -c 'watch-start')" = "2" ]
-    [[ "$output" == *"watch-disconnected"* ]]
+    # Two iterations -> two "Watching kind" log lines.
+    [ "$(printf '%s\n' "$output" | grep -c "Watching kind 'Deployment'")" = "2" ]
+    [[ "$output" == *"Watch for kind 'Deployment' disconnected"* ]]
     # Each iteration enqueued the same identity; dedupe leaves one file.
     [ -f "$KEELSON_QUEUE_DIR/Deployment--default--app" ]
 }

@@ -51,7 +51,9 @@ USAGE
 }
 
 shutdown() {
-    log_info shutdown signal="${1:-unknown}"
+    local sig=${1:-unknown}
+    log_info_always shutdown signal="$sig" \
+        msg="Keelson shutting down on signal $sig."
     loop_kill_children
     exit 0
 }
@@ -63,19 +65,26 @@ main() {
 
     validate_config
 
-    log_info boot \
-        version="${KEELSON_VERSION:-dev}" \
+    log_info_always boot \
+        version="${KEELSON_VERSION:-0.0.0-DEV-VERSION}" \
         scope="$KEELSON_SCOPE" \
         config-mode="$KEELSON_CONFIG_MODE" \
         poll-interval="$KEELSON_POLL_INTERVAL" \
         tick-interval="$KEELSON_TICK_INTERVAL" \
-        dry-run="${KEELSON_DRY_RUN:-0}"
+        dry-run="${KEELSON_DRY_RUN:-0}" \
+        msg="Keelson ${KEELSON_VERSION:-0.0.0-DEV-VERSION} booting in '$KEELSON_SCOPE' scope (config-mode='$KEELSON_CONFIG_MODE', poll-interval=${KEELSON_POLL_INTERVAL}s, tick-interval=${KEELSON_TICK_INTERVAL}s, dry-run=${KEELSON_DRY_RUN:-0})."
 
-    trap 'shutdown TERM' TERM
-    trap 'shutdown INT' INT
+    trap 'shutdown SIGTERM' TERM
+    trap 'shutdown SIGINT' INT
 
     queue_init
-    state_init || log_warn state-init-failed continuing-without-dedupe=1
+    if ! state_init; then
+        log_warn state-init-failed \
+            configmap="${KEELSON_STATE_CONFIGMAP:-keelson-state}" \
+            ns="${STATE_NAMESPACE:-${KEELSON_STATE_NAMESPACE:-unknown}}" \
+            continuing-without-trigger-state=1 \
+            msg="State init failed, could not create ConfigMap '${KEELSON_STATE_CONFIGMAP:-keelson-state}' in '${STATE_NAMESPACE:-${KEELSON_STATE_NAMESPACE:-unknown}}'; continuing without trigger-state."
+    fi
 
     loop_run
 }

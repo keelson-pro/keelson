@@ -39,7 +39,7 @@ loop_drain_queue() {
         log_debug queue-item "$line"
         count=$(( count + 1 ))
     done < <(queue_drain)
-    [ "$count" -gt 0 ] && log_info queue-drained count="$count"
+    [ "$count" -gt 0 ] && log_debug queue-drained count="$count"
     return 0
 }
 
@@ -60,7 +60,8 @@ loop_supervise_watchers() {
                 fi
                 continue
             fi
-            log_warn watcher-died kind="$kind" pid="$pid"
+            log_warn watcher-died kind="$kind" pid="$pid" \
+                msg="Watcher for kind '$kind' died (pid $pid)."
             fails=$(( ${LOOP_WATCHER_FAIL[$kind]:-0} + 1 ))
             LOOP_WATCHER_FAIL[$kind]=$fails
             delay=$(( 1 << (fails - 1) ))
@@ -73,8 +74,14 @@ loop_supervise_watchers() {
         new_pid=$!
         LOOP_WATCHER_PIDS[$kind]=$new_pid
         LOOP_WATCHER_STARTED[$kind]=$now
-        log_info watcher-spawned kind="$kind" pid="$new_pid" \
-            fails="${LOOP_WATCHER_FAIL[$kind]:-0}"
+        fails=${LOOP_WATCHER_FAIL[$kind]:-0}
+        if [ "$fails" -eq 0 ]; then
+            log_info_always watcher-spawned kind="$kind" pid="$new_pid" fails="$fails" \
+                msg="Watcher for kind '$kind' started (pid $new_pid)."
+        else
+            log_warn watcher-respawned kind="$kind" pid="$new_pid" fails="$fails" \
+                msg="Watcher for kind '$kind' respawned (pid $new_pid, fail count $fails)."
+        fi
     done
 }
 
@@ -95,7 +102,9 @@ loop_write_status() {
 loop_start_scan() {
     local apply=$1 force_refresh=$2
     (
-        state_load || log_warn state-reload-failed
+        state_load || log_warn state-reload-failed \
+            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
+            msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
         [ "$force_refresh" = "1" ] && state_clear_cache
         scan_run "$apply"
         [ "$apply" -eq 1 ] && { state_flush || true; }
@@ -148,7 +157,9 @@ loop_run() {
         fi
 
         if [ $(( now - last_refresh )) -ge "$full_refresh" ]; then
-            log_info state-full-refresh elapsed=$(( now - last_refresh ))
+            local elapsed=$(( now - last_refresh ))
+            log_debug state-full-refresh elapsed="$elapsed" \
+                msg="State full refresh due (${elapsed}s elapsed), proceeding to refresh..."
             force_refresh_next=1
             last_refresh=$now
         fi

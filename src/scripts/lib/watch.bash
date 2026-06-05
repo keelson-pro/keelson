@@ -24,9 +24,11 @@ watch_run_kind() {
     local max_iter=${KEELSON_WATCH_MAX_ITERATIONS:-0}
     local iter=0
     while [ "$max_iter" -eq 0 ] || [ "$iter" -lt "$max_iter" ]; do
-        log_info watch-start kind="$kind"
+        log_info watch-start kind="$kind" \
+            msg="Watching kind '$kind' for changes."
         watch_kubectl_stream "$kind" | watch_handle_events "$kind"
-        log_warn watch-disconnected kind="$kind" backoff="$backoff"
+        log_warn watch-disconnected kind="$kind" backoff="$backoff" \
+            msg="Watch for kind '$kind' disconnected; reconnecting in ${backoff}s."
         sleep "$backoff"
         backoff=$(( backoff * 2 ))
         [ "$backoff" -gt "$cap" ] && backoff=$cap

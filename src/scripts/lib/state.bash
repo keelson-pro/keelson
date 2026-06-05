@@ -1,22 +1,17 @@
 # State ConfigMap for Keelson.
 # Sourced; not directly executable.
 #
-# Backs log-dedupe (skip-reason, error-event) and the CronJob always-once
-# trigger gate. One ConfigMap per Keelson installation, in Keelson's own
-# namespace, with two data-key shapes:
+# Backs the CronJob always-once trigger gate. Log dedupe is NOT persisted:
+# lib/log.bash handles repeat suppression in memory via per-level intervals.
+# A pod restart re-emits everything, which is the intended baseline.
 #
-#   c--<kind>--<ns>--<name>--<container>   per-container scan state
-#   j--<kind>--<ns>--<name>                per-workload trigger state (CronJob)
-#
-# Per-container fields:
-#   checked-tag, checked-at         last observed tag, when
-#   update-tag, update-at           last applied tag, when
-#   skip-reason, skip-at            last skip, when
-#   error-event, error-detail, error-at
+# Data-key shape:
+#   j--<kind>--<ns>--<name>     per-workload trigger state (CronJob only)
 #
 # Per-workload trigger fields:
-#   triggered-job, triggered-at     last manual Job, when
-#   error-event, error-detail, error-at
+#   triggered-job, triggered-at    last manual Job, when (the scan reads
+#                                  triggered-job to gate the always-once
+#                                  trigger; triggered-at is informational)
 #
 # Cache:
 #   STATE_FIELDS["<data-key>:<field>"] = string
@@ -28,7 +23,7 @@
 # check. Introduce leader election before lifting that assumption.
 #
 # Configuration:
-#   KEELSON_STATE_CONFIGMAP     ConfigMap name (default keelson-state)
+#   KEELSON_STATE_CONFIGMAP     ConfigMap name
 #   KEELSON_STATE_NAMESPACE     override (default: read SA mount)
 #   KEELSON_SA_NAMESPACE_FILE   override of SA namespace path (tests)
 #
@@ -39,11 +34,6 @@ declare -gA STATE_KEYS=()
 declare -gA STATE_DIRTY=()
 STATE_NAMESPACE=""
 STATE_CONFIGMAP_NAME=""
-
-# state_container_key <kind> <ns> <name> <container>
-state_container_key() {
-    printf 'c--%s--%s--%s--%s' "$1" "$2" "$3" "$4"
-}
 
 # state_trigger_key <kind> <ns> <name>
 state_trigger_key() {
@@ -61,7 +51,8 @@ state_init() {
         if [ -r "$ns_file" ]; then
             STATE_NAMESPACE=$(cat "$ns_file")
         else
-            log_error state-namespace-unknown ns-file="$ns_file"
+            log_error state-namespace-unknown ns-file="$ns_file" \
+                msg="State init failed: could not read Keelson's own namespace from '$ns_file' and KEELSON_STATE_NAMESPACE is not set."
             return 1
         fi
     fi
@@ -81,11 +72,13 @@ state_load() {
         if ! kubectl create configmap "$STATE_CONFIGMAP_NAME" \
                 -n "$STATE_NAMESPACE" >/dev/null 2>&1; then
             log_error state-configmap-create-failed \
-                configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE"
+                configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
+                msg="Could not create state ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE'."
             return 1
         fi
-        log_info state-configmap-created \
-            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE"
+        log_info_always state-configmap-created \
+            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
+            msg="State ConfigMap '$STATE_CONFIGMAP_NAME' created in '$STATE_NAMESPACE'."
         return 0
     fi
     local keys key val
@@ -130,14 +123,6 @@ state_set() {
     STATE_DIRTY["$data_key"]=1
 }
 
-state_get_container_field() {
-    state_get "$(state_container_key "$1" "$2" "$3" "$4")" "$5"
-}
-
-state_set_container_field() {
-    state_set "$(state_container_key "$1" "$2" "$3" "$4")" "$5" "$6"
-}
-
 state_get_trigger_field() {
     state_get "$(state_trigger_key "$1" "$2" "$3")" "$4"
 }
@@ -147,8 +132,10 @@ state_set_trigger_field() {
 }
 
 # state_clear_cache
-# Wipes the in-memory cache. Use on the full-refresh tick to force re-emit
-# of deduped logs. Does NOT touch the ConfigMap (next state_load repopulates).
+# Wipes the in-memory cache. Currently called from the full-refresh tick
+# even though log dedupe has moved to lib/log.bash - the trigger ledger
+# benefits from a periodic ConfigMap reload to pick up any out-of-band
+# edits a human made.
 state_clear_cache() {
     STATE_FIELDS=()
     STATE_KEYS=()
@@ -221,14 +208,16 @@ state_flush() {
             --patch "$patch" >/dev/null 2>&1; then
         local count=${#STATE_DIRTY[@]}
         STATE_DIRTY=()
-        log_info state-flushed \
+        log_debug state-flushed \
             configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
-            keys="$count"
+            keys="$count" \
+            msg="State flush wrote $count keys to ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE'."
         return 0
     fi
     log_error state-flush-failed \
         configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
-        keys="${#STATE_DIRTY[@]}"
+        keys="${#STATE_DIRTY[@]}" \
+        msg="State flush failed: could not patch ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' (${#STATE_DIRTY[@]} dirty keys)."
     return 1
 }
 

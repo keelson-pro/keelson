@@ -17,8 +17,15 @@ setup() {
     KEELSON_RESPECT_SA_PULL_SECRETS=false
     KEELSON_REGISTRIES_FILE="$TMP_DIR/registries.yaml"
     rm -f "$KEELSON_REGISTRIES_FILE"
+    # Most events the scan emits are at debug level now (scan-start, summary,
+    # skip-not-eligible, no-change). Run at debug so assertions can see them.
+    KEELSON_LOG_LEVEL=debug
+    # Plain format collapses to the msg= sentence and drops event/field tags.
+    # Tests assert on both sentences and structured fields, so use JSON.
+    KEELSON_LOG_FORMAT=json
     export KEELSON_WATCHED_KINDS KEELSON_SCOPE KEELSON_CONFIG_MODE \
-        KEELSON_RESPECT_SA_PULL_SECRETS KEELSON_REGISTRIES_FILE
+        KEELSON_RESPECT_SA_PULL_SECRETS KEELSON_REGISTRIES_FILE \
+        KEELSON_LOG_LEVEL KEELSON_LOG_FORMAT
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash
@@ -111,10 +118,10 @@ JSON
     [ "$status" -eq 0 ]
     [[ "$output" == *"scan-start"* ]]
     [[ "$output" == *"scan-summary"* ]]
-    [[ "$output" == *"resources=0"* ]]
-    [[ "$output" == *"would-update=0"* ]]
-    [[ "$output" == *"no-change=0"* ]]
-    [[ "$output" == *"skip=0"* ]]
+    [[ "$output" == *'"resources":"0"'* ]]
+    [[ "$output" == *'"would-update":"0"'* ]]
+    [[ "$output" == *'"no-change":"0"'* ]]
+    [[ "$output" == *'"skip":"0"'* ]]
 }
 
 # --- skip reasons surface as skip-not-eligible ---
@@ -124,29 +131,29 @@ JSON
     run emit scan_run 0
     [ "$status" -eq 0 ]
     [[ "$output" == *"skip-not-eligible"* ]]
-    [[ "$output" == *"reason=no-policy-annotation"* ]]
-    [[ "$output" == *"skip=1"* ]]
+    [[ "$output" == *'"reason":"no-policy-annotation"'* ]]
+    [[ "$output" == *'"skip":"1"'* ]]
 }
 
 @test "scan_run: container with policy=never → skip-not-eligible policy-never" {
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 never)"
     run emit scan_run 0
     [ "$status" -eq 0 ]
-    [[ "$output" == *"reason=policy-never"* ]]
+    [[ "$output" == *'"reason":"policy-never"'* ]]
 }
 
 @test "scan_run: digest-pinned image → skip tag-is-digest-pinned" {
     kubectl_returns "$(single_deployment_json 'ghcr.io/x/y@sha256:deadbeef' major)"
     run emit scan_run 0
     [ "$status" -eq 0 ]
-    [[ "$output" == *"reason=tag-is-digest-pinned"* ]]
+    [[ "$output" == *'"reason":"tag-is-digest-pinned"'* ]]
 }
 
 @test "scan_run: latest tag → skip tag-is-latest" {
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:latest minor)"
     run emit scan_run 0
     [ "$status" -eq 0 ]
-    [[ "$output" == *"reason=tag-is-latest"* ]]
+    [[ "$output" == *'"reason":"tag-is-latest"'* ]]
 }
 
 # --- eligible workloads ---
@@ -160,8 +167,8 @@ SH
     run emit scan_run 0
     [ "$status" -eq 0 ]
     [[ "$output" == *"dry-run-no-change"* ]]
-    [[ "$output" == *"no-change=1"* ]]
-    [[ "$output" == *"would-update=0"* ]]
+    [[ "$output" == *'"no-change":"1"'* ]]
+    [[ "$output" == *'"would-update":"0"'* ]]
 }
 
 @test "scan_run: eligible workload, newer minor candidate → dry-run-would-update" {
@@ -173,7 +180,7 @@ SH
     run emit scan_run 0
     [ "$status" -eq 0 ]
     [[ "$output" == *"dry-run-would-update"* ]]
-    [[ "$output" == *"would-update=1"* ]]
+    [[ "$output" == *'"would-update":"1"'* ]]
 }
 
 @test "scan_run: patch policy ignores newer minor" {
@@ -185,7 +192,7 @@ SH
     run emit scan_run 0
     [ "$status" -eq 0 ]
     [[ "$output" == *"dry-run-would-update"* ]]
-    [[ "$output" == *"candidate=1.2.4"* ]]
+    [[ "$output" == *'"candidate":"1.2.4"'* ]]
 }
 
 @test "scan_run: non-numeric candidates are rejected" {
@@ -207,7 +214,7 @@ printf '{"Tags":["1.2.3","2.0.0","1.4.0"]}'
 SH
     run emit scan_run 0
     [ "$status" -eq 0 ]
-    [[ "$output" == *"candidate=1.4.0"* ]]
+    [[ "$output" == *'"candidate":"1.4.0"'* ]]
 }
 
 # --- error paths ---
@@ -220,7 +227,7 @@ SH
     run emit scan_run 0
     [ "$status" -eq 0 ]
     [[ "$output" == *"kubectl-list-failed"* ]]
-    [[ "$output" == *"error=1"* ]]
+    [[ "$output" == *'"error":"1"'* ]]
 }
 
 @test "scan_run: skopeo failure increments error counter for that container" {
@@ -232,7 +239,7 @@ SH
     run emit scan_run 0
     [ "$status" -eq 0 ]
     [[ "$output" == *"registry-list-tags-failed"* ]]
-    [[ "$output" == *"error=1"* ]]
+    [[ "$output" == *'"error":"1"'* ]]
 }
 
 # --- scan-start emits the configured mode ---
@@ -240,13 +247,15 @@ SH
 @test "scan_run: scan-start mode is dry-run when apply=0" {
     kubectl_returns '{"items": []}'
     run emit scan_run 0
-    [[ "$output" == *"scan-start mode=dry-run"* ]]
+    [[ "$output" == *'"event":"scan-start"'* ]]
+    [[ "$output" == *'"mode":"dry-run"'* ]]
 }
 
 @test "scan_run: scan-start mode is apply when apply=1" {
     kubectl_returns '{"items": []}'
     run emit scan_run 1
-    [[ "$output" == *"scan-start mode=apply"* ]]
+    [[ "$output" == *'"event":"scan-start"'* ]]
+    [[ "$output" == *'"mode":"apply"'* ]]
 }
 
 # --- apply mode ---
@@ -319,7 +328,7 @@ single_cronjob_json() {
 JSON
 }
 
-@test "scan_run apply: newer candidate triggers update-applied + updated counter" {
+@test "scan_run apply: newer candidate emits update sentence + updated counter" {
     kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
     install_shim skopeo <<'SH'
 #!/usr/bin/env bash
@@ -327,10 +336,9 @@ printf '{"Tags":["1.2.3","1.3.0"]}'
 SH
     run emit scan_run 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"update-applied"* ]]
-    [[ "$output" == *"image=ghcr.io/x/y:1.3.0"* ]]
-    [[ "$output" == *"updated=1"* ]]
-    [[ "$output" == *"would-update=0"* ]]
+    [[ "$output" == *"Deployment 'app' in 'default' updated from 1.2.3 to 1.3.0 for image 'ghcr.io/x/y'"* ]]
+    [[ "$output" == *'"updated":"1"'* ]]
+    [[ "$output" == *'"would-update":"0"'* ]]
 }
 
 @test "scan_run apply: kubectl patch failure → update-failed and error counter" {
@@ -344,8 +352,8 @@ SH
     run emit scan_run 1
     [ "$status" -eq 0 ]
     [[ "$output" == *"update-failed"* ]]
-    [[ "$output" == *"error=1"* ]]
-    [[ "$output" == *"updated=0"* ]]
+    [[ "$output" == *'"error":"1"'* ]]
+    [[ "$output" == *'"updated":"0"'* ]]
 }
 
 @test "scan_run apply: no newer candidate logs no-change (not dry-run-no-change)" {
@@ -356,9 +364,9 @@ printf '{"Tags":["1.2.3"]}'
 SH
     run emit scan_run 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *" no-change "* ]]
-    [[ "$output" != *"dry-run-no-change"* ]]
-    [[ "$output" == *"no-change=1"* ]]
+    [[ "$output" == *'"event":"no-change"'* ]]
+    [[ "$output" != *'"event":"dry-run-no-change"'* ]]
+    [[ "$output" == *'"no-change":"1"'* ]]
 }
 
 @test "scan_run apply: CronJob with trigger-job-on-update=true creates a Job" {
@@ -369,8 +377,8 @@ printf '{"Tags":["1.2.3","1.3.0"]}'
 SH
     KEELSON_WATCHED_KINDS=CronJob run emit scan_run 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"update-applied"* ]]
-    [[ "$output" == *"cronjob-job-triggered"* ]]
+    [[ "$output" == *"CronJob 'cron' in 'default' updated from 1.2.3 to 1.3.0 for image 'ghcr.io/x/y'"* ]]
+    [[ "$output" =~ Job\ \'cron-[0-9]+\'\ created\ from\ CronJob\ \'cron\'\ in\ \'default\'\ with\ update\ from\ 1.2.3\ to\ 1.3.0\ for\ image\ \'ghcr.io/x/y\' ]]
     grep -q "create job" "$TMP_DIR/kubectl.log"
     grep -q -- "--from=cronjob/cron" "$TMP_DIR/kubectl.log"
 }
@@ -383,8 +391,8 @@ printf '{"Tags":["1.2.3","1.3.0"]}'
 SH
     KEELSON_WATCHED_KINDS=CronJob run emit scan_run 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"update-applied"* ]]
-    [[ "$output" != *"cronjob-job-triggered"* ]]
+    [[ "$output" == *"CronJob 'cron' in 'default' updated from 1.2.3 to 1.3.0 for image 'ghcr.io/x/y'"* ]]
+    [[ "$output" != *"created from CronJob"* ]]
     ! grep -q "create job" "$TMP_DIR/kubectl.log" 2>/dev/null || false
 }
 
@@ -411,11 +419,11 @@ SH
     KEELSON_WATCHED_KINDS=CronJob run emit scan_run 1
     [ "$status" -eq 0 ]
     [[ "$output" == *"cronjob-trigger-requires-suspend"* ]]
-    [[ "$output" != *"cronjob-job-triggered"* ]]
+    [[ "$output" != *"created from CronJob"* ]]
     ! grep -q "create job" "$TMP_DIR/kubectl.log" 2>/dev/null || false
 }
 
-@test "scan_run apply: CronJob trigger=true + suspend=true + no update -> always-once triggers Job" {
+@test "scan_run apply: CronJob trigger=true + suspend=true + no update -> always-once triggers Job (concise sentence)" {
     kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true true)"
     install_shim skopeo <<'SH'
 #!/usr/bin/env bash
@@ -423,83 +431,12 @@ printf '{"Tags":["1.2.3"]}'
 SH
     KEELSON_WATCHED_KINDS=CronJob run emit scan_run 1
     [ "$status" -eq 0 ]
-    [[ "$output" != *"update-applied"* ]]
-    [[ "$output" == *"cronjob-job-triggered"* ]]
+    [[ "$output" != *"updated from"* ]]
+    [[ "$output" =~ Job\ \'cron-[0-9]+\'\ created\ from\ CronJob\ \'cron\'\ in\ \'default\' ]]
+    [[ "$output" != *"with update from"* ]]
     grep -q "create job" "$TMP_DIR/kubectl.log"
 }
 
-# --- log dedupe (state cache persists across scan_run in same shell) ---
-#
-# bats `run` runs the command in a subshell, which would isolate the
-# in-memory cache. These tests call scan_run directly so the cache lives.
-
-@test "scan_run apply: repeat skip with same reason emits only on first scan" {
-    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3)"
-    install_shim skopeo <<'SH'
-#!/usr/bin/env bash
-printf '{"Tags":["1.2.3"]}'
-SH
-    scan_run 1 2>"$TMP_DIR/s1.log"
-    grep -q "skip-not-eligible" "$TMP_DIR/s1.log"
-
-    scan_run 1 2>"$TMP_DIR/s2.log"
-    ! grep -q "skip-not-eligible" "$TMP_DIR/s2.log"
-}
-
-@test "scan_run apply: no-change clears skip state, so a later skip re-emits" {
-    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3)"
-    install_shim skopeo <<'SH'
-#!/usr/bin/env bash
-printf '{"Tags":["1.2.3"]}'
-SH
-    scan_run 1 2>"$TMP_DIR/s1.log"
-    grep -q "skip-not-eligible" "$TMP_DIR/s1.log"
-
-    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
-    scan_run 1 2>"$TMP_DIR/s2.log"
-    grep -q " no-change " "$TMP_DIR/s2.log"
-
-    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3)"
-    scan_run 1 2>"$TMP_DIR/s3.log"
-    grep -q "skip-not-eligible" "$TMP_DIR/s3.log"
-}
-
-@test "scan_run apply: registry-list-tags-failed deduped across consecutive scans" {
-    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
-    install_shim skopeo <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-    scan_run 1 2>"$TMP_DIR/s1.log"
-    grep -q "registry-list-tags-failed" "$TMP_DIR/s1.log"
-
-    scan_run 1 2>"$TMP_DIR/s2.log"
-    ! grep -q "registry-list-tags-failed" "$TMP_DIR/s2.log"
-}
-
-@test "scan_run apply: dry-run does NOT mutate state (skip re-emits on next dry-run)" {
-    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3)"
-    install_shim skopeo <<'SH'
-#!/usr/bin/env bash
-printf '{"Tags":["1.2.3"]}'
-SH
-    scan_run 0 2>"$TMP_DIR/s1.log"
-    grep -q "skip-not-eligible" "$TMP_DIR/s1.log"
-
-    scan_run 0 2>"$TMP_DIR/s2.log"
-    grep -q "skip-not-eligible" "$TMP_DIR/s2.log"
-}
-
-@test "scan_run apply: CronJob trigger requires-suspend deduped across scans" {
-    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true false)"
-    install_shim skopeo <<'SH'
-#!/usr/bin/env bash
-printf '{"Tags":["1.2.3"]}'
-SH
-    KEELSON_WATCHED_KINDS=CronJob
-    scan_run 1 2>"$TMP_DIR/s1.log"
-    grep -q "cronjob-trigger-requires-suspend" "$TMP_DIR/s1.log"
-
-    scan_run 1 2>"$TMP_DIR/s2.log"
-    ! grep -q "cronjob-trigger-requires-suspend" "$TMP_DIR/s2.log"
-}
+# Log dedupe is handled in lib/log.bash's rate limiter (covered by log.bats);
+# the scan no longer carries any per-container persisted state. Old tests for
+# state-backed skip/error/no-change dedupe have been removed accordingly.

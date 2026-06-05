@@ -75,12 +75,20 @@ set_required_env() {
     export KEELSON_WATCHER_HEALTHY_RESET=30
     export KEELSON_WATCHER_RECONNECT_INITIAL=2
     export KEELSON_WATCHER_RECONNECT_MAX=60
+    export KEELSON_LOG_DEBUG_REPEAT_INTERVAL=0
+    export KEELSON_LOG_INFO_REPEAT_INTERVAL=120
+    export KEELSON_LOG_WARN_REPEAT_INTERVAL=300
+    export KEELSON_LOG_ERROR_REPEAT_INTERVAL=600
+    export KEELSON_LOG_FILE_MAX_BYTES=10485760
+    export KEELSON_LOG_FILE_KEEP=5
 }
 
 install_required_binaries() {
     install_yq_v4
+    # date is left as the host symlink from setup so log_emit's timestamps
+    # and the rate limiter's `now=$(date +%s)` produce real values.
     local b
-    for b in kubectl skopeo awk sed head tail date; do
+    for b in kubectl skopeo awk sed head tail; do
         install_shim "$b" <<<'#!/usr/bin/env bash'$'\nexit 0'
     done
 }
@@ -97,7 +105,7 @@ install_required_binaries() {
     unset FOO
     v_run emit validate_env_set FOO
     [ "$status" -eq 1 ]
-    [[ "$output" == *"validate-env-missing"* ]]
+    [[ "$output" == *"Validation failed: required env var 'FOO' is not set."* ]]
 }
 
 @test "env_enum: passes when value is in allowed set" {
@@ -110,7 +118,7 @@ install_required_binaries() {
     export KEELSON_SCOPE=neither
     v_run emit validate_env_enum KEELSON_SCOPE "cluster namespace"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"validate-env-invalid"* ]]
+    [[ "$output" == *"env var 'KEELSON_SCOPE' has value 'neither' but must be one of"* ]]
 }
 
 @test "env_positive_int: passes for positive int" {
@@ -141,7 +149,7 @@ install_required_binaries() {
     export KEELSON_WATCHED_KINDS="Deployment HelmRelease"
     v_run emit validate_env_kinds
     [ "$status" -eq 1 ]
-    [[ "$output" == *"validate-env-kind-unknown"* ]]
+    [[ "$output" == *"watched kind 'HelmRelease' is not supported"* ]]
 }
 
 @test "binary: passes when in PATH" {
@@ -153,7 +161,7 @@ install_required_binaries() {
 @test "binary: fails when missing" {
     v_run emit validate_binary nope-not-here
     [ "$status" -eq 1 ]
-    [[ "$output" == *"validate-binary-missing"* ]]
+    [[ "$output" == *"required binary 'nope-not-here' not found on PATH."* ]]
 }
 
 @test "yq_v4: passes for v4" {
@@ -169,7 +177,7 @@ printf 'yq version 3.4.1\n'
 SH
     v_run emit validate_yq_v4
     [ "$status" -eq 1 ]
-    [[ "$output" == *"validate-yq-not-v4"* ]]
+    [[ "$output" == *"yq must be v4"* ]]
 }
 
 # --- registries auth-mode handling ---
@@ -199,7 +207,7 @@ YAML
     install_required_binaries
     v_run emit validate_config
     [ "$status" -eq 0 ]
-    [[ "$output" == *"validate-passed"* ]]
+    [[ "$output" == *"Validation passed:"* ]]
 }
 
 @test "validate_config: missing required env fails" {
@@ -217,7 +225,7 @@ YAML
     export KEELSON_CONFIG_MODE=bogus
     v_run emit validate_config
     [ "$status" -eq 1 ]
-    [[ "$output" == *"validate-env-invalid"* ]]
+    [[ "$output" == *"env var 'KEELSON_CONFIG_MODE' has value 'bogus' but must be one of"* ]]
 }
 
 @test "validate_config: missing yq fails" {

@@ -75,7 +75,7 @@ emit() { "$@" 2>&1; }
 @test "loop_drain_queue: non-empty queue reports count" {
     queue_enqueue Deployment default app
     queue_enqueue CronJob ns2 cron
-    run emit loop_drain_queue
+    KEELSON_LOG_LEVEL=debug run emit loop_drain_queue
     [ "$status" -eq 0 ]
     [[ "$output" == *"queue-drained count=2"* ]]
     [ "$(queue_size)" = "0" ]

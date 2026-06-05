@@ -6,25 +6,24 @@
 #   lib/workload.bash, lib/registry.bash, lib/eligibility.bash, lib/update.bash,
 #   lib/state.bash
 #
-# scan_run runs one full pass over all watched kinds. apply=0 is the
-# original dry-run (Stage 3); apply=1 applies patches via update_apply
-# (Stage 5). Counters live in the function frame; logging surfaces
-# per-resource detail and a final scan-summary.
+# scan_run runs one full pass over all watched kinds. apply=0 is dry-run;
+# apply=1 applies patches via update_apply.
 #
-# Log dedupe (Stage 8): scan-level skip/error logs are suppressed when the
-# per-container state in lib/state.bash already records the same (event,
-# detail). Reads always touch the in-memory cache; writes are gated on
-# apply mode so dry-run never mutates the ConfigMap.
+# Log dedupe is handled in-memory by lib/log.bash's per-level rate limiter
+# (KEELSON_LOG_<LEVEL>_REPEAT_INTERVAL). The scan keeps no per-container
+# state. The only persisted state is the CronJob always-once trigger gate,
+# read once per scan via state_get_trigger_field.
 
 scan_run() {
     local _scan_apply=${1:-0}
     local mode=dry-run
     [ "$_scan_apply" -eq 1 ] && mode=apply
 
-    log_info scan-start \
+    log_debug scan-start \
         mode="$mode" \
         scope="$KEELSON_SCOPE" \
-        config-mode="$KEELSON_CONFIG_MODE"
+        config-mode="$KEELSON_CONFIG_MODE" \
+        msg="Scan starting in $mode mode (scope='$KEELSON_SCOPE', config-mode='$KEELSON_CONFIG_MODE')."
 
     registry_init
 
@@ -35,19 +34,21 @@ scan_run() {
         scan_kind "$kind"
     done
 
-    log_info scan-summary \
+    log_debug scan-summary \
         resources="$_scan_total" \
         would-update="$_scan_would_update" \
         updated="$_scan_updated" \
         no-change="$_scan_no_change" \
         skip="$_scan_skip" \
-        error="$_scan_error"
+        error="$_scan_error" \
+        msg="Scan complete: $_scan_total containers examined, $_scan_updated updated, $_scan_would_update would-update, $_scan_no_change no-change, $_scan_skip skipped, $_scan_error errored."
 }
 
 scan_kind() {
     local kind=$1 list_json count i
     if ! list_json=$(workload_list_kind "$kind" 2>/dev/null); then
-        log_error kubectl-list-failed kind="$kind"
+        log_error kubectl-list-failed kind="$kind" \
+            msg="Could not list $kind workloads from kubectl."
         _scan_error=$((_scan_error + 1))
         return 0
     fi
@@ -91,7 +92,8 @@ scan_workload() {
     sa_name=$(printf '%s' "$list_json" \
         | yq -p=json ".items[$i]$sa_path // \"default\"")
 
-    local n j cname cimage _workload_updated=0
+    local n j cname cimage _workload_updated=0 \
+          _workload_last_from="" _workload_last_to="" _workload_last_repo=""
     n=$(printf '%s' "$containers_json" | yq -p=json 'length')
     for ((j=0; j<n; j++)); do
         cname=$(printf '%s' "$containers_json" | yq -p=json ".[$j].name")
@@ -103,7 +105,8 @@ scan_workload() {
 
     if [ "$kind" = "CronJob" ] && [ "$_scan_apply" -eq 1 ]; then
         scan_check_cronjob_trigger "$ns" "$name" "$annotations" \
-            "$suspend" "$_workload_updated"
+            "$suspend" "$_workload_updated" \
+            "$_workload_last_from" "$_workload_last_to" "$_workload_last_repo"
     fi
 }
 
@@ -126,8 +129,10 @@ scan_container() {
     result=$(eligibility_check "$ann" "$cimage" "$cname") || true
     case "$result" in
         SKIP\ *)
-            scan_emit_skip "$kind" "$ns" "$name" "$cname" "$cimage" \
-                "${result#SKIP }"
+            log_debug skip-not-eligible \
+                kind="$kind" ns="$ns" name="$name" container="$cname" \
+                image="$cimage" reason="${result#SKIP }" \
+                msg="Skipped $kind '$name'/$cname in '$ns' (image '$cimage'): ${result#SKIP }."
             _scan_skip=$((_scan_skip + 1))
             return 0
             ;;
@@ -139,16 +144,23 @@ scan_container() {
 
     local creds
     if ! creds=$(registry_resolve_creds "$cimage" "$ips_json" "$ns" "$ann" "$sa_name" "$cname"); then
-        scan_emit_container_error "$kind" "$ns" "$name" "$cname" \
-            registry-creds-failed "$cimage"
+        log_error registry-creds-failed \
+            kind="$kind" ns="$ns" name="$name" container="$cname" \
+            detail="$cimage" \
+            msg="Could not resolve registry credentials for $kind '$name'/$cname in '$ns' (image '$cimage')."
         _scan_error=$((_scan_error + 1))
         return 0
     fi
 
     local tags_raw
     if ! tags_raw=$(registry_list_tags "$cimage" "$creds"); then
-        scan_emit_container_error "$kind" "$ns" "$name" "$cname" \
-            registry-list-tags-failed "$cimage"
+        local reason=${REGISTRY_LAST_ERROR:-}
+        local reason_clause=""
+        [ -n "$reason" ] && reason_clause=": $reason"
+        log_error registry-list-tags-failed \
+            kind="$kind" ns="$ns" name="$name" container="$cname" \
+            detail="$cimage" reason="$reason" \
+            msg="Could not list tags for $kind '$name'/$cname in '$ns' (image '$cimage')${reason_clause}."
         _scan_error=$((_scan_error + 1))
         return 0
     fi
@@ -173,14 +185,15 @@ scan_container() {
 
     if [ "$winner" = "$current_tag" ]; then
         if [ "$_scan_apply" -eq 1 ]; then
-            log_info no-change \
+            log_debug no-change \
                 kind="$kind" ns="$ns" name="$name" container="$cname" \
-                current="$current_tag" policy="$policy" position="$position"
-            scan_record_no_change "$kind" "$ns" "$name" "$cname" "$current_tag"
+                current="$current_tag" policy="$policy" position="$position" \
+                msg="No change for $kind '$name'/$cname in '$ns': current tag '$current_tag' is the winner (policy '$policy', position '$position')."
         else
-            log_info dry-run-no-change \
+            log_debug dry-run-no-change \
                 kind="$kind" ns="$ns" name="$name" container="$cname" \
-                current="$current_tag" policy="$policy" position="$position"
+                current="$current_tag" policy="$policy" position="$position" \
+                msg="Dry-run: no change for $kind '$name'/$cname in '$ns': current tag '$current_tag' is the winner (policy '$policy', position '$position')."
         fi
         _scan_no_change=$((_scan_no_change + 1))
         return 0
@@ -190,93 +203,28 @@ scan_container() {
         log_info dry-run-would-update \
             kind="$kind" ns="$ns" name="$name" container="$cname" \
             current="$current_tag" candidate="$winner" \
-            policy="$policy" position="$position"
+            policy="$policy" position="$position" \
+            msg="Dry-run: would update $kind '$name'/$cname in '$ns' from $current_tag to $winner (policy '$policy', position '$position')."
         _scan_would_update=$((_scan_would_update + 1))
         return 0
     fi
 
-    local new_image
-    new_image="$(image_repo "$cimage"):$winner"
-    if update_apply "$kind" "$ns" "$name" "$cname" "$new_image" "$mf_json"; then
+    local new_image repo
+    repo=$(image_repo "$cimage")
+    new_image="$repo:$winner"
+    if update_apply "$kind" "$ns" "$name" "$cname" "$new_image" "$current_tag" "$mf_json"; then
         _scan_updated=$((_scan_updated + 1))
         _workload_updated=1
-        scan_record_update "$kind" "$ns" "$name" "$cname" "$winner"
+        _workload_last_from=$current_tag
+        _workload_last_to=$winner
+        _workload_last_repo=$repo
     else
-        scan_emit_container_error "$kind" "$ns" "$name" "$cname" \
-            update-failed "$new_image"
+        log_error update-failed \
+            kind="$kind" ns="$ns" name="$name" container="$cname" \
+            detail="$new_image" \
+            msg="Update failed for $kind '$name'/$cname in '$ns' to image '$new_image'."
         _scan_error=$((_scan_error + 1))
     fi
-}
-
-# scan_emit_skip <kind> <ns> <name> <container> <image> <reason>
-# Logs skip-not-eligible only when the cached skip-reason differs (or is
-# empty). Writes the new reason+timestamp to state in apply mode.
-scan_emit_skip() {
-    local kind=$1 ns=$2 name=$3 container=$4 image=$5 reason=$6
-    local cached
-    cached=$(state_get_container_field "$kind" "$ns" "$name" "$container" skip-reason)
-    if [ "$cached" != "$reason" ]; then
-        log_info skip-not-eligible \
-            kind="$kind" ns="$ns" name="$name" container="$container" \
-            image="$image" reason="$reason"
-        if [ "$_scan_apply" -eq 1 ]; then
-            state_set_container_field "$kind" "$ns" "$name" "$container" \
-                skip-reason "$reason"
-            state_set_container_field "$kind" "$ns" "$name" "$container" \
-                skip-at "$(state_now)"
-        fi
-    fi
-}
-
-# scan_emit_container_error <kind> <ns> <name> <container> <event> <detail>
-# Logs an error event only when (event, detail) differs from cached state.
-# Writes new error fields to state in apply mode.
-scan_emit_container_error() {
-    local kind=$1 ns=$2 name=$3 container=$4 event=$5 detail=$6
-    local cached_event cached_detail
-    cached_event=$(state_get_container_field "$kind" "$ns" "$name" "$container" error-event)
-    cached_detail=$(state_get_container_field "$kind" "$ns" "$name" "$container" error-detail)
-    if [ "$cached_event" != "$event" ] || [ "$cached_detail" != "$detail" ]; then
-        log_error "$event" \
-            kind="$kind" ns="$ns" name="$name" container="$container" \
-            detail="$detail"
-        if [ "$_scan_apply" -eq 1 ]; then
-            state_set_container_field "$kind" "$ns" "$name" "$container" \
-                error-event "$event"
-            state_set_container_field "$kind" "$ns" "$name" "$container" \
-                error-detail "$detail"
-            state_set_container_field "$kind" "$ns" "$name" "$container" \
-                error-at "$(state_now)"
-        fi
-    fi
-}
-
-# scan_record_no_change <kind> <ns> <name> <container> <tag>
-# Records the observed tag and clears any prior skip/error markers so the
-# next ineligible/erroneous transition re-emits its log.
-scan_record_no_change() {
-    local kind=$1 ns=$2 name=$3 container=$4 tag=$5
-    state_set_container_field "$kind" "$ns" "$name" "$container" checked-tag "$tag"
-    state_set_container_field "$kind" "$ns" "$name" "$container" checked-at "$(state_now)"
-    state_set_container_field "$kind" "$ns" "$name" "$container" skip-reason ""
-    state_set_container_field "$kind" "$ns" "$name" "$container" error-event ""
-    state_set_container_field "$kind" "$ns" "$name" "$container" error-detail ""
-}
-
-# scan_record_update <kind> <ns> <name> <container> <tag>
-# Records a successful update: checked- and update- fields refresh; prior
-# skip and error markers clear.
-scan_record_update() {
-    local kind=$1 ns=$2 name=$3 container=$4 tag=$5
-    local now
-    now=$(state_now)
-    state_set_container_field "$kind" "$ns" "$name" "$container" checked-tag "$tag"
-    state_set_container_field "$kind" "$ns" "$name" "$container" checked-at "$now"
-    state_set_container_field "$kind" "$ns" "$name" "$container" update-tag "$tag"
-    state_set_container_field "$kind" "$ns" "$name" "$container" update-at "$now"
-    state_set_container_field "$kind" "$ns" "$name" "$container" skip-reason ""
-    state_set_container_field "$kind" "$ns" "$name" "$container" error-event ""
-    state_set_container_field "$kind" "$ns" "$name" "$container" error-detail ""
 }
 
 # scan_check_cronjob_trigger <ns> <name> <ann> <suspend> <updated>
@@ -289,18 +237,17 @@ scan_record_update() {
 # Then trigger when EITHER:
 #   - this scan updated a container in the workload, or
 #   - no prior triggered-job is recorded (first-observation always-once).
-#
-# When trigger=true but suspend!=true, log cronjob-trigger-requires-suspend
-# (deduped via state error-event) and do NOT create the Job.
 scan_check_cronjob_trigger() {
     local ns=$1 name=$2 ann=$3 suspend=$4 updated=$5
+    local from_tag=${6:-} to_tag=${7:-} repo=${8:-}
     local trigger
     trigger=$(annotation_get "$ann" trigger-job-on-update)
     [ "$trigger" = "true" ] || return 0
 
     if [ "$suspend" != "true" ]; then
-        scan_emit_trigger_error CronJob "$ns" "$name" \
-            cronjob-trigger-requires-suspend "$name"
+        log_error cronjob-trigger-requires-suspend \
+            kind=CronJob ns="$ns" name="$name" detail="$name" \
+            msg="CronJob '$name' in '$ns' has trigger-job-on-update=true but spec.suspend is not true; refusing to trigger to avoid racing the scheduler."
         return 0
     fi
 
@@ -310,25 +257,12 @@ scan_check_cronjob_trigger() {
         return 0
     fi
 
-    if update_trigger_cronjob "$ns" "$name"; then
+    if update_trigger_cronjob "$ns" "$name" "$from_tag" "$to_tag" "$repo"; then
         scan_record_trigger_success CronJob "$ns" "$name"
     else
-        scan_emit_trigger_error CronJob "$ns" "$name" \
-            cronjob-job-trigger-failed "$name"
-    fi
-}
-
-# scan_emit_trigger_error <kind> <ns> <name> <event> <detail>
-scan_emit_trigger_error() {
-    local kind=$1 ns=$2 name=$3 event=$4 detail=$5
-    local cached_event cached_detail
-    cached_event=$(state_get_trigger_field "$kind" "$ns" "$name" error-event)
-    cached_detail=$(state_get_trigger_field "$kind" "$ns" "$name" error-detail)
-    if [ "$cached_event" != "$event" ] || [ "$cached_detail" != "$detail" ]; then
-        log_error "$event" kind="$kind" ns="$ns" name="$name" detail="$detail"
-        state_set_trigger_field "$kind" "$ns" "$name" error-event "$event"
-        state_set_trigger_field "$kind" "$ns" "$name" error-detail "$detail"
-        state_set_trigger_field "$kind" "$ns" "$name" error-at "$(state_now)"
+        log_error cronjob-job-trigger-failed \
+            kind=CronJob ns="$ns" name="$name" detail="$name" \
+            msg="Could not trigger Job from CronJob '$name' in '$ns'."
     fi
 }
 
@@ -337,8 +271,6 @@ scan_record_trigger_success() {
     local now
     now=$(state_now)
     state_set_trigger_field "$kind" "$ns" "$name" triggered-at "$now"
-    state_set_trigger_field "$kind" "$ns" "$name" error-event ""
-    state_set_trigger_field "$kind" "$ns" "$name" error-detail ""
     # The job name is generated inside update_trigger_cronjob; we record the
     # most recent invocation timestamp here. The Job creation log carries
     # the generated name for forensic lookup. A future improvement could

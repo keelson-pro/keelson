@@ -27,14 +27,16 @@ USAGE
 probe_liveness() {
     local max_age=${KEELSON_HEARTBEAT_MAX_AGE:?KEELSON_HEARTBEAT_MAX_AGE required}
     if ! status_heartbeat_fresh "$max_age"; then
-        log_error probe-liveness-fail max-age="$max_age" file="$KEELSON_STATUS_FILE"
+        log_error probe-liveness-fail max-age="$max_age" file="$KEELSON_STATUS_FILE" \
+            msg="Liveness probe failed: status file '$KEELSON_STATUS_FILE' heartbeat is older than ${max_age}s."
         return 1
     fi
 }
 
 probe_readiness() {
     if ! status_all_watchers_alive; then
-        log_error probe-readiness-fail file="$KEELSON_STATUS_FILE"
+        log_error probe-readiness-fail file="$KEELSON_STATUS_FILE" \
+            msg="Readiness probe failed: not all watcher PIDs in '$KEELSON_STATUS_FILE' are alive."
         return 1
     fi
 }

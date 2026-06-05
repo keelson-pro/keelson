@@ -22,7 +22,7 @@ update_patch_json() {
             printf '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"containers":[{"name":"%s","image":"%s"}]}}}}}}' \
                 "$container" "$image"
             ;;
-        Deployment|StatefulSet|DaemonSet|ReplicaSet)
+        Deployment|StatefulSet|DaemonSet)
             printf '{"spec":{"template":{"spec":{"containers":[{"name":"%s","image":"%s"}]}}}}' \
                 "$container" "$image"
             ;;
@@ -37,7 +37,7 @@ update_patch_json() {
 update_apiversion() {
     case "$1" in
         CronJob) printf 'batch/v1' ;;
-        Deployment|StatefulSet|DaemonSet|ReplicaSet) printf 'apps/v1' ;;
+        Deployment|StatefulSet|DaemonSet) printf 'apps/v1' ;;
         *) return 1 ;;
     esac
 }
@@ -94,14 +94,14 @@ update_fetch_managed_fields() {
         | yq -p=json -o=json '.metadata.managedFields // []' 2>/dev/null
 }
 
-# update_apply <kind> <namespace> <name> <container> <new-image> [managed-fields-json]
+# update_apply <kind> <namespace> <name> <container> <new-image> <from-tag> [managed-fields-json]
 # Detects the existing image-field owner and mimics it: SSA for Apply
 # operation, strategic-merge patch for Update operation, "keelson" Update
 # fallback when no manager claims the field. Logs update-applied or
 # update-failed (with the manager/operation pair) and returns 0/1.
 update_apply() {
-    local kind=$1 ns=$2 name=$3 container=$4 image=$5
-    local mf_json=${6:-}
+    local kind=$1 ns=$2 name=$3 container=$4 image=$5 from_tag=$6
+    local mf_json=${7:-}
     if [ -z "$mf_json" ]; then
         mf_json=$(update_fetch_managed_fields "$kind" "$ns" "$name")
     fi
@@ -113,68 +113,93 @@ update_apply() {
     fi
     case "$operation" in
         Apply)
-            update_apply_ssa "$kind" "$ns" "$name" "$container" "$image" "$manager"
+            update_apply_ssa "$kind" "$ns" "$name" "$container" "$image" "$manager" "$from_tag"
             ;;
         Update|*)
-            update_apply_patch "$kind" "$ns" "$name" "$container" "$image" "$manager"
+            update_apply_patch "$kind" "$ns" "$name" "$container" "$image" "$manager" "$from_tag"
             ;;
     esac
 }
 
 update_apply_patch() {
-    local kind=$1 ns=$2 name=$3 container=$4 image=$5 manager=$6
+    local kind=$1 ns=$2 name=$3 container=$4 image=$5 manager=$6 from_tag=$7
+    local to_tag=${image##*:} repo=${image%:*}
     local patch
     if ! patch=$(update_patch_json "$kind" "$container" "$image"); then
-        log_error update-unsupported-kind kind="$kind" ns="$ns" name="$name"
+        log_error update-unsupported-kind kind="$kind" ns="$ns" name="$name" \
+            msg="Cannot update $kind '$name' in '$ns': kind not supported."
         return 1
     fi
     if kubectl patch "$kind" "$name" -n "$ns" \
             --type=strategic --field-manager="$manager" \
             --patch "$patch" >/dev/null 2>&1; then
-        log_info update-applied \
+        log_info_always update-applied \
             kind="$kind" ns="$ns" name="$name" container="$container" \
-            image="$image" manager="$manager" operation=Update
+            image="$image" from="$from_tag" to="$to_tag" repo="$repo" \
+            manager="$manager" operation=Update \
+            msg="$kind '$name' in '$ns' updated from $from_tag to $to_tag for image '$repo'."
         return 0
     fi
     log_error update-failed \
         kind="$kind" ns="$ns" name="$name" container="$container" \
-        image="$image" manager="$manager" operation=Update
+        image="$image" manager="$manager" operation=Update \
+        msg="Could not patch $kind '$name'/$container in '$ns' to image '$image' (manager '$manager', operation Update)."
     return 1
 }
 
 update_apply_ssa() {
-    local kind=$1 ns=$2 name=$3 container=$4 image=$5 manager=$6
+    local kind=$1 ns=$2 name=$3 container=$4 image=$5 manager=$6 from_tag=$7
+    local to_tag=${image##*:} repo=${image%:*}
     local manifest
     if ! manifest=$(update_minimal_manifest "$kind" "$ns" "$name" "$container" "$image"); then
-        log_error update-unsupported-kind kind="$kind" ns="$ns" name="$name"
+        log_error update-unsupported-kind kind="$kind" ns="$ns" name="$name" \
+            msg="Cannot update $kind '$name' in '$ns': kind not supported."
         return 1
     fi
     if printf '%s' "$manifest" | kubectl apply --server-side \
             --field-manager="$manager" --force-conflicts -f - >/dev/null 2>&1; then
-        log_info update-applied \
+        log_info_always update-applied \
             kind="$kind" ns="$ns" name="$name" container="$container" \
-            image="$image" manager="$manager" operation=Apply
+            image="$image" from="$from_tag" to="$to_tag" repo="$repo" \
+            manager="$manager" operation=Apply \
+            msg="$kind '$name' in '$ns' updated from $from_tag to $to_tag for image '$repo'."
         return 0
     fi
     log_error update-failed \
         kind="$kind" ns="$ns" name="$name" container="$container" \
-        image="$image" manager="$manager" operation=Apply
+        image="$image" manager="$manager" operation=Apply \
+        msg="Could not server-side apply $kind '$name'/$container in '$ns' to image '$image' (manager '$manager', operation Apply)."
     return 1
 }
 
-# update_trigger_cronjob <namespace> <cronjob-name>
+# update_trigger_cronjob <namespace> <cronjob-name> [<from-tag> <to-tag> <repo>]
 # Creates a one-shot Job from the CronJob, named "<cronjob>-keelson-<ts>".
 # Logs cronjob-job-triggered or cronjob-job-trigger-failed. Returns 0/1.
+# When from/to/repo are supplied (a scan-triggered update preceded this), the
+# log sentence includes the version delta; otherwise it stays concise.
 update_trigger_cronjob() {
-    local ns=$1 name=$2
+    local ns=$1 name=$2 from_tag=${3:-} to_tag=${4:-} repo=${5:-}
     local ts job_name
-    ts=$(date -u +%Y%m%d%H%M%S)
-    job_name="${name}-keelson-${ts}"
+    # Match the K8s CronJob controller naming: <cronjob>-<unix-seconds>.
+    # No "keelson" infix - operators expect Job names that read like any
+    # other Job they create with `kubectl create job --from=cronjob/...`.
+    ts=$(date -u +%s)
+    job_name="${name}-${ts}"
+    local msg
+    if [ -n "$from_tag" ] && [ -n "$to_tag" ] && [ -n "$repo" ]; then
+        msg="Job '$job_name' created from CronJob '$name' in '$ns' with update from $from_tag to $to_tag for image '$repo'."
+    else
+        msg="Job '$job_name' created from CronJob '$name' in '$ns'."
+    fi
     if kubectl create job "$job_name" \
             --from="cronjob/$name" -n "$ns" >/dev/null 2>&1; then
-        log_info cronjob-job-triggered ns="$ns" name="$name" job="$job_name"
+        log_info_always cronjob-job-triggered \
+            ns="$ns" name="$name" job="$job_name" \
+            from="$from_tag" to="$to_tag" repo="$repo" \
+            msg="$msg"
         return 0
     fi
-    log_error cronjob-job-trigger-failed ns="$ns" name="$name" job="$job_name"
+    log_error cronjob-job-trigger-failed ns="$ns" name="$name" job="$job_name" \
+        msg="Could not create Job '$job_name' from CronJob '$name' in '$ns'."
     return 1
 }

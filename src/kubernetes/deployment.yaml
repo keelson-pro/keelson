@@ -3,6 +3,7 @@ kind: Deployment
 metadata:
   name: ${ProjectName}
   namespace: ${Environment}
+  version: ${Version}
 spec:
   # Single replica + Recreate strategy: Keelson is the sole writer to keelson-state,
   # and the directory-based work queue lives on the pod filesystem.
@@ -35,6 +36,8 @@ spec:
               drop:
                 - ALL
           env:
+            - name: KEELSON_VERSION
+              value: '${Version}'
             - name: KEELSON_LOG_FORMAT
               value: "${Keelson/LogFormat}"
             - name: KEELSON_LOG_LEVEL
@@ -65,6 +68,18 @@ spec:
               value: "${Keelson/WatcherReconnectMax}"
             - name: KEELSON_STATE_CONFIGMAP
               value: "${Keelson/StateConfigMap}"
+            - name: KEELSON_LOG_DEBUG_REPEAT_INTERVAL
+              value: "${Keelson/LogDebugRepeatInterval}"
+            - name: KEELSON_LOG_INFO_REPEAT_INTERVAL
+              value: "${Keelson/LogInfoRepeatInterval}"
+            - name: KEELSON_LOG_WARN_REPEAT_INTERVAL
+              value: "${Keelson/LogWarnRepeatInterval}"
+            - name: KEELSON_LOG_ERROR_REPEAT_INTERVAL
+              value: "${Keelson/LogErrorRepeatInterval}"
+            - name: KEELSON_LOG_FILE_MAX_BYTES
+              value: "${Keelson/LogFileMaxBytes}"
+            - name: KEELSON_LOG_FILE_KEEP
+              value: "${Keelson/LogFileKeep}"
           startupProbe:
             exec:
               command: ["keelson-probe", "startup"]

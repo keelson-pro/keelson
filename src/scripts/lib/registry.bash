@@ -33,6 +33,10 @@
 declare -gA _REGISTRY_CONFIG_CACHE=()
 declare -g _REGISTRY_CONFIG_LOADED=0
 declare -g _REGISTRY_OWN_NAMESPACE=""
+# Last skopeo failure reason (one line). Set by registry_list_tags on
+# failure so callers can surface a hint in their error log instead of an
+# opaque "could not list tags". Cleared on success.
+declare -g REGISTRY_LAST_ERROR=""
 
 # Fixed mount location for the keelson ConfigMap. Tests reassign after sourcing.
 KEELSON_REGISTRIES_FILE=/configmap/registries.yaml
@@ -162,7 +166,8 @@ registry_creds_secret() {
         ns=$(registry_own_namespace)
     fi
     if [ -z "$ns" ]; then
-        log_error registry-namespace-unknown host="$host"
+        log_error registry-namespace-unknown host="$host" \
+            msg="Could not determine Kubernetes namespace to look up the imagePullSecret for registry '$host' (no override set and Keelson's own namespace could not be read from the ServiceAccount mount)."
         return 1
     fi
     registry_creds_from_named_secret "$host" "$ns" "$host"
@@ -257,15 +262,28 @@ registry_creds_azure_wi() {
 }
 
 # registry_list_tags <image-ref> [creds]
-# Echoes one tag per line. Returns non-zero on registry error.
+# Echoes one tag per line. Returns non-zero on registry error and sets
+# REGISTRY_LAST_ERROR to a one-line excerpt of skopeo's stderr so the
+# caller can surface a useful hint instead of a generic failure.
 registry_list_tags() {
     local image=$1 creds=${2:-}
-    local repo out
+    local repo out tmperr
     repo=$(image_repo "$image")
+    tmperr=$(mktemp 2>/dev/null) || tmperr=""
+    REGISTRY_LAST_ERROR=""
     if [ -n "$creds" ]; then
-        out=$(skopeo list-tags --creds="$creds" "docker://${repo}" 2>/dev/null) || return 1
+        if ! out=$(skopeo list-tags --creds="$creds" "docker://${repo}" 2>"${tmperr:-/dev/null}"); then
+            [ -n "$tmperr" ] && REGISTRY_LAST_ERROR=$(head -c 200 "$tmperr" 2>/dev/null | tr '\n' ' ' | tr -s ' ')
+            [ -n "$tmperr" ] && rm -f "$tmperr"
+            return 1
+        fi
     else
-        out=$(skopeo list-tags "docker://${repo}" 2>/dev/null) || return 1
+        if ! out=$(skopeo list-tags "docker://${repo}" 2>"${tmperr:-/dev/null}"); then
+            [ -n "$tmperr" ] && REGISTRY_LAST_ERROR=$(head -c 200 "$tmperr" 2>/dev/null | tr '\n' ' ' | tr -s ' ')
+            [ -n "$tmperr" ] && rm -f "$tmperr"
+            return 1
+        fi
     fi
+    [ -n "$tmperr" ] && rm -f "$tmperr"
     printf '%s' "$out" | yq -p=json '.Tags[]'
 }
