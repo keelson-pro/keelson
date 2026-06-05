@@ -22,9 +22,11 @@ illustrates the issue. No progress in over 7 years since the ticket was opened.
 
 ## Contents
 
-- **Scripts** (`src/scripts`) - bash runtime.
-- **Library** (`src/scripts/lib`) - bash scripts sourced by runtime scripts
+- **Scripts** (`src/scripts`) - bash runtime entry points.
+- **Library** (`src/scripts/lib`) - bash scripts sourced by runtime scripts.
 - **Manifests** (`src/kubernetes/` and generated) - templated with `${Environment}`.
+- **Defaults** (`src/defaults/`) - shipped values that populate the Deployment env so a vanilla install just works.
+- **Tests** (`src/tests/`) - the BATS suite covering the library code.
 
 
 ## Tech stack
@@ -35,5 +37,12 @@ Bash, kubectl, yq 4, skopeo. Everything runs in containers. Tests: BATS. Lint: s
 ## Configuration
 
 See [Configuration.md](Configuration.md) for environment variables, the
-`registries.yaml` shape and auth modes, and the per-workload annotations
-Keelson honours.
+`registries.yaml` shape and auth modes, the per-workload annotations
+Keelson honours, and the logging philosophy and per-level event tables.
+
+
+## Runtime
+
+See [EntryPoints.md](EntryPoints.md) for the five executable scripts in
+`src/scripts/` — what calls them, with what arguments, and how they fit
+together at runtime.

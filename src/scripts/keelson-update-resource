@@ -16,7 +16,7 @@ usage() {
 Usage: keelson-update-resource <kind> <namespace> <name> <container> <new-image>
 
 Strategic-merge patch the named container's image on the named workload.
-Supports Deployment, StatefulSet, DaemonSet, ReplicaSet, CronJob.
+Supports Deployment, StatefulSet, DaemonSet, CronJob.
 USAGE
 }
 

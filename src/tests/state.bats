@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 # Tests for lib/state.bash. kubectl is shimmed via $TMP_BIN on PATH.
+# The state ConfigMap now carries only the CronJob always-once trigger ledger.
 
 setup() {
     TMP_DIR=$(mktemp -d)
@@ -11,8 +12,9 @@ setup() {
 
     KEELSON_SA_NAMESPACE_FILE="$TMP_DIR/ns"
     printf 'keelson-system' > "$KEELSON_SA_NAMESPACE_FILE"
-    export KEELSON_SA_NAMESPACE_FILE
-    unset KEELSON_STATE_NAMESPACE KEELSON_STATE_CONFIGMAP
+    KEELSON_STATE_CONFIGMAP=keelson-state
+    export KEELSON_SA_NAMESPACE_FILE KEELSON_STATE_CONFIGMAP
+    unset KEELSON_STATE_NAMESPACE
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash
@@ -51,7 +53,6 @@ case "$1 $2" in
         ;;
     "patch configmap")
         echo "$@" >>"$TMP_DIR/kubectl.log"
-        # Capture the --patch payload (positional, after --patch flag)
         while [ $# -gt 0 ]; do
             if [ "$1" = "--patch" ]; then
                 printf '%s' "$2" >"$TMP_DIR/patch.json"
@@ -67,11 +68,6 @@ SH
 }
 
 # --- keys ---
-
-@test "state_container_key" {
-    run state_container_key Deployment default app main
-    [ "$output" = "c--Deployment--default--app--main" ]
-}
 
 @test "state_trigger_key" {
     run state_trigger_key CronJob default cron
@@ -104,24 +100,24 @@ SH
     rm -f "$KEELSON_SA_NAMESPACE_FILE"
     run emit state_init
     [ "$status" -eq 1 ]
-    [[ "$output" == *"state-namespace-unknown"* ]]
+    [[ "$output" == *"could not read Keelson's own namespace"* ]]
 }
 
 @test "state_init: creates ConfigMap when absent" {
     install_default_kubectl
     run emit state_init
     [ "$status" -eq 0 ]
-    [[ "$output" == *"state-configmap-created"* ]]
+    [[ "$output" == *"State ConfigMap 'keelson-state' created in 'keelson-system'."* ]]
     [ -f "$TMP_DIR/cm.json" ]
 }
 
-@test "state_init: loads existing ConfigMap data into cache" {
+@test "state_init: loads existing ConfigMap trigger data into cache" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 case "$1 $2" in
     "get configmap")
         cat <<'JSON'
-{"metadata":{"resourceVersion":"42"},"data":{"c--Deployment--default--app--main":"{\"checked-tag\":\"1.2.3\",\"checked-at\":\"2026-05-19T10:00:00Z\"}"}}
+{"metadata":{"resourceVersion":"42"},"data":{"j--CronJob--default--cron":"{\"triggered-job\":\"2026-05-19T10:00:00Z\",\"triggered-at\":\"2026-05-19T10:00:00Z\"}"}}
 JSON
         exit 0
         ;;
@@ -129,21 +125,13 @@ esac
 exit 0
 SH
     state_init
-    run state_get_container_field Deployment default app main checked-tag
-    [ "$output" = "1.2.3" ]
-    run state_get_container_field Deployment default app main checked-at
+    run state_get_trigger_field CronJob default cron triggered-job
+    [ "$output" = "2026-05-19T10:00:00Z" ]
+    run state_get_trigger_field CronJob default cron triggered-at
     [ "$output" = "2026-05-19T10:00:00Z" ]
 }
 
 # --- get/set ---
-
-@test "state_set/get_container_field round-trips" {
-    install_default_kubectl
-    state_init
-    state_set_container_field Deployment default app main checked-tag 1.0.0
-    run state_get_container_field Deployment default app main checked-tag
-    [ "$output" = "1.0.0" ]
-}
 
 @test "state_set/get_trigger_field round-trips" {
     install_default_kubectl
@@ -153,18 +141,18 @@ SH
     [ "$output" = "cron-keelson-20260519" ]
 }
 
-@test "state_get_container_field: missing field returns empty" {
+@test "state_get_trigger_field: missing field returns empty" {
     install_default_kubectl
     state_init
-    run state_get_container_field Deployment default app main checked-tag
+    run state_get_trigger_field CronJob default cron triggered-job
     [ -z "$output" ]
 }
 
 @test "state_set marks the data-key dirty" {
     install_default_kubectl
     state_init
-    state_set_container_field Deployment default app main checked-tag 1.0.0
-    [ "${STATE_DIRTY[c--Deployment--default--app--main]}" = "1" ]
+    state_set_trigger_field CronJob default cron triggered-job val
+    [ "${STATE_DIRTY[j--CronJob--default--cron]}" = "1" ]
 }
 
 # --- state_clear_cache ---
@@ -172,7 +160,7 @@ SH
 @test "state_clear_cache wipes fields, keys, dirty" {
     install_default_kubectl
     state_init
-    state_set_container_field Deployment default app main checked-tag 1.0.0
+    state_set_trigger_field CronJob default cron triggered-job val
     state_clear_cache
     [ "${#STATE_FIELDS[@]}" -eq 0 ]
     [ "${#STATE_KEYS[@]}" -eq 0 ]
@@ -198,21 +186,20 @@ SH
 @test "state_flush: dirty keys -> kubectl patch with merge patch" {
     install_default_kubectl
     state_init
-    state_set_container_field Deployment default app main checked-tag 1.0.0
-    state_set_container_field Deployment default app main checked-at 2026-05-19T10:00:00Z
+    state_set_trigger_field CronJob default cron triggered-job cron-keelson-1
+    state_set_trigger_field CronJob default cron triggered-at 2026-05-19T10:00:00Z
     run emit state_flush
     [ "$status" -eq 0 ]
-    [[ "$output" == *"state-flushed"* ]]
     [[ "$(cat "$TMP_DIR/kubectl.log")" == *"patch configmap keelson-state"* ]]
     [[ "$(cat "$TMP_DIR/kubectl.log")" == *"--type=merge"* ]]
-    grep -q '"c--Deployment--default--app--main"' "$TMP_DIR/patch.json"
-    grep -q 'checked-tag' "$TMP_DIR/patch.json"
+    grep -q '"j--CronJob--default--cron"' "$TMP_DIR/patch.json"
+    grep -q 'triggered-job' "$TMP_DIR/patch.json"
 }
 
 @test "state_flush: success clears the dirty set" {
     install_default_kubectl
     state_init
-    state_set_container_field Deployment default app main checked-tag 1.0.0
+    state_set_trigger_field CronJob default cron triggered-job v
     state_flush
     [ "${#STATE_DIRTY[@]}" -eq 0 ]
 }
@@ -227,33 +214,31 @@ esac
 exit 0
 SH
     state_init
-    state_set_container_field Deployment default app main checked-tag 1.0.0
+    state_set_trigger_field CronJob default cron triggered-job v
     run emit state_flush
     [ "$status" -eq 1 ]
-    [[ "$output" == *"state-flush-failed"* ]]
-    [ "${STATE_DIRTY[c--Deployment--default--app--main]}" = "1" ]
+    [[ "$output" == *"State flush failed:"* ]]
+    [ "${STATE_DIRTY[j--CronJob--default--cron]}" = "1" ]
 }
 
 @test "state_flush: empty value fields are dropped from rendered JSON" {
     install_default_kubectl
     state_init
-    state_set_container_field Deployment default app main checked-tag 1.0.0
-    state_set_container_field Deployment default app main skip-reason ""
+    state_set_trigger_field CronJob default cron triggered-job v
+    state_set_trigger_field CronJob default cron triggered-at ""
     state_flush
-    ! grep -q "skip-reason" "$TMP_DIR/patch.json"
-    grep -q "checked-tag" "$TMP_DIR/patch.json"
+    ! grep -q "triggered-at" "$TMP_DIR/patch.json"
+    grep -q "triggered-job" "$TMP_DIR/patch.json"
 }
 
 @test "state_flush: patch round-trips through yq to original value" {
     install_default_kubectl
     state_init
-    state_set_container_field Deployment default app main error-detail 'has "quote" and \slash'
+    state_set_trigger_field CronJob default cron triggered-job 'has "quote" and \slash'
     state_flush
-    # Outer patch is JSON; data value is itself a JSON string. yq -r once
-    # gives us the inner JSON object, then again gives us the field value.
     local inner round_tripped
-    inner=$(yq -p=json -r '.data["c--Deployment--default--app--main"]' \
+    inner=$(yq -p=json -r '.data["j--CronJob--default--cron"]' \
         "$TMP_DIR/patch.json")
-    round_tripped=$(printf '%s' "$inner" | yq -p=json -r '."error-detail"')
+    round_tripped=$(printf '%s' "$inner" | yq -p=json -r '."triggered-job"')
     [ "$round_tripped" = 'has "quote" and \slash' ]
 }

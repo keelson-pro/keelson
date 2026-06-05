@@ -12,7 +12,8 @@ setup() {
     source "${SCRIPT_DIR}/lib/policy.bash"
     # shellcheck source=../scripts/lib/eligibility.bash
     source "${SCRIPT_DIR}/lib/eligibility.bash"
-    unset KEELSON_CONFIG_MODE
+    KEELSON_CONFIG_MODE=keelson
+    export KEELSON_CONFIG_MODE
 }
 
 @test "eligible: minor policy + 3-segment tag" {

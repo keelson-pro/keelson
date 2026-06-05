@@ -1,16 +1,21 @@
 # kubectl helpers and per-kind path resolution.
 # Sourced; not directly executable.
 #
-# Watched kinds (Stage 3): Deployment, StatefulSet, DaemonSet, ReplicaSet, CronJob.
+# Watched kinds: Deployment, StatefulSet, DaemonSet, CronJob.
+# ReplicaSet is intentionally NOT watched: a Deployment-owned ReplicaSet
+# inherits the Deployment's annotations, so watching both would cause
+# Keelson to operate on the same container twice. Bare ReplicaSets (no
+# Deployment) are not supported; convert them to a Deployment first.
 # Rollouts deferred to the listener stage.
 
-KEELSON_WATCHED_KINDS="${KEELSON_WATCHED_KINDS:-Deployment StatefulSet DaemonSet ReplicaSet CronJob}"
+# KEELSON_WATCHED_KINDS is required at runtime; validate_config enforces it
+# at boot. Module-level reads would block --help so we defer the check.
 
 # workload_list_kind <kind>
 # Echoes the kubectl JSON list for <kind>, scope-aware (KEELSON_SCOPE).
 workload_list_kind() {
     local kind=$1
-    case "${KEELSON_SCOPE:-cluster}" in
+    case "${KEELSON_SCOPE:?KEELSON_SCOPE required}" in
         namespace)
             kubectl get "$kind" \
                 -n "${KEELSON_NAMESPACE:?KEELSON_NAMESPACE required when KEELSON_SCOPE=namespace}" \
@@ -31,7 +36,7 @@ workload_pod_spec_path() {
         CronJob)
             printf '.spec.jobTemplate.spec.template.spec'
             ;;
-        Deployment|StatefulSet|DaemonSet|ReplicaSet)
+        Deployment|StatefulSet|DaemonSet)
             printf '.spec.template.spec'
             ;;
         *)

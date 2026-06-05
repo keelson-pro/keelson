@@ -51,7 +51,13 @@ main() {
     done
 
     if [ "$apply" -eq 1 ]; then
-        state_init || log_warn state-init-failed continuing-without-dedupe=1
+        if ! state_init; then
+            log_warn state-init-failed \
+                configmap="${KEELSON_STATE_CONFIGMAP:-keelson-state}" \
+                ns="${STATE_NAMESPACE:-${KEELSON_STATE_NAMESPACE:-unknown}}" \
+                continuing-without-trigger-state=1 \
+                msg="State init failed, could not create ConfigMap '${KEELSON_STATE_CONFIGMAP:-keelson-state}' in '${STATE_NAMESPACE:-${KEELSON_STATE_NAMESPACE:-unknown}}'; continuing without trigger-state."
+        fi
     fi
 
     scan_run "$apply"

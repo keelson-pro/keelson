@@ -7,6 +7,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/log.bash
 source "${SCRIPT_DIR}/lib/log.bash"
+# shellcheck source=lib/validate.bash
+source "${SCRIPT_DIR}/lib/validate.bash"
 # shellcheck source=lib/policy.bash
 source "${SCRIPT_DIR}/lib/policy.bash"
 # shellcheck source=lib/image.bash
@@ -31,10 +33,10 @@ source "${SCRIPT_DIR}/lib/scan.bash"
 source "${SCRIPT_DIR}/lib/queue.bash"
 # shellcheck source=lib/watch.bash
 source "${SCRIPT_DIR}/lib/watch.bash"
+# shellcheck source=lib/status.bash
+source "${SCRIPT_DIR}/lib/status.bash"
 # shellcheck source=lib/loop.bash
 source "${SCRIPT_DIR}/lib/loop.bash"
-
-WATCHER_PIDS=()
 
 usage() {
     cat <<'USAGE'
@@ -44,18 +46,15 @@ Run the Keelson controller. Streams watch events for managed workloads,
 runs a periodic full scan, and patches workloads when a newer tag meets
 the configured policy.
 
-Configuration is via env (see KEELSON_* in KeelsonConfigurationDesign.md).
+Configuration is via env (see KEELSON_* in Configuration.md).
 USAGE
 }
 
 shutdown() {
-    log_info shutdown signal="${1:-unknown}"
-    local pid
-    for pid in "${WATCHER_PIDS[@]:-}"; do
-        if [ -n "$pid" ]; then
-            kill "$pid" 2>/dev/null || true
-        fi
-    done
+    local sig=${1:-unknown}
+    log_info_always shutdown signal="$sig" \
+        msg="Keelson shutting down on signal $sig."
+    loop_kill_children
     exit 0
 }
 
@@ -64,25 +63,29 @@ main() {
         -h|--help) usage; return 0 ;;
     esac
 
-    log_info boot \
-        version="${KEELSON_VERSION:-dev}" \
-        scope="${KEELSON_SCOPE:-cluster}" \
-        config-mode="${KEELSON_CONFIG_MODE:-keelson}" \
-        poll-interval="${KEELSON_POLL_INTERVAL:-60}" \
-        dry-run="${KEELSON_DRY_RUN:-0}"
+    validate_config
 
-    trap 'shutdown TERM' TERM
-    trap 'shutdown INT' INT
+    log_info_always boot \
+        version="${KEELSON_VERSION:-0.0.0-DEV-VERSION}" \
+        scope="$KEELSON_SCOPE" \
+        config-mode="$KEELSON_CONFIG_MODE" \
+        poll-interval="$KEELSON_POLL_INTERVAL" \
+        tick-interval="$KEELSON_TICK_INTERVAL" \
+        dry-run="${KEELSON_DRY_RUN:-0}" \
+        msg="Keelson ${KEELSON_VERSION:-0.0.0-DEV-VERSION} booting in '$KEELSON_SCOPE' scope (config-mode='$KEELSON_CONFIG_MODE', poll-interval=${KEELSON_POLL_INTERVAL}s, tick-interval=${KEELSON_TICK_INTERVAL}s, dry-run=${KEELSON_DRY_RUN:-0})."
+
+    trap 'shutdown SIGTERM' TERM
+    trap 'shutdown SIGINT' INT
 
     queue_init
-    state_init || log_warn state-init-failed continuing-without-dedupe=1
+    if ! state_init; then
+        log_warn state-init-failed \
+            configmap="${KEELSON_STATE_CONFIGMAP:-keelson-state}" \
+            ns="${STATE_NAMESPACE:-${KEELSON_STATE_NAMESPACE:-unknown}}" \
+            continuing-without-trigger-state=1 \
+            msg="State init failed, could not create ConfigMap '${KEELSON_STATE_CONFIGMAP:-keelson-state}' in '${STATE_NAMESPACE:-${KEELSON_STATE_NAMESPACE:-unknown}}'; continuing without trigger-state."
+    fi
 
-    local pid
-    while IFS= read -r pid; do
-        [ -n "$pid" ] && WATCHER_PIDS+=("$pid")
-    done < <(watch_start_all)
-
-    loop_mark_ready
     loop_run
 }
 

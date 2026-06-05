@@ -2,6 +2,9 @@
 
 setup() {
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
+    KEELSON_WATCHED_KINDS="Deployment StatefulSet DaemonSet CronJob"
+    KEELSON_SCOPE=cluster
+    export KEELSON_WATCHED_KINDS KEELSON_SCOPE
     # shellcheck source=../scripts/lib/workload.bash
     source "${SCRIPT_DIR}/lib/workload.bash"
 }
@@ -22,12 +25,6 @@ setup() {
 
 @test "pod_spec_path: DaemonSet" {
     run workload_pod_spec_path DaemonSet
-    [ "$status" -eq 0 ]
-    [ "$output" = ".spec.template.spec" ]
-}
-
-@test "pod_spec_path: ReplicaSet" {
-    run workload_pod_spec_path ReplicaSet
     [ "$status" -eq 0 ]
     [ "$output" = ".spec.template.spec" ]
 }

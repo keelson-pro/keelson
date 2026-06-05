@@ -6,7 +6,9 @@ setup() {
     source "${SCRIPT_DIR}/lib/log.bash"
     # shellcheck source=../scripts/lib/annotations.bash
     source "${SCRIPT_DIR}/lib/annotations.bash"
-    unset KEELSON_CONFIG_MODE KEELSON_LOG_FORMAT KEELSON_LOG_LEVEL
+    unset KEELSON_LOG_FORMAT KEELSON_LOG_LEVEL
+    KEELSON_CONFIG_MODE=keelson
+    export KEELSON_CONFIG_MODE
 }
 
 KEELSON_LINES='keelson.pro/policy=minor

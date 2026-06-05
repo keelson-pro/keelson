@@ -7,9 +7,9 @@
 # from authoritative cluster state, so the watcher stays dumb.
 #
 # Configuration:
-#   KEELSON_WATCH_BACKOFF_INITIAL   first reconnect delay, seconds (default 2)
-#   KEELSON_WATCH_BACKOFF_MAX       cap, seconds                  (default 60)
-#   KEELSON_WATCH_MAX_ITERATIONS    0 = loop forever (default); >0 for tests
+#   KEELSON_WATCHER_RECONNECT_INITIAL  first reconnect delay, seconds (required)
+#   KEELSON_WATCHER_RECONNECT_MAX      cap, seconds                  (required)
+#   KEELSON_WATCH_MAX_ITERATIONS       0 = loop forever (default); >0 for tests
 #
 # Depends on (must be sourced first):
 #   lib/log.bash, lib/queue.bash
@@ -19,14 +19,16 @@
 # until it exits, then sleeps with exponential backoff before retrying.
 watch_run_kind() {
     local kind=$1
-    local backoff=${KEELSON_WATCH_BACKOFF_INITIAL:-2}
-    local cap=${KEELSON_WATCH_BACKOFF_MAX:-60}
+    local backoff=${KEELSON_WATCHER_RECONNECT_INITIAL:?KEELSON_WATCHER_RECONNECT_INITIAL required}
+    local cap=${KEELSON_WATCHER_RECONNECT_MAX:?KEELSON_WATCHER_RECONNECT_MAX required}
     local max_iter=${KEELSON_WATCH_MAX_ITERATIONS:-0}
     local iter=0
     while [ "$max_iter" -eq 0 ] || [ "$iter" -lt "$max_iter" ]; do
-        log_info watch-start kind="$kind"
+        log_info watch-start kind="$kind" \
+            msg="Watching kind '$kind' for changes."
         watch_kubectl_stream "$kind" | watch_handle_events "$kind"
-        log_warn watch-disconnected kind="$kind" backoff="$backoff"
+        log_warn watch-disconnected kind="$kind" backoff="$backoff" \
+            msg="Watch for kind '$kind' disconnected; reconnecting in ${backoff}s."
         sleep "$backoff"
         backoff=$(( backoff * 2 ))
         [ "$backoff" -gt "$cap" ] && backoff=$cap
@@ -39,7 +41,7 @@ watch_run_kind() {
 watch_kubectl_stream() {
     local kind=$1
     local jp='{.metadata.namespace} {.metadata.name}{"\n"}'
-    case "${KEELSON_SCOPE:-cluster}" in
+    case "${KEELSON_SCOPE:?KEELSON_SCOPE required}" in
         namespace)
             kubectl get "$kind" \
                 -n "${KEELSON_NAMESPACE:?KEELSON_NAMESPACE required when KEELSON_SCOPE=namespace}" \

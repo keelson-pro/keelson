@@ -3,6 +3,7 @@ kind: Deployment
 metadata:
   name: ${ProjectName}
   namespace: ${Environment}
+  version: ${Version}
 spec:
   # Single replica + Recreate strategy: Keelson is the sole writer to keelson-state,
   # and the directory-based work queue lives on the pod filesystem.
@@ -35,6 +36,8 @@ spec:
               drop:
                 - ALL
           env:
+            - name: KEELSON_VERSION
+              value: '${Version}'
             - name: KEELSON_LOG_FORMAT
               value: "${Keelson/LogFormat}"
             - name: KEELSON_LOG_LEVEL
@@ -45,6 +48,58 @@ spec:
               value: "${Keelson/ConfigMode}"
             - name: KEELSON_RESPECT_SA_PULL_SECRETS
               value: "${Keelson/RespectServiceAccountPullSecrets}"
+            - name: KEELSON_WATCHED_KINDS
+              value: "${Keelson/WatchedKinds}"
+            - name: KEELSON_POLL_INTERVAL
+              value: "${Keelson/PollInterval}"
+            - name: KEELSON_FULL_REFRESH_INTERVAL
+              value: "${Keelson/FullRefreshInterval}"
+            - name: KEELSON_TICK_INTERVAL
+              value: "${Keelson/TickInterval}"
+            - name: KEELSON_HEARTBEAT_MAX_AGE
+              value: "${Keelson/HeartbeatMaxAge}"
+            - name: KEELSON_WATCHER_BACKOFF_MAX
+              value: "${Keelson/WatcherBackoffMax}"
+            - name: KEELSON_WATCHER_HEALTHY_RESET
+              value: "${Keelson/WatcherHealthyReset}"
+            - name: KEELSON_WATCHER_RECONNECT_INITIAL
+              value: "${Keelson/WatcherReconnectInitial}"
+            - name: KEELSON_WATCHER_RECONNECT_MAX
+              value: "${Keelson/WatcherReconnectMax}"
+            - name: KEELSON_STATE_CONFIGMAP
+              value: "${Keelson/StateConfigMap}"
+            - name: KEELSON_LOG_DEBUG_REPEAT_INTERVAL
+              value: "${Keelson/LogDebugRepeatInterval}"
+            - name: KEELSON_LOG_INFO_REPEAT_INTERVAL
+              value: "${Keelson/LogInfoRepeatInterval}"
+            - name: KEELSON_LOG_WARN_REPEAT_INTERVAL
+              value: "${Keelson/LogWarnRepeatInterval}"
+            - name: KEELSON_LOG_ERROR_REPEAT_INTERVAL
+              value: "${Keelson/LogErrorRepeatInterval}"
+            - name: KEELSON_LOG_FILE_MAX_BYTES
+              value: "${Keelson/LogFileMaxBytes}"
+            - name: KEELSON_LOG_FILE_KEEP
+              value: "${Keelson/LogFileKeep}"
+          startupProbe:
+            exec:
+              command: ["keelson-probe", "startup"]
+            # Allow up to ~2 min for watchers to establish and the first scan
+            # to land. failureThreshold * periodSeconds = budget.
+            periodSeconds: 5
+            failureThreshold: 24
+            timeoutSeconds: 3
+          readinessProbe:
+            exec:
+              command: ["keelson-probe", "readiness"]
+            periodSeconds: 10
+            failureThreshold: 2
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["keelson-probe", "liveness"]
+            periodSeconds: 15
+            failureThreshold: 3
+            timeoutSeconds: 3
           volumeMounts:
             - name: config
               mountPath: /configmap
