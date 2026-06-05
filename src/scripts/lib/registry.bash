@@ -97,7 +97,7 @@ registry_resolve_creds() {
                 printf '%s' "$creds"
                 return 0
             fi
-            if [ "${KEELSON_RESPECT_SA_PULL_SECRETS:-false}" = "true" ] \
+            if [ "${KEELSON_RESPECT_SA_PULL_SECRETS:?KEELSON_RESPECT_SA_PULL_SECRETS required}" = "true" ] \
                     && [ -n "$sa" ]; then
                 if creds=$(registry_creds_from_sa "$sa" "$ns" "$host") \
                         && [ -n "$creds" ]; then

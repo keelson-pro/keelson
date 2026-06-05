@@ -17,6 +17,14 @@ setup() {
     [ -x "${SCRIPT_DIR}/keelson-update-resource" ]
 }
 
+@test "entry script: keelson-validate is executable" {
+    [ -x "${SCRIPT_DIR}/keelson-validate" ]
+}
+
+@test "entry script: keelson-probe is executable" {
+    [ -x "${SCRIPT_DIR}/keelson-probe" ]
+}
+
 @test "entry script: --help on keelson exits 0" {
     run "${SCRIPT_DIR}/keelson" --help
     [ "$status" -eq 0 ]
@@ -31,6 +39,18 @@ setup() {
 
 @test "entry script: --help on keelson-update-resource exits 0" {
     run "${SCRIPT_DIR}/keelson-update-resource" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ Usage: ]]
+}
+
+@test "entry script: --help on keelson-validate exits 0" {
+    run "${SCRIPT_DIR}/keelson-validate" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ Usage: ]]
+}
+
+@test "entry script: --help on keelson-probe exits 0" {
+    run "${SCRIPT_DIR}/keelson-probe" --help
     [ "$status" -eq 0 ]
     [[ "$output" =~ Usage: ]]
 }

@@ -53,7 +53,7 @@ state_trigger_key() {
 # state_init
 # Discover own namespace, ensure ConfigMap exists, load it into the cache.
 state_init() {
-    STATE_CONFIGMAP_NAME="${KEELSON_STATE_CONFIGMAP:-keelson-state}"
+    STATE_CONFIGMAP_NAME="${KEELSON_STATE_CONFIGMAP:?KEELSON_STATE_CONFIGMAP required}"
     if [ -n "${KEELSON_STATE_NAMESPACE:-}" ]; then
         STATE_NAMESPACE="$KEELSON_STATE_NAMESPACE"
     else

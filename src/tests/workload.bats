@@ -2,6 +2,9 @@
 
 setup() {
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
+    KEELSON_WATCHED_KINDS="Deployment StatefulSet DaemonSet ReplicaSet CronJob"
+    KEELSON_SCOPE=cluster
+    export KEELSON_WATCHED_KINDS KEELSON_SCOPE
     # shellcheck source=../scripts/lib/workload.bash
     source "${SCRIPT_DIR}/lib/workload.bash"
 }

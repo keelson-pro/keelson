@@ -9,7 +9,9 @@ setup() {
     TMP_BIN="$TMP_DIR/bin"
     mkdir -p "$TMP_BIN"
     PATH="$TMP_BIN:$PATH"
-    export PATH
+    KEELSON_CONFIG_MODE=keelson
+    KEELSON_RESPECT_SA_PULL_SECRETS=false
+    export PATH KEELSON_CONFIG_MODE KEELSON_RESPECT_SA_PULL_SECRETS
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash

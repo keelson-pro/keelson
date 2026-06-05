@@ -8,7 +8,11 @@ setup() {
     mkdir -p "$TMP_BIN"
     PATH="$TMP_BIN:$PATH"
     KEELSON_WATCHED_KINDS=Deployment
-    export PATH TMP_DIR KEELSON_WATCHED_KINDS
+    KEELSON_SCOPE=cluster
+    KEELSON_WATCHER_RECONNECT_INITIAL=2
+    KEELSON_WATCHER_RECONNECT_MAX=60
+    export PATH TMP_DIR KEELSON_WATCHED_KINDS KEELSON_SCOPE \
+        KEELSON_WATCHER_RECONNECT_INITIAL KEELSON_WATCHER_RECONNECT_MAX
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash
@@ -112,7 +116,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-    KEELSON_WATCH_MAX_ITERATIONS=2 KEELSON_WATCH_BACKOFF_INITIAL=1 \
+    KEELSON_WATCH_MAX_ITERATIONS=2 KEELSON_WATCHER_RECONNECT_INITIAL=1 \
         run emit watch_run_kind Deployment
     [ "$status" -eq 0 ]
     # Two iterations -> two watch-start log lines.
@@ -122,7 +126,7 @@ SH
     [ -f "$KEELSON_QUEUE_DIR/Deployment--default--app" ]
 }
 
-@test "watch_run_kind: backoff caps at KEELSON_WATCH_BACKOFF_MAX" {
+@test "watch_run_kind: backoff caps at KEELSON_WATCHER_RECONNECT_MAX" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -133,8 +137,8 @@ echo "$1" >>"$TMP_DIR/sleeps"
 exit 0
 SH
     KEELSON_WATCH_MAX_ITERATIONS=5 \
-    KEELSON_WATCH_BACKOFF_INITIAL=8 \
-    KEELSON_WATCH_BACKOFF_MAX=10 \
+    KEELSON_WATCHER_RECONNECT_INITIAL=8 \
+    KEELSON_WATCHER_RECONNECT_MAX=10 \
         watch_run_kind Deployment 2>/dev/null
     # Sleeps observed: 8, 10, 10, 10, 10 (clamped after first double)
     [ "$(head -n 1 "$TMP_DIR/sleeps")" = "8" ]

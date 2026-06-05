@@ -4,13 +4,14 @@
 # Watched kinds (Stage 3): Deployment, StatefulSet, DaemonSet, ReplicaSet, CronJob.
 # Rollouts deferred to the listener stage.
 
-KEELSON_WATCHED_KINDS="${KEELSON_WATCHED_KINDS:-Deployment StatefulSet DaemonSet ReplicaSet CronJob}"
+# KEELSON_WATCHED_KINDS is required at runtime; validate_config enforces it
+# at boot. Module-level reads would block --help so we defer the check.
 
 # workload_list_kind <kind>
 # Echoes the kubectl JSON list for <kind>, scope-aware (KEELSON_SCOPE).
 workload_list_kind() {
     local kind=$1
-    case "${KEELSON_SCOPE:-cluster}" in
+    case "${KEELSON_SCOPE:?KEELSON_SCOPE required}" in
         namespace)
             kubectl get "$kind" \
                 -n "${KEELSON_NAMESPACE:?KEELSON_NAMESPACE required when KEELSON_SCOPE=namespace}" \

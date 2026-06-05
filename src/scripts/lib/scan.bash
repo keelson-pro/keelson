@@ -23,8 +23,8 @@ scan_run() {
 
     log_info scan-start \
         mode="$mode" \
-        scope="${KEELSON_SCOPE:-cluster}" \
-        config-mode="${KEELSON_CONFIG_MODE:-keelson}"
+        scope="$KEELSON_SCOPE" \
+        config-mode="$KEELSON_CONFIG_MODE"
 
     registry_init
 

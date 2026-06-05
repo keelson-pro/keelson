@@ -11,8 +11,9 @@ setup() {
 
     KEELSON_SA_NAMESPACE_FILE="$TMP_DIR/ns"
     printf 'keelson-system' > "$KEELSON_SA_NAMESPACE_FILE"
-    export KEELSON_SA_NAMESPACE_FILE
-    unset KEELSON_STATE_NAMESPACE KEELSON_STATE_CONFIGMAP
+    KEELSON_STATE_CONFIGMAP=keelson-state
+    export KEELSON_SA_NAMESPACE_FILE KEELSON_STATE_CONFIGMAP
+    unset KEELSON_STATE_NAMESPACE
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash

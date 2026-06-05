@@ -22,7 +22,7 @@
 #                                      per workload, not both).
 annotation_get() {
     local lines=$1 key=$2 container=${3:-}
-    local mode=${KEELSON_CONFIG_MODE:-keelson}
+    local mode=${KEELSON_CONFIG_MODE:?KEELSON_CONFIG_MODE required}
 
     local keelson_val keel_val keel_key
     keelson_val=""
