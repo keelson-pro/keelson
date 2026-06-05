@@ -9,7 +9,9 @@ Keelson reads configuration from three places, each owned by a different actor:
 
 ## Environment variables
 
-The Helm values (or templated Deployment) feed these directly into the Pod's `env`. Defaults live in `src/defaults/Keelson/`.
+The Helm values (or templated Deployment) feed these directly into the Pod's `env`. Every variable is **required** — the scripts carry no built-in fallbacks, so `keelson-validate` (which `keelson` runs at boot) fails fast when one is missing. Defaults shipped in `src/defaults/Keelson/` populate the Deployment so a vanilla install just works.
+
+### Behaviour
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -18,8 +20,67 @@ The Helm values (or templated Deployment) feed these directly into the Pod's `en
 | `KEELSON_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
 | `KEELSON_LOG_FORMAT` | `plain` | `plain` or `json`. |
 | `KEELSON_RESPECT_SA_PULL_SECRETS` | `false` | Set `true` to walk the workload's ServiceAccount `imagePullSecrets` after the Pod's own, matching what the kubelet sees post-admission. Costs one extra `get sa` per scan. |
+| `KEELSON_WATCHED_KINDS` | `Deployment StatefulSet DaemonSet CronJob` | Space-separated list. Anything not in this set is rejected by `keelson-validate`. ReplicaSets are intentionally excluded: a Deployment-owned ReplicaSet inherits its parent's annotations, so watching both would double-update; bare ReplicaSets are unsupported — convert to a Deployment. |
+| `KEELSON_STATE_CONFIGMAP` | `keelson-state` | Name of the ConfigMap that carries the per-CronJob always-once trigger ledger across pod restarts. |
 
-A few more variables exist for development overrides (queue paths, state ConfigMap name); they default to production values and rarely need changing. See `src/scripts/lib/` for the authoritative list.
+### Tick loop and scan cadence
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `KEELSON_TICK_INTERVAL` | `1` | Seconds between supervisor ticks. Each tick: supervise watchers, drain queue, kick scan if due, write the status file. |
+| `KEELSON_POLL_INTERVAL` | `60` | Seconds between scan starts (measured from the previous scan's start time; long scans queue the next for the very next tick, never overlap). |
+| `KEELSON_FULL_REFRESH_INTERVAL` | `3600` | Seconds between trigger-state cache reloads from the ConfigMap. Picks up any out-of-band edits an operator made. |
+| `KEELSON_HEARTBEAT_MAX_AGE` | `5` | Seconds before the kubelet's liveness probe treats the status file as stale. Keep close to `KEELSON_TICK_INTERVAL` — too generous masks a wedged loop, too tight false-positives on jitter. |
+
+### Watcher supervision
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `KEELSON_WATCHER_BACKOFF_MAX` | `300` | Cap on per-kind respawn delay (s). Failures back off `1, 2, 4, 8...` capped here, CrashLoopBackOff-style. |
+| `KEELSON_WATCHER_HEALTHY_RESET` | `30` | Seconds a watcher must stay alive before its failure count resets to zero. |
+| `KEELSON_WATCHER_RECONNECT_INITIAL` | `2` | Initial delay (s) inside a single watcher before it reconnects to its `kubectl watch` stream. Independent from the supervisor's respawn backoff above — the watcher reconnects in-process when its stream ends. |
+| `KEELSON_WATCHER_RECONNECT_MAX` | `60` | Cap on the in-watcher reconnect delay. |
+
+### Log throttling and the file log
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `KEELSON_LOG_DEBUG_REPEAT_INTERVAL` | `0` | Seconds. The rate limiter suppresses a repeat of the same `(level, event, sorted-kv-pairs)` hash within this window. `0` disables throttling for the level. |
+| `KEELSON_LOG_INFO_REPEAT_INTERVAL` | `120` | Same shape, info level. The throttle-eligible info events are `dry-run-would-update` and `watch-start` (which can fire on every in-watcher reconnect); the rest use `_always` so every event lands. |
+| `KEELSON_LOG_WARN_REPEAT_INTERVAL` | `300` | Warn-level repeats (`watch-disconnected`, `watcher-respawned`) collapse inside this window. |
+| `KEELSON_LOG_ERROR_REPEAT_INTERVAL` | `600` | Error-level repeats (registry/auth failures, kubectl-list failures) collapse inside this window. |
+| `KEELSON_LOG_FILE_MAX_BYTES` | `10485760` | Rotate `/keelson/work/log/keelson.log` once it grows past this many bytes (default 10 MiB). |
+| `KEELSON_LOG_FILE_KEEP` | `5` | Number of rotated `.1, .2, …` files to retain. Older than this are dropped on rotate. |
+
+The file log path is convention, not configuration: `/keelson/work/log/keelson.log` (under the Pod's `emptyDir`).
+
+A misconfigured variable here fails `keelson-validate`, so the Pod refuses to boot rather than running with surprising defaults.
+
+
+## Logging
+
+Better logging is a key promise for the creation of Keelson, this is the logging description.
+
+### Log Philosophy
+
+For the happy path log only what actually changes or goes wrong or things that happen once at startup. For the unhappy paths, warn or error, rate limit as configured by the consumer to a period between the same message being printed so as not not immediately flush away useful information. For debug by default print everythign always - but tunable by the consumer to slow down duplicates to whatever level is configured. For all messages they're in files inside the pod and rotated by size and file count so that you can run default info level logging and still get debug and complete logging by getting inside the pod and reading or tailing the files. By this method it's never confusing what's going on. Enjoy :-)
+
+### Log Levels
+
+`KEELSON_LOG_LEVEL` is a threshold, not a filter set: each level emits its own events **plus everything above it**. Format is controlled separately by `KEELSON_LOG_FORMAT` (`plain` or `json`); the event name and `key=value` pairs are identical either way, so log queries port between the two.
+
+| Level | What it adds on top of the level below | Use it for |
+|---|---|---|
+| `error` | Hard failures Keelson cannot work around on its own. Registry lookups (`registry-creds-failed`, `registry-list-tags-failed`, `registry-namespace-unknown`), scan-time API calls (`kubectl-list-failed`), patch attempts (`update-failed`, `update-unsupported-kind`, `cronjob-job-trigger-failed`, `cronjob-trigger-requires-suspend`), state writes (`state-configmap-create-failed`, `state-flush-failed`, `state-namespace-unknown`), probe failures (`probe-liveness-fail`, `probe-readiness-fail`), and every `validate-*` boot check. | Page-worthy. Persistent errors mean misconfiguration, broken RBAC, or a registry outside Keelson's reach. |
+| `warn` | Everything `error` shows, plus transient faults the controller recovers from on its own. `watch-disconnected` (kubectl stream ended; reconnecting), `watcher-died` and `watcher-respawned` (the supervisor saw a death and is bringing the watcher back), `state-reload-failed` (the scan child continues without the prior trigger state), `state-init-failed` (entry-point ConfigMap load failed; the next tick retries). | Alerting on connectivity churn or noisy backoff loops. Single warns are normal; a steady rate is a signal. |
+| `info` *(default)* | Everything `warn` shows, plus the lean operational journal: only changes and one-shot lifecycle events. `boot`, `shutdown`, `validate-passed`, the initial `watcher-spawned`, `watch-start` (the in-watcher stream open — fires once per reconnect, throttled), `state-configmap-created` (first-boot ledger creation), `update-applied`, `cronjob-job-triggered`, and `dry-run-would-update`. Kept deliberately quiet — a healthy cluster produces little noise and real signals stand out. | The default. An operator should be able to read info logs at the rate Keelson emits them without filters. |
+| `debug` | Everything `info` shows, plus the high-frequency mechanics: `scan-start`/`scan-summary` bookends, every `skip-not-eligible`, `no-change`, and `dry-run-no-change`, every `watch-enqueued`, `queue-item`, and `queue-drained`, every `state-flushed`, and `state-full-refresh`. | Tracing why a particular workload event did or didn't trigger a scan, or why a candidate tag was or wasn't picked. Verbose; not recommended in production. |
+
+The rate limiter hashes `level + event + sorted-kv-pairs` and drops a repeat hit on the same hash within its level's interval. **Unique events** (the ones using the `_always` variant in the code) bypass it: every applied update, every triggered job, every boot/shutdown is logged in full. If a bug ever causes one of these to repeat, the repetition is the signal — not something the limiter masks.
+
+In parallel with stdout/stderr, **every emission is also written to `/keelson/work/log/keelson.log`** in plain format, regardless of `KEELSON_LOG_LEVEL` or throttle state. The file rotates when it grows past `KEELSON_LOG_FILE_MAX_BYTES` and keeps `KEELSON_LOG_FILE_KEEP` numbered backups (`.1, .2, …`). This is the verification trail: inspect it when info-level stdout isn't enough but full `debug` is too much. The file lives on the Pod's `emptyDir`, so it does not survive pod restarts (which is the intended baseline — a restart re-emits the lean info trail).
+
+JSON format adds `ts` and `level` keys to every line; plain format prefixes each line with `<ISO-timestamp> <LEVEL>` followed by the event name and pairs.
 
 
 ## Central registry config
@@ -126,6 +187,10 @@ them yet.
   current release.
 - **HelmRelease (Flux) and other CRD-shaped workloads** — Keelson watches
   only the core kinds listed under `KEELSON_WATCHED_KINDS`
-  (Deployment, StatefulSet, DaemonSet, ReplicaSet, CronJob).
+  (Deployment, StatefulSet, DaemonSet, CronJob).
+- **ReplicaSet** — not watched. A Deployment-owned ReplicaSet inherits
+  the Deployment's annotations and is updated by patching the Deployment;
+  watching ReplicaSets directly would cause the same container to be
+  updated twice. Bare ReplicaSets (no Deployment) are unsupported.
 - **Event-driven `trigger`** — the annotation accepts `default` and `poll`,
   but Keelson only polls. A registry-webhook listener is planned.
