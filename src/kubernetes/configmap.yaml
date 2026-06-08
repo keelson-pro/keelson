@@ -3,6 +3,20 @@ kind: ConfigMap
 metadata:
   name: ${ProjectName}-configmap-checksum
   namespace: ${Environment}
+  labels:
+    kaptain.org/environment: ${Environment}
+    kaptain.org/product: ${ProductName}
+    kaptain.org/project-name: ${ProjectName}
+    kaptain.org/version: "${Version}"
+    kaptain.org/owner: ${RepositoryOwner}
+    app.kubernetes.io/name: ${ProjectName}
+    app.kubernetes.io/instance: ${ProjectName}
+    app.kubernetes.io/version: "${Version}"
+    app.kubernetes.io/managed-by: Kaptain
+    app: ${ProjectName}
+    app.kubernetes.io/part-of: ${ProductName}
+  annotations:
+    kaptain.org/source-repository: ${RepositoryOwner}/${RepositoryName}
 data:
   # Per-registry credential bindings. The map key is the registry host; by
   # convention, for auth-mode "secret" the Kubernetes Secret holding the
