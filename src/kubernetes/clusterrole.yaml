@@ -2,6 +2,20 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: ${ProjectName}-clusterrole-checksum
+  labels:
+    kaptain.org/environment: ${Environment}
+    kaptain.org/product: ${ProductName}
+    kaptain.org/project-name: ${ProjectName}
+    kaptain.org/version: "${Version}"
+    kaptain.org/owner: ${RepositoryOwner}
+    app.kubernetes.io/name: ${ProjectName}
+    app.kubernetes.io/instance: ${ProjectName}
+    app.kubernetes.io/version: "${Version}"
+    app.kubernetes.io/managed-by: Kaptain
+    app: ${ProjectName}
+    app.kubernetes.io/part-of: ${ProductName}
+  annotations:
+    kaptain.org/source-repository: ${RepositoryOwner}/${RepositoryName}
 rules:
   # Workloads Keelson reads, watches, and updates the image on
   - apiGroups: ["apps"]
