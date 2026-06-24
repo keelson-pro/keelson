@@ -11,46 +11,48 @@ Keelson reads configuration from three places, each owned by a different actor:
 
 The Helm values (or templated Deployment) feed these directly into the Pod's `env`. Every variable is **required** — the scripts carry no built-in fallbacks, so `keelson-validate` (which `keelson` runs at boot) fails fast when one is missing. Defaults shipped in `src/defaults/Keelson/` populate the Deployment so a vanilla install just works.
 
+Each row's left cell shows the env var on top and the matching Kaptain token below. If you're deploying with Kaptain, set the token in your `Keelson/…` env config directory; if you're using Helm the same options are available in `values.yaml`; if you're templating manifests another way, set the env var directly.
+
 ### Behaviour
 
-| Variable | Default | Purpose |
+| Env Var / Kaptain Token | Default | Purpose |
 |---|---|---|
-| `KEELSON_SCOPE` | `cluster` | `cluster` watches every namespace; `namespace` watches only the one Keelson runs in. |
-| `KEELSON_CONFIG_MODE` | `keelson` | Which annotation prefix Keelson honours: `keelson` for `keelson.pro/`, `keel` for `keel.sh/` (drop-in mode), or `both` (accept either, reject workloads that mix prefixes). |
-| `KEELSON_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
-| `KEELSON_LOG_FORMAT` | `plain` | `plain` or `json`. |
-| `KEELSON_RESPECT_SA_PULL_SECRETS` | `false` | Set `true` to walk the workload's ServiceAccount `imagePullSecrets` after the Pod's own, matching what the kubelet sees post-admission. Costs one extra `get sa` per scan. |
-| `KEELSON_WATCHED_KINDS` | `Deployment StatefulSet DaemonSet CronJob` | Space-separated list. Anything not in this set is rejected by `keelson-validate`. ReplicaSets are intentionally excluded: a Deployment-owned ReplicaSet inherits its parent's annotations, so watching both would double-update; bare ReplicaSets are unsupported — convert to a Deployment. |
-| `KEELSON_STATE_CONFIGMAP` | `keelson-state` | Name of the ConfigMap that carries the per-CronJob always-once trigger ledger across pod restarts. |
+| `KEELSON_SCOPE`<br>`Keelson/Scope` | `cluster` | `cluster` watches every namespace; `namespace` watches only the one Keelson runs in. |
+| `KEELSON_CONFIG_MODE`<br>`Keelson/ConfigMode` | `keelson` | Which annotation prefix Keelson honours: `keelson` for `keelson.pro/`, `keel` for `keel.sh/` (drop-in mode), or `both` (accept either, reject workloads that mix prefixes). |
+| `KEELSON_LOG_LEVEL`<br>`Keelson/LogLevel` | `info` | `debug`, `info`, `warn`, `error`. |
+| `KEELSON_LOG_FORMAT`<br>`Keelson/LogFormat` | `plain` | `plain` or `json`. |
+| `KEELSON_RESPECT_SA_PULL_SECRETS`<br>`Keelson/RespectServiceAccountPullSecrets` | `false` | Set `true` to walk the workload's ServiceAccount `imagePullSecrets` after the Pod's own, matching what the kubelet sees post-admission. Costs one extra `get sa` per scan. |
+| `KEELSON_WATCHED_KINDS`<br>`Keelson/WatchedKinds` | `Deployment StatefulSet DaemonSet CronJob` | Space-separated list. Anything not in this set is rejected by `keelson-validate`. ReplicaSets are intentionally excluded: a Deployment-owned ReplicaSet inherits its parent's annotations, so watching both would double-update; bare ReplicaSets are unsupported — convert to a Deployment. |
+| `KEELSON_STATE_CONFIGMAP`<br>`Keelson/StateConfigMap` | `keelson-state` | Name of the ConfigMap that carries the per-CronJob always-once trigger ledger across pod restarts. |
 
 ### Tick loop and scan cadence
 
-| Variable | Default | Purpose |
+| Env Var / Kaptain Token | Default | Purpose |
 |---|---|---|
-| `KEELSON_TICK_INTERVAL` | `1` | Seconds between supervisor ticks. Each tick: supervise watchers, drain queue, kick scan if due, write the status file. |
-| `KEELSON_POLL_INTERVAL` | `60` | Seconds between scan starts (measured from the previous scan's start time; long scans queue the next for the very next tick, never overlap). |
-| `KEELSON_FULL_REFRESH_INTERVAL` | `3600` | Seconds between trigger-state cache reloads from the ConfigMap. Picks up any out-of-band edits an operator made. |
-| `KEELSON_HEARTBEAT_MAX_AGE` | `5` | Seconds before the kubelet's liveness probe treats the status file as stale. Keep close to `KEELSON_TICK_INTERVAL` — too generous masks a wedged loop, too tight false-positives on jitter. |
+| `KEELSON_TICK_INTERVAL`<br>`Keelson/TickInterval` | `1` | Seconds between supervisor ticks. Each tick: supervise watchers, drain queue, kick scan if due, write the status file. |
+| `KEELSON_POLL_INTERVAL`<br>`Keelson/PollInterval` | `60` | Seconds between scan starts (measured from the previous scan's start time; long scans queue the next for the very next tick, never overlap). |
+| `KEELSON_FULL_REFRESH_INTERVAL`<br>`Keelson/FullRefreshInterval` | `3600` | Seconds between trigger-state cache reloads from the ConfigMap. Picks up any out-of-band edits an operator made. |
+| `KEELSON_HEARTBEAT_MAX_AGE`<br>`Keelson/HeartbeatMaxAge` | `5` | Seconds before the kubelet's liveness probe treats the status file as stale. Keep close to `KEELSON_TICK_INTERVAL` — too generous masks a wedged loop, too tight false-positives on jitter. |
 
 ### Watcher supervision
 
-| Variable | Default | Purpose |
+| Env Var / Kaptain Token | Default | Purpose |
 |---|---|---|
-| `KEELSON_WATCHER_BACKOFF_MAX` | `300` | Cap on per-kind respawn delay (s). Failures back off `1, 2, 4, 8...` capped here, CrashLoopBackOff-style. |
-| `KEELSON_WATCHER_HEALTHY_RESET` | `30` | Seconds a watcher must stay alive before its failure count resets to zero. |
-| `KEELSON_WATCHER_RECONNECT_INITIAL` | `2` | Initial delay (s) inside a single watcher before it reconnects to its `kubectl watch` stream. Independent from the supervisor's respawn backoff above — the watcher reconnects in-process when its stream ends. |
-| `KEELSON_WATCHER_RECONNECT_MAX` | `60` | Cap on the in-watcher reconnect delay. |
+| `KEELSON_WATCHER_BACKOFF_MAX`<br>`Keelson/WatcherBackoffMax` | `300` | Cap on per-kind respawn delay (s). Failures back off `1, 2, 4, 8...` capped here, CrashLoopBackOff-style. |
+| `KEELSON_WATCHER_HEALTHY_RESET`<br>`Keelson/WatcherHealthyReset` | `30` | Seconds a watcher must stay alive before its failure count resets to zero. |
+| `KEELSON_WATCHER_RECONNECT_INITIAL`<br>`Keelson/WatcherReconnectInitial` | `2` | Initial delay (s) inside a single watcher before it reconnects to its `kubectl watch` stream. Independent from the supervisor's respawn backoff above — the watcher reconnects in-process when its stream ends. |
+| `KEELSON_WATCHER_RECONNECT_MAX`<br>`Keelson/WatcherReconnectMax` | `60` | Cap on the in-watcher reconnect delay. |
 
 ### Log throttling and the file log
 
-| Variable | Default | Purpose |
+| Env Var / Kaptain Token | Default | Purpose |
 |---|---|---|
-| `KEELSON_LOG_DEBUG_REPEAT_INTERVAL` | `0` | Seconds. The rate limiter suppresses a repeat of the same `(level, event, sorted-kv-pairs)` hash within this window. `0` disables throttling for the level. |
-| `KEELSON_LOG_INFO_REPEAT_INTERVAL` | `120` | Same shape, info level. The throttle-eligible info events are `dry-run-would-update` and `watch-start` (which can fire on every in-watcher reconnect); the rest use `_always` so every event lands. |
-| `KEELSON_LOG_WARN_REPEAT_INTERVAL` | `300` | Warn-level repeats (`watch-disconnected`, `watcher-respawned`) collapse inside this window. |
-| `KEELSON_LOG_ERROR_REPEAT_INTERVAL` | `600` | Error-level repeats (registry/auth failures, kubectl-list failures) collapse inside this window. |
-| `KEELSON_LOG_FILE_MAX_BYTES` | `10485760` | Rotate `/keelson/work/log/keelson.log` once it grows past this many bytes (default 10 MiB). |
-| `KEELSON_LOG_FILE_KEEP` | `5` | Number of rotated `.1, .2, …` files to retain. Older than this are dropped on rotate. |
+| `KEELSON_LOG_DEBUG_REPEAT_INTERVAL`<br>`Keelson/LogDebugRepeatInterval` | `0` | Seconds. The rate limiter suppresses a repeat of the same `(level, event, sorted-kv-pairs)` hash within this window. `0` disables throttling for the level. |
+| `KEELSON_LOG_INFO_REPEAT_INTERVAL`<br>`Keelson/LogInfoRepeatInterval` | `120` | Same shape, info level. The throttle-eligible info events are `dry-run-would-update` and `watch-start` (which can fire on every in-watcher reconnect); the rest use `_always` so every event lands. |
+| `KEELSON_LOG_WARN_REPEAT_INTERVAL`<br>`Keelson/LogWarnRepeatInterval` | `300` | Warn-level repeats (`watch-disconnected`, `watcher-respawned`) collapse inside this window. |
+| `KEELSON_LOG_ERROR_REPEAT_INTERVAL`<br>`Keelson/LogErrorRepeatInterval` | `600` | Error-level repeats (registry/auth failures, kubectl-list failures) collapse inside this window. |
+| `KEELSON_LOG_FILE_MAX_BYTES`<br>`Keelson/LogFileMaxBytes` | `10485760` | Rotate `/keelson/work/log/keelson.log` once it grows past this many bytes (default 10 MiB). |
+| `KEELSON_LOG_FILE_KEEP`<br>`Keelson/LogFileKeep` | `5` | Number of rotated `.1, .2, …` files to retain. Older than this are dropped on rotate. |
 
 The file log path is convention, not configuration: `/keelson/work/log/keelson.log` (under the Pod's `emptyDir`).
 
