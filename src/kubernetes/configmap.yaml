@@ -25,5 +25,5 @@ data:
   # (default: Keelson's own namespace).
   registries.yaml: |
     registries:
-      ${EnvironmentDockerRegistry}:
+      ${Keelson/EnvironmentDockerRegistry}:
         auth-mode: ${Keelson/AuthMode}

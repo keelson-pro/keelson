@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    uses: kube-kaptain/buildon-github-actions/.github/workflows/kubernetes-bundle-resources.yaml@1.1.38
+    uses: kube-kaptain/buildon-github-actions/.github/workflows/kubernetes-bundle-resources.yaml@1.1.45
     permissions:
       contents: write
       packages: write
