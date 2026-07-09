@@ -93,6 +93,10 @@ spec:
               value: "${Keelson/WatcherReconnectMax}"
             - name: KEELSON_STATE_CONFIGMAP
               value: "${Keelson/StateConfigMap}"
+            - name: KEELSON_FIELD_MANAGER_STRATEGY_OWNED
+              value: "${Keelson/FieldManagerStrategyOwned}"
+            - name: KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED
+              value: "${Keelson/FieldManagerStrategyUnowned}"
             - name: KEELSON_LOG_DEBUG_REPEAT_INTERVAL
               value: "${Keelson/LogDebugRepeatInterval}"
             - name: KEELSON_LOG_INFO_REPEAT_INTERVAL

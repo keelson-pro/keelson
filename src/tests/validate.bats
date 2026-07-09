@@ -81,6 +81,8 @@ set_required_env() {
     export KEELSON_LOG_ERROR_REPEAT_INTERVAL=600
     export KEELSON_LOG_FILE_MAX_BYTES=10485760
     export KEELSON_LOG_FILE_KEEP=5
+    export KEELSON_FIELD_MANAGER_STRATEGY_OWNED=mimic
+    export KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED=patch
 }
 
 install_required_binaries() {
