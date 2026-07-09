@@ -1,11 +1,11 @@
-apiVersion: kaptain.org/1.19
+apiVersion: kaptain.org/1.22
 kind: kubernetes-bundle-resources
 metadata:
   description: "Keelson controller - bash scripts and Kubernetes manifest templates, bundled as a tagged release artefact for downstream helm-chart and runtime-image repos"
 
 spec:
   layers:
-    - ghcr.io/kube-kaptain/layer/layer-github-flow-strict:[1.3,2)
+    - ghcr.io/kube-kaptain/layer/layer-github-flow-strict:[1.3]
   main:
     hooks:
       preTaggingTests: .github/bin/run-tests.bash
