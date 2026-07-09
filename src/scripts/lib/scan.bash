@@ -212,7 +212,7 @@ scan_container() {
     local new_image repo
     repo=$(image_repo "$cimage")
     new_image="$repo:$winner"
-    if update_apply "$kind" "$ns" "$name" "$cname" "$new_image" "$current_tag" "$mf_json"; then
+    if update_apply "$kind" "$ns" "$name" "$cname" "$new_image" "$current_tag" "$mf_json" "$ann"; then
         _scan_updated=$((_scan_updated + 1))
         _workload_updated=1
         _workload_last_from=$current_tag

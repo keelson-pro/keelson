@@ -1,16 +1,48 @@
-# Apply-path primitives: build patch documents, call kubectl, optionally
+# Apply-path primitives: build patch/apply documents, call kubectl, optionally
 # trigger a CronJob run on a successful update.
 # Sourced; not directly executable.
 #
-# Field-manager mimicry: when the existing image field is owned by an Apply
-# manager (a GitOps controller doing server-side apply), Keelson updates
-# via SSA under that manager's name and --force-conflicts; when it's owned
-# by an Update manager (e.g. legacy kubectl-client-side-apply), Keelson
-# patches under that manager's name. With no owner the default manager
-# "keelson" is used with a strategic-merge patch.
+# Two update methods, one attribution choice:
+#
+#   patch  - kubectl patch --type=strategic under field-manager=keelson.
+#            Adds a Keelson Update entry to managedFields.
+#   apply  - kubectl apply --server-side under some field-manager. Adds an
+#            Apply entry under whichever manager we pass.
+#
+# Attribution is binary: the change gets pinned on the detected Apply owner
+# ("them", only possible when there is one) or on us ("keelson").
+#
+# The config surface is a 2x2 quadrant of (detected state, choice):
+#
+#                              Choice A                Choice B
+#   Apply-op owner detected    mimic (apply as them)   patch (patch as us)
+#   No Apply-op owner          patch (patch as us)     claim (apply as us)
+#
+# The three value names are (method, attribution) tuples:
+#   mimic - apply, attributed to them. Only offered when an Apply owner
+#           exists; refused on unowned (log update-refused-mimic-unowned).
+#   patch - patch, attributed to us. The one cell that appears in both
+#           rows and is a safe default in either state.
+#   claim - apply, attributed to us. Available only in the unowned row;
+#           in the owned row that cell is taken by mimic.
+#
+# The missing "them + patch" cell (patch as OEM) is a legitimate operation
+# we don't offer: when we attribute to them, we also match their operation
+# type, so mimic always uses SSA.
+#
+# Selection is per-workload via keelson.pro/field-manager-strategy (with an
+# optional .<container> suffix for per-container override), falling back to
+# KEELSON_FIELD_MANAGER_STRATEGY_OWNED / _UNOWNED. "Owned" is defined as
+# "an Apply-op manager claims the image field" (see lib/managedfields.bash);
+# everything else - including Update-op managers, which don't participate
+# in SSA conflict resolution - is treated as unowned.
+#
+# SSA is never force-applied: an ownership conflict logs
+# update-apply-conflict and returns non-zero rather than stomping the other
+# manager. Fix the source of truth instead.
 #
 # Depends on (must be sourced first):
-#   lib/log.bash, lib/managedfields.bash
+#   lib/log.bash, lib/managedfields.bash, lib/annotations.bash
 
 # update_patch_json <kind> <container> <new-image>
 # Echoes a strategic-merge patch document that updates the named container's
@@ -94,35 +126,82 @@ update_fetch_managed_fields() {
         | yq -p=json -o=json '.metadata.managedFields // []' 2>/dev/null
 }
 
-# update_apply <kind> <namespace> <name> <container> <new-image> <from-tag> [managed-fields-json]
-# Detects the existing image-field owner and mimics it: SSA for Apply
-# operation, strategic-merge patch for Update operation, "keelson" Update
-# fallback when no manager claims the field. Logs update-applied or
-# update-failed (with the manager/operation pair) and returns 0/1.
+# update_resolve_strategy <annotations> <container> <apply-owner-present>
+# Echoes the effective strategy (mimic|patch|claim) OR echoes an empty
+# string with a non-zero return when the annotation is present but invalid.
+# When the annotation is absent, falls back to the global default for the
+# case (owned vs unowned).
+update_resolve_strategy() {
+    local ann=$1 container=$2 owner_present=$3
+    local val=""
+    if [ -n "$ann" ]; then
+        val=$(annotation_get "$ann" field-manager-strategy "$container")
+    fi
+    if [ -n "$val" ]; then
+        case "$val" in
+            mimic|patch|claim) printf '%s' "$val"; return 0 ;;
+            *) printf '%s' "$val"; return 2 ;;
+        esac
+    fi
+    if [ "$owner_present" = "1" ]; then
+        printf '%s' "${KEELSON_FIELD_MANAGER_STRATEGY_OWNED:-mimic}"
+    else
+        printf '%s' "${KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED:-patch}"
+    fi
+}
+
+# update_apply <kind> <namespace> <name> <container> <new-image> <from-tag> [managed-fields-json] [annotation-lines]
+# Resolves the effective field-manager strategy and dispatches. Logs
+# update-applied / update-failed / update-apply-conflict /
+# update-refused-mimic-unowned / update-invalid-strategy-annotation and
+# returns 0 on success, 1 otherwise.
 update_apply() {
     local kind=$1 ns=$2 name=$3 container=$4 image=$5 from_tag=$6
-    local mf_json=${7:-}
+    local mf_json=${7:-} ann=${8:-}
     if [ -z "$mf_json" ]; then
         mf_json=$(update_fetch_managed_fields "$kind" "$ns" "$name")
     fi
-    local owner manager=keelson operation=Update
-    owner=$(managedfields_owner_of_image "$mf_json" "$container")
-    if [ -n "$owner" ]; then
-        manager=${owner% *}
-        operation=${owner##* }
+    local apply_owner owner_present=0
+    apply_owner=$(managedfields_apply_owner_of_image "$mf_json" "$container")
+    [ -n "$apply_owner" ] && owner_present=1
+
+    local strategy rc
+    strategy=$(update_resolve_strategy "$ann" "$container" "$owner_present")
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        log_error update-invalid-strategy-annotation \
+            kind="$kind" ns="$ns" name="$name" container="$container" \
+            annotation="keelson.pro/field-manager-strategy" value="$strategy" \
+            msg="Invalid keelson.pro/field-manager-strategy annotation value '$strategy' on $kind '$name' in '$ns'; must be one of: mimic, patch, claim. Skipping update."
+        return 1
     fi
-    case "$operation" in
-        Apply)
-            update_apply_ssa "$kind" "$ns" "$name" "$container" "$image" "$manager" "$from_tag"
+
+    case "$strategy" in
+        mimic)
+            if [ "$owner_present" != "1" ]; then
+                log_error update-refused-mimic-unowned \
+                    kind="$kind" ns="$ns" name="$name" container="$container" \
+                    image="$image" \
+                    msg="Refusing to update $kind '$name'/$container in '$ns' to image '$image': strategy 'mimic' requires an Apply-op field owner but none was detected."
+                return 1
+            fi
+            update_apply_ssa "$kind" "$ns" "$name" "$container" "$image" \
+                "$apply_owner" "$from_tag" mimic
             ;;
-        Update|*)
-            update_apply_patch "$kind" "$ns" "$name" "$container" "$image" "$manager" "$from_tag"
+        patch)
+            update_apply_patch "$kind" "$ns" "$name" "$container" "$image" \
+                keelson "$from_tag" patch
+            ;;
+        claim)
+            update_apply_ssa "$kind" "$ns" "$name" "$container" "$image" \
+                keelson "$from_tag" claim
             ;;
     esac
 }
 
 update_apply_patch() {
-    local kind=$1 ns=$2 name=$3 container=$4 image=$5 manager=$6 from_tag=$7
+    local kind=$1 ns=$2 name=$3 container=$4 image=$5 manager=$6 from_tag=$7 \
+          strategy=$8
     local to_tag=${image##*:} repo=${image%:*}
     local patch
     if ! patch=$(update_patch_json "$kind" "$container" "$image"); then
@@ -136,39 +215,60 @@ update_apply_patch() {
         log_info_always update-applied \
             kind="$kind" ns="$ns" name="$name" container="$container" \
             image="$image" from="$from_tag" to="$to_tag" repo="$repo" \
-            manager="$manager" operation=Update \
+            manager="$manager" operation=Update strategy="$strategy" \
             msg="$kind '$name' in '$ns' updated from $from_tag to $to_tag for image '$repo'."
         return 0
     fi
     log_error update-failed \
         kind="$kind" ns="$ns" name="$name" container="$container" \
-        image="$image" manager="$manager" operation=Update \
+        image="$image" manager="$manager" operation=Update strategy="$strategy" \
         msg="Could not patch $kind '$name'/$container in '$ns' to image '$image' (manager '$manager', operation Update)."
     return 1
 }
 
 update_apply_ssa() {
-    local kind=$1 ns=$2 name=$3 container=$4 image=$5 manager=$6 from_tag=$7
+    local kind=$1 ns=$2 name=$3 container=$4 image=$5 manager=$6 from_tag=$7 \
+          strategy=$8
     local to_tag=${image##*:} repo=${image%:*}
-    local manifest
+    local manifest tmperr reason=""
     if ! manifest=$(update_minimal_manifest "$kind" "$ns" "$name" "$container" "$image"); then
         log_error update-unsupported-kind kind="$kind" ns="$ns" name="$name" \
             msg="Cannot update $kind '$name' in '$ns': kind not supported."
         return 1
     fi
+    tmperr=$(mktemp 2>/dev/null) || tmperr=/dev/null
     if printf '%s' "$manifest" | kubectl apply --server-side \
-            --field-manager="$manager" --force-conflicts -f - >/dev/null 2>&1; then
+            --field-manager="$manager" -f - >/dev/null 2>"$tmperr"; then
+        [ "$tmperr" != "/dev/null" ] && rm -f "$tmperr"
         log_info_always update-applied \
             kind="$kind" ns="$ns" name="$name" container="$container" \
             image="$image" from="$from_tag" to="$to_tag" repo="$repo" \
-            manager="$manager" operation=Apply \
+            manager="$manager" operation=Apply strategy="$strategy" \
             msg="$kind '$name' in '$ns' updated from $from_tag to $to_tag for image '$repo'."
         return 0
     fi
-    log_error update-failed \
-        kind="$kind" ns="$ns" name="$name" container="$container" \
-        image="$image" manager="$manager" operation=Apply \
-        msg="Could not server-side apply $kind '$name'/$container in '$ns' to image '$image' (manager '$manager', operation Apply)."
+    if [ "$tmperr" != "/dev/null" ]; then
+        reason=$(head -c 200 "$tmperr" 2>/dev/null | tr '\n' ' ' | tr -s ' ')
+        reason=${reason#"${reason%%[![:space:]]*}"}
+        reason=${reason%"${reason##*[![:space:]]}"}
+        rm -f "$tmperr"
+    fi
+    case "$reason" in
+        *conflict*|*Conflict*)
+            log_error update-apply-conflict \
+                kind="$kind" ns="$ns" name="$name" container="$container" \
+                image="$image" manager="$manager" operation=Apply \
+                strategy="$strategy" reason="$reason" \
+                msg="Server-side apply of $kind '$name'/$container in '$ns' as manager '$manager' rejected on field-ownership conflict; refusing to force. Fix the owning manager's source of truth."
+            ;;
+        *)
+            log_error update-failed \
+                kind="$kind" ns="$ns" name="$name" container="$container" \
+                image="$image" manager="$manager" operation=Apply \
+                strategy="$strategy" reason="$reason" \
+                msg="Could not server-side apply $kind '$name'/$container in '$ns' to image '$image' (manager '$manager', operation Apply)."
+            ;;
+    esac
     return 1
 }
 
