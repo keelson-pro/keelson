@@ -41,6 +41,15 @@ See [Configuration.md](Configuration.md) for environment variables, the
 Keelson honours, and the logging philosophy and per-level event tables.
 
 
+## Field ownership
+
+See [FieldManagerOwnership.md](FieldManagerOwnership.md) for how Keelson
+interacts with Kubernetes' three field-ownership regimes (plain writes,
+client-side apply, Server-Side Apply), the two-tier mimic-or-scoped-write
+approach it uses to avoid disturbing the workload's real owner, and how
+this differs from Keel.
+
+
 ## Runtime
 
 See [EntryPoints.md](EntryPoints.md) for the five executable scripts in
