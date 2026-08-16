@@ -112,23 +112,21 @@ spec:
           startupProbe:
             exec:
               command: ["keelson-probe", "startup"]
-            # Allow up to ~2 min for watchers to establish and the first scan
-            # to land. failureThreshold * periodSeconds = budget.
-            periodSeconds: 5
-            failureThreshold: 24
-            timeoutSeconds: 3
+            periodSeconds: ${Keelson/StartupProbePeriodSeconds}
+            failureThreshold: ${Keelson/StartupProbeFailureThreshold}
+            timeoutSeconds: ${Keelson/StartupProbeTimeoutSeconds}
           readinessProbe:
             exec:
               command: ["keelson-probe", "readiness"]
-            periodSeconds: 10
-            failureThreshold: 2
-            timeoutSeconds: 3
+            periodSeconds: ${Keelson/ReadinessProbePeriodSeconds}
+            failureThreshold: ${Keelson/ReadinessProbeFailureThreshold}
+            timeoutSeconds: ${Keelson/ReadinessProbeTimeoutSeconds}
           livenessProbe:
             exec:
               command: ["keelson-probe", "liveness"]
-            periodSeconds: 15
-            failureThreshold: 3
-            timeoutSeconds: 3
+            periodSeconds: ${Keelson/LivenessProbePeriodSeconds}
+            failureThreshold: ${Keelson/LivenessProbeFailureThreshold}
+            timeoutSeconds: ${Keelson/LivenessProbeTimeoutSeconds}
           volumeMounts:
             - name: config
               mountPath: /configmap

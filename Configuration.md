@@ -61,6 +61,29 @@ The file log path is convention, not configuration: `/keelson/work/log/keelson.l
 A misconfigured variable here fails `keelson-validate`, so the Pod refuses to boot rather than running with surprising defaults.
 
 
+## Probe timings
+
+Startup, readiness and liveness probes have sensible defaults but are all overrideable.
+
+| Kaptain Token | Default |
+|---|---|
+| `Keelson/StartupProbePeriodSeconds` | `5` |
+| `Keelson/StartupProbeFailureThreshold` | `24` |
+| `Keelson/StartupProbeTimeoutSeconds` | `4` |
+| `Keelson/ReadinessProbePeriodSeconds` | `20` |
+| `Keelson/ReadinessProbeFailureThreshold` | `2` |
+| `Keelson/ReadinessProbeTimeoutSeconds` | `5` |
+| `Keelson/LivenessProbePeriodSeconds` | `15` |
+| `Keelson/LivenessProbeFailureThreshold` | `5` |
+| `Keelson/LivenessProbeTimeoutSeconds` | `6` |
+
+Budgets at those defaults: 120s to start, 40s to NotReady, 75s to a liveness kill. Keep each `timeoutSeconds` under its `periodSeconds` for obvious reasons.
+
+Liveness is biased toward not killing, because restarting Keelson costs more than it fixes. The work queue lives on the Pod's `emptyDir` and goes with it, and every watcher's `kubectl get --watch` re-lists its whole kind before streaming, so a restart produces the largest event burst Keelson can generate. Against that, a wedged controller noticed a minute later is invisible at a 60s poll cycle.
+
+Keelson exposes no Service, so readiness only colours the READY column and gates rollouts. It runs at the lowest frequency for that reason.
+
+
 ## Logging
 
 Better logging is a key promise for the creation of Keelson, this is the logging description.
