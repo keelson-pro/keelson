@@ -14,6 +14,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The probe reads the controller's state; it does not author the controller's
+# trail. Switching the file channel off before sourcing keeps the failure path
+# from doing file I/O it does not need, on the one path already closest to its
+# exec timeout. Set unconditionally, so an inherited env cannot re-enable it.
+# Failures still go to stderr, which is what the kubelet puts in the event.
+KEELSON_LOG_FILE_PATH=
 # shellcheck source=lib/log.bash
 source "${SCRIPT_DIR}/lib/log.bash"
 # shellcheck source=lib/clock.bash

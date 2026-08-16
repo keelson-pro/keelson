@@ -220,6 +220,30 @@ emit() { "$@" 2>&1; }
     ! grep -q "update-applied" "$KEELSON_LOG_FILE_PATH"
 }
 
+# --- the file channel can be switched off ---
+
+@test "file channel: an empty path writes no file at all" {
+    KEELSON_LOG_FILE_PATH=
+    log_info evt k=v 2>/dev/null
+    [ -z "$(find "$TMP_DIR" -type f)" ]
+}
+
+@test "file channel: an empty path still emits on stderr" {
+    KEELSON_LOG_FILE_PATH=
+    run emit log_error evt k=v
+    [[ "$output" == *"evt"* ]]
+}
+
+@test "file channel: an empty path survives sourcing" {
+    # :- would treat empty as unset and hand back the default path, which
+    # would silently re-enable the file for a caller that switched it off.
+    KEELSON_LOG_FILE_PATH= bash -c '
+        KEELSON_LOG_FILE_PATH=
+        source "'"$SCRIPT_DIR"'/lib/log.bash"
+        [ -z "$KEELSON_LOG_FILE_PATH" ]
+    '
+}
+
 # --- rotation ---
 #
 # Appending is safe from any number of processes; the mv-shuffle is not.

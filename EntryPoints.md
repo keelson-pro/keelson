@@ -105,6 +105,14 @@ stale heartbeat never affects readiness.
 Exit 0 on pass, 1 on fail. One log line is emitted on failure; success is
 silent so the kubelet's probe logs stay readable.
 
+That line goes to stderr only. The probe switches the file channel off before
+sourcing `lib/log.bash`, so it never writes `/keelson/work/log/keelson.log`.
+It reads the controller's state rather than authoring the controller's trail,
+the kubelet already surfaces the line in the Pod event, and a liveness kill
+restarts the container and takes the `emptyDir` with it, so the file would not
+have survived to be read. It also keeps the failure path from doing file I/O
+on the one path already closest to its `timeoutSeconds`.
+
 
 ## `keelson-validate` — boot-time check
 

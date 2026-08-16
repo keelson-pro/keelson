@@ -41,8 +41,18 @@
 # owner, the controller loop, via log_file_rotate_if_needed once per tick.
 # A process that only appends never rotates, so the file grows unbounded
 # while the controller is not running (one-shot entry points, tests).
+#
+# keelson-probe writes no file at all. It reads the controller's state; it
+# does not author the controller's trail. Its failure message reaches the
+# operator as a kubelet event, and on a liveness kill the container restarts
+# and takes the emptyDir with it, so a file write would buy nothing while
+# costing forks on the one path already closest to its exec timeout.
 
-KEELSON_LOG_FILE_PATH=${KEELSON_LOG_FILE_PATH:-/keelson/work/log/keelson.log}
+# Set this to the empty string before sourcing to switch the file channel
+# off entirely; keelson-probe does. Note the `-` rather than `:-`: an empty
+# value must survive, or a caller that deliberately switched the file off
+# would silently get the default path back.
+KEELSON_LOG_FILE_PATH=${KEELSON_LOG_FILE_PATH-/keelson/work/log/keelson.log}
 
 declare -gA LOG_THROTTLE_LAST=()
 
@@ -179,6 +189,7 @@ log_file_rotate_if_needed() {
 # calls log_file_rotate_if_needed once per tick.
 log_file_write() {
     local line=$1
+    [ -n "$KEELSON_LOG_FILE_PATH" ] || return 0
     local dir
     dir=$(dirname "$KEELSON_LOG_FILE_PATH")
     mkdir -p "$dir" 2>/dev/null || return 0

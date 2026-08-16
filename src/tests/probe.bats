@@ -129,6 +129,51 @@ now() { date -u +%s; }
     [ "$status" -eq 1 ]
 }
 
+# --- the probe never writes the file trail ---
+#
+# It is a reader of the controller's state, not a writer of its log. The
+# failure message reaches the operator as a kubelet event, and on a liveness
+# kill the container restarts and takes the emptyDir with it, so the file
+# would buy nothing while costing forks on the one path already closest to
+# its exec timeout.
+
+@test "liveness: a failure writes no log file" {
+    export KEELSON_LOG_FILE_PATH="$TMP_DIR/keelson.log"
+    run "$PROBE" liveness
+    [ "$status" -eq 1 ]
+    [ ! -e "$KEELSON_LOG_FILE_PATH" ]
+}
+
+@test "readiness: a failure writes no log file" {
+    export KEELSON_LOG_FILE_PATH="$TMP_DIR/keelson.log"
+    write_watchers "Deployment=0"
+    run "$PROBE" readiness
+    [ "$status" -eq 1 ]
+    [ ! -e "$KEELSON_LOG_FILE_PATH" ]
+}
+
+@test "liveness: a failure does not append to an existing log file" {
+    export KEELSON_LOG_FILE_PATH="$TMP_DIR/keelson.log"
+    printf 'pre-existing\n' > "$KEELSON_LOG_FILE_PATH"
+    run "$PROBE" liveness
+    [ "$status" -eq 1 ]
+    [ "$(cat "$KEELSON_LOG_FILE_PATH")" = "pre-existing" ]
+}
+
+@test "liveness: a failure still reports on stderr for the kubelet event" {
+    run "$PROBE" liveness
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Liveness probe failed"* ]]
+    [[ "$output" == *"ERROR"* ]]
+}
+
+@test "readiness: a failure still reports on stderr for the kubelet event" {
+    write_watchers "Deployment=0"
+    run "$PROBE" readiness
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Readiness probe failed"* ]]
+}
+
 # --- arg handling ---
 
 @test "unknown subcommand exits 64" {
