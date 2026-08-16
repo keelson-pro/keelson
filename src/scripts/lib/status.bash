@@ -27,7 +27,7 @@
 KEELSON_STATUS_DIR=${KEELSON_STATUS_DIR:-/keelson/work/status}
 
 declare -gA STATUS_PIDS=()
-STATUS_HEARTBEAT=0
+STATUS_HEARTBEAT_US=0
 
 # status_write_file <path> [<line> ...]
 # Atomic via write-then-rename, so a reader never sees a half-written file.
@@ -43,9 +43,12 @@ status_write_file() {
     mv -f "$tmp" "$path"
 }
 
-# status_write_heartbeat <unix-seconds>
+# status_write_heartbeat <unix-microseconds>
+# Microseconds in, decimal seconds on disk: full precision kept, and an
+# operator reading the file sees an obvious Unix timestamp.
 status_write_heartbeat() {
-    status_write_file "$KEELSON_STATUS_DIR/heartbeat" "heartbeat=$1"
+    clock_format "$1"
+    status_write_file "$KEELSON_STATUS_DIR/heartbeat" "heartbeat=$CLOCK_TEXT"
 }
 
 # status_write_watchers [<kind=pid> ...]
@@ -54,16 +57,19 @@ status_write_watchers() {
 }
 
 # status_read_heartbeat
-# Populates STATUS_HEARTBEAT (0 if the key is absent).
+# Populates STATUS_HEARTBEAT_US in microseconds (0 if the key is absent).
 # Returns 1 if the file is missing.
 status_read_heartbeat() {
-    STATUS_HEARTBEAT=0
+    STATUS_HEARTBEAT_US=0
     local file="$KEELSON_STATUS_DIR/heartbeat"
     [ -r "$file" ] || return 1
     local key value
     while IFS='=' read -r key value; do
         case "$key" in
-            heartbeat) STATUS_HEARTBEAT=$value ;;
+            heartbeat)
+                clock_parse "$value"
+                STATUS_HEARTBEAT_US=$CLOCK_PARSED_US
+                ;;
         esac
     done < "$file"
     return 0
@@ -84,13 +90,14 @@ status_read_watchers() {
 }
 
 # status_heartbeat_fresh <max-age-seconds>
-# True iff the heartbeat was published within max-age seconds.
+# True iff the heartbeat was published within max-age seconds. Compared in
+# microseconds at both ends, so the answer is not rounded across the limit
+# by where a second boundary happened to fall.
 status_heartbeat_fresh() {
     local max_age=$1
     status_read_heartbeat || return 1
-    local now
-    now=$(date -u +%s)
-    [ $(( now - STATUS_HEARTBEAT )) -lt "$max_age" ]
+    clock_read
+    [ $(( CLOCK_NOW_US - STATUS_HEARTBEAT_US )) -lt $(( max_age * 1000000 )) ]
 }
 
 # status_all_watchers_alive

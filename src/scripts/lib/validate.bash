@@ -85,9 +85,10 @@ validate_binary() {
 }
 
 validate_bash_version() {
-    if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
-        log_error validate-bash-too-old version="${BASH_VERSION:-unknown}" required=4 \
-            msg="Validation failed: Bash version '${BASH_VERSION:-unknown}' is older than required v4."
+    # v5 for EPOCHREALTIME: the controller loop times its own cycle with it.
+    if [ "${BASH_VERSINFO[0]:-0}" -lt 5 ]; then
+        log_error validate-bash-too-old version="${BASH_VERSION:-unknown}" required=5 \
+            msg="Validation failed: Bash version '${BASH_VERSION:-unknown}' is older than required v5."
         return 1
     fi
 }

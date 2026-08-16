@@ -34,6 +34,15 @@ and an emptyDir at `/keelson/work` (for the watch queue and status files).
    ConfigMap into memory (per-CronJob always-once ledger; log dedupe is held
    in-memory by `lib/log.bash` and does not touch the ConfigMap).
 4. Enter the tick loop (`KEELSON_TICK_INTERVAL=1s`). Each tick:
+   - **Publish the heartbeat.** The clock is read and written in the same
+     breath, first thing, to `/keelson/work/status/heartbeat`. Written
+     atomically (tempfile + rename). Publishing before the work is what makes
+     the stamp honest: the file holds the moment it was published, so nothing
+     later in the tick can age a value a probe is about to read, and the file
+     can never report a time the loop was not at. The stamp is decimal
+     seconds at microsecond precision (`heartbeat=1786867629.967696`) and
+     `keelson-probe` compares in microseconds too, so the answer is never
+     rounded across the limit by where a second boundary happened to fall.
    - **Supervise watchers.** Each kind in `KEELSON_WATCHED_KINDS` gets one
      `kubectl get --watch` child. A dead watcher's PID becomes 0 and its
      failure count increments; the next respawn waits `1, 2, 4, 8...`
@@ -48,9 +57,14 @@ and an emptyDir at `/keelson/work` (for the watch queue and status files).
      scan pick up any out-of-band edits), run `scan_run`, flush deltas
      back. The parent's state stays clean; the next child rereads the
      ConfigMap. Long scans overlap ticks but never each other.
-   - **Write the heartbeat.** `/keelson/work/status/heartbeat` carries the
-     timestamp `keelson-probe liveness` reads. Written atomically (tempfile +
-     rename), once per tick, because the cadence is the signal.
+   - **Sleep the remainder of the cycle.** `KEELSON_TICK_INTERVAL` is the
+     cycle time, not the idle time: the loop sleeps the tick minus the work
+     it just did, so ticks start on a fixed cadence rather than drifting by
+     however long each one took. Work that outruns the tick gets no sleep and
+     a `tick-overrun` warning, so the next tick starts immediately and the
+     broken cadence is reported rather than silently absorbed. The cycle is
+     timed in microseconds via bash 5's `EPOCHREALTIME`; whole seconds would
+     misread half the sub-second ticks as overruns.
 
    The watcher PID map lives beside it in `/keelson/work/status/watchers`,
    one `<Kind>=<pid>` line per watched kind, and is written by the supervisor
@@ -99,7 +113,8 @@ pod shell to debug a misconfigured Deployment.
 - Every required `KEELSON_*` variable is set, with the right enum or
   positive-int shape.
 - `KEELSON_WATCHED_KINDS` contains only kinds Keelson supports.
-- `bash` is version 4 or newer; `kubectl`, `skopeo`, `yq` (v4), `awk`, `sed`,
+- `bash` is version 5 or newer (the tick loop times its cycle with
+  `EPOCHREALTIME`); `kubectl`, `skopeo`, `yq` (v4), `awk`, `sed`,
   `head`, `tail`, `date` are all on `PATH`.
 - If `registries.yaml` is present, every declared `auth-mode` has its
   helper binary available (`docker-credential-ecr-login` for `aws-irsa`,
@@ -157,11 +172,12 @@ Deployment
    │       │
    │       ├── validate_config (sources lib/validate.bash)
    │       └── loop_run
+   │             ├── write status/heartbeat        (clock read + write)
    │             ├── supervise watchers ──► kubectl get --watch &
    │             │      └── on change ──► write status/watchers
    │             ├── drain queue
    │             ├── kick scan ──► scan_run ──► keelson-update-resource ──► kubectl
-   │             └── write status/heartbeat
+   │             └── sleep (tick - elapsed), or warn if already over
    │
    ├── startupProbe:    keelson-probe startup     (heartbeat + PIDs)
    ├── readinessProbe:  keelson-probe readiness   (PIDs)

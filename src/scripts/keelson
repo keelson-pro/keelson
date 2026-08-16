@@ -7,6 +7,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/log.bash
 source "${SCRIPT_DIR}/lib/log.bash"
+# shellcheck source=lib/clock.bash
+source "${SCRIPT_DIR}/lib/clock.bash"
 # shellcheck source=lib/validate.bash
 source "${SCRIPT_DIR}/lib/validate.bash"
 # shellcheck source=lib/policy.bash

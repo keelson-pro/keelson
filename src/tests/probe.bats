@@ -9,6 +9,9 @@ setup() {
     export KEELSON_STATUS_DIR="$TMP_DIR/status"
     export KEELSON_HEARTBEAT_MAX_AGE=5
     mkdir -p "$KEELSON_STATUS_DIR"
+    # Sourced only to build fixtures at the same precision the probe reads.
+    # shellcheck source=../scripts/lib/clock.bash
+    source "$SCRIPT_DIR/lib/clock.bash"
     HEARTBEAT_FILE="$KEELSON_STATUS_DIR/heartbeat"
     WATCHERS_FILE="$KEELSON_STATUS_DIR/watchers"
 }
@@ -42,6 +45,24 @@ now() { date -u +%s; }
 
 @test "liveness: stale heartbeat fails" {
     write_heartbeat "$(( $(now) - 60 ))"
+    run "$PROBE" liveness
+    [ "$status" -eq 1 ]
+}
+
+@test "liveness: sub-second age is not rounded up to stale" {
+    export KEELSON_HEARTBEAT_MAX_AGE=1
+    clock_read
+    clock_format "$(( CLOCK_NOW_US - 900000 ))"
+    printf 'heartbeat=%s\n' "$CLOCK_TEXT" > "$HEARTBEAT_FILE"
+    run "$PROBE" liveness
+    [ "$status" -eq 0 ]
+}
+
+@test "liveness: age just past the limit is stale" {
+    export KEELSON_HEARTBEAT_MAX_AGE=1
+    clock_read
+    clock_format "$(( CLOCK_NOW_US - 1100000 ))"
+    printf 'heartbeat=%s\n' "$CLOCK_TEXT" > "$HEARTBEAT_FILE"
     run "$PROBE" liveness
     [ "$status" -eq 1 ]
 }

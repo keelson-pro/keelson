@@ -22,6 +22,8 @@ setup() {
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash
     source "$SCRIPT_DIR/lib/log.bash"
+    # shellcheck source=../scripts/lib/clock.bash
+    source "$SCRIPT_DIR/lib/clock.bash"
     # shellcheck source=../scripts/lib/queue.bash
     source "$SCRIPT_DIR/lib/queue.bash"
     # shellcheck source=../scripts/lib/status.bash
@@ -235,4 +237,84 @@ emit() { "$@" 2>&1; }
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     [ -f "$WATCHERS_FILE" ]
     grep -q "^Deployment=${LOOP_WATCHER_PIDS[Deployment]}\$" "$WATCHERS_FILE"
+}
+
+# --- heartbeat publication point ---
+
+@test "loop_run: publishes the heartbeat before the tick's work" {
+    # The stamp must be readable by a probe that fires while the tick is
+    # still working, not only after the work is done.
+    loop_drain_queue() {
+        [ -f "$HEARTBEAT_FILE" ] && : > "$TMP_DIR/heartbeat-was-first"
+        return 0
+    }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ -f "$TMP_DIR/heartbeat-was-first" ]
+}
+
+@test "loop_run: the stamp is the moment it was published" {
+    local before after stamp
+    clock_read
+    before=$CLOCK_NOW_US
+    loop_drain_queue() { command sleep 2; return 0; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    clock_read
+    after=$CLOCK_NOW_US
+    clock_parse "$(sed -n 's/^heartbeat=//p' "$HEARTBEAT_FILE")"
+    stamp=$CLOCK_PARSED_US
+    # Published before the 2s of work, so the stamp cannot have absorbed it.
+    [ "$stamp" -ge "$before" ]
+    [ "$(( after - stamp ))" -ge 2000000 ]
+}
+
+@test "loop_run: the stamp keeps its sub-second precision" {
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    # A whole-second stamp would end in six zeroes; one in a million odds
+    # of a false pass, against a certain failure if precision is dropped.
+    ! grep -q '^heartbeat=[0-9]*\.000000$' "$HEARTBEAT_FILE"
+    grep -q '^heartbeat=[0-9]\{10,\}\.[0-9]\{6\}$' "$HEARTBEAT_FILE"
+}
+
+# --- cycle time ---
+
+@test "loop_run: sleeps the tick remainder, not the whole tick" {
+    # watch_run_kind's stub sleeps too; keep it off the real sleep stub.
+    watch_run_kind() { command sleep 10; }
+    sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
+    loop_drain_queue() { command sleep 0.4; return 0; }
+    KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    # ~0.6s left of the 1s cycle: definitely less than a full tick.
+    awk '{ exit ($1 < 0.9 && $1 > 0.2) ? 0 : 1 }' "$TMP_DIR/sleeps"
+}
+
+@test "loop_run: a fast tick still sleeps nearly the whole tick" {
+    # watch_run_kind's stub sleeps too; keep it off the real sleep stub.
+    watch_run_kind() { command sleep 10; }
+    sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
+    KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    awk '{ exit ($1 > 0.9 && $1 <= 1) ? 0 : 1 }' "$TMP_DIR/sleeps"
+}
+
+@test "loop_run: sub-second work does not read as an overrun" {
+    # Integer-second arithmetic would call this a 1s tick whenever the
+    # second happened to roll over mid-work, and skip the sleep entirely.
+    # watch_run_kind's stub sleeps too; keep it off the real sleep stub.
+    watch_run_kind() { command sleep 10; }
+    sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
+    loop_drain_queue() { command sleep 0.3; return 0; }
+    KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=3 run emit loop_run
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"longer than the"* ]]
+    [ "$(wc -l <"$TMP_DIR/sleeps")" -eq 3 ]
+}
+
+@test "loop_run: overrunning tick does not sleep and warns" {
+    # watch_run_kind's stub sleeps too; keep it off the real sleep stub.
+    watch_run_kind() { command sleep 10; }
+    sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
+    loop_drain_queue() { command sleep 1.3; return 0; }
+    KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=1 run emit loop_run
+    [ "$status" -eq 0 ]
+    [ ! -f "$TMP_DIR/sleeps" ]
+    [[ "$output" == *"longer than the 1s tick interval"* ]]
 }

@@ -21,8 +21,8 @@
 #   LOOP_SCAN_PID                  current scan child PID (0 if none)
 #
 # Depends on (must be sourced first):
-#   lib/log.bash, lib/queue.bash, lib/state.bash, lib/scan.bash, lib/watch.bash,
-#   lib/status.bash
+#   lib/log.bash, lib/clock.bash, lib/queue.bash, lib/state.bash, lib/scan.bash,
+#   lib/watch.bash, lib/status.bash
 
 declare -gA LOOP_WATCHER_PIDS=()
 declare -gA LOOP_WATCHER_FAIL=()
@@ -133,10 +133,23 @@ loop_kill_children() {
 }
 
 # loop_run
-# Tick once per KEELSON_TICK_INTERVAL: supervise watchers, drain queue,
-# kick a backgrounded scan when due, refresh the heartbeat. The watcher map
+# Tick once per KEELSON_TICK_INTERVAL: publish the heartbeat, supervise
+# watchers, drain queue, kick a backgrounded scan when due. The watcher map
 # is published by the supervisor itself, not from here. Long scans overlap
 # ticks but never each other (gated on LOOP_SCAN_PID).
+#
+# Two properties the ordering here exists to hold:
+#
+#   The heartbeat is read and written in the same breath, at the top, so the
+#   value on disk is the moment it was published. Nothing in the tick can age
+#   it before a probe reads it, and the file can never claim a time the loop
+#   was not at.
+#
+#   KEELSON_TICK_INTERVAL is the cycle time, not the idle time. The sleep is
+#   the tick minus the work already done, so ticks start on a fixed cadence
+#   instead of drifting by however long the last one took. Work that outruns
+#   the tick gets no sleep and a warning: the next tick starts immediately,
+#   and the cadence is reported as broken rather than silently stretched.
 loop_run() {
     local tick=${KEELSON_TICK_INTERVAL:?KEELSON_TICK_INTERVAL required}
     local poll=${KEELSON_POLL_INTERVAL:?KEELSON_POLL_INTERVAL required}
@@ -147,11 +160,17 @@ loop_run() {
     local apply=1
     [ "${KEELSON_DRY_RUN:-0}" = "1" ] && apply=0
 
-    local now last_scan_start=0 last_refresh force_refresh_next=0 iter=0
-    last_refresh=$(date -u +%s)
+    local tick_us=$(( tick * 1000000 ))
+    local now cycle_start_us remaining_us over_us over
+    local last_scan_start=0 last_refresh force_refresh_next=0 iter=0
+    clock_read
+    last_refresh=$(( CLOCK_NOW_US / 1000000 ))
 
     while [ "$max_iter" -eq 0 ] || [ "$iter" -lt "$max_iter" ]; do
-        now=$(date -u +%s)
+        clock_read
+        cycle_start_us=$CLOCK_NOW_US
+        now=$(( cycle_start_us / 1000000 ))
+        status_write_heartbeat "$cycle_start_us"
 
         loop_supervise_watchers "$now" "$backoff_max" "$healthy_reset"
         loop_drain_queue
@@ -174,9 +193,18 @@ loop_run() {
             last_refresh=$now
         fi
 
-        status_write_heartbeat "$now"
-
-        sleep "$tick"
+        clock_read
+        remaining_us=$(( tick_us - (CLOCK_NOW_US - cycle_start_us) ))
+        if [ "$remaining_us" -gt 0 ]; then
+            clock_format "$remaining_us"
+            sleep "$CLOCK_TEXT"
+        else
+            over_us=$(( CLOCK_NOW_US - cycle_start_us ))
+            clock_format "$over_us"
+            over=$CLOCK_TEXT
+            log_warn tick-overrun tick="$tick" elapsed="$over" \
+                msg="Tick took ${over}s, longer than the ${tick}s tick interval; starting the next tick immediately."
+        fi
         iter=$(( iter + 1 ))
     done
 }
