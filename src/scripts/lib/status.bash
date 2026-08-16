@@ -1,70 +1,103 @@
-# Pod status file: heartbeat timestamp + one line per watched-kind PID.
+# Pod status files: the heartbeat and the watcher-PID map.
 # Sourced; not directly executable.
 #
-# The keelson controller writes this file every tick; keelson-probe reads
-# it. Single writer (the loop), multiple readers (kube exec probes).
+# Two facts, two owners, so two files:
 #
-# File format (lines, key=value):
-#   heartbeat=<unix-seconds>
-#   <Kind>=<pid>
-#   ...
+#   <dir>/heartbeat   heartbeat=<unix-seconds>   written by the controller loop
+#                                                once per tick; that cadence is
+#                                                the whole point of it
+#   <dir>/watchers    <Kind>=<pid> per line      written by the watcher
+#                                                supervisor at the moment it
+#                                                changes the map, which is a
+#                                                death or a respawn and so
+#                                                almost never
 #
-# Tests override KEELSON_STATUS_FILE by exporting it before sourcing; the
-# probe binary inherits its value the same way from the kubelet exec env.
+# One writer per file, many readers (kube exec probes). They were one file
+# once, which forced the rarely-changing map to be republished every tick and
+# forced both facts to share a single publication point. Splitting them lets
+# each be published when its owner knows the value.
+#
+# keelson-probe reads only what it needs: liveness the heartbeat, readiness
+# the map.
+#
+# Tests override KEELSON_STATUS_DIR by reassigning it after sourcing; every
+# path here is resolved at call time. The probe binary inherits the value
+# from the kubelet exec env the same way.
 
-KEELSON_STATUS_FILE=${KEELSON_STATUS_FILE:-/keelson/work/status}
+KEELSON_STATUS_DIR=${KEELSON_STATUS_DIR:-/keelson/work/status}
 
 declare -gA STATUS_PIDS=()
 STATUS_HEARTBEAT=0
 
-# status_write <heartbeat> <kind=pid> [<kind=pid> ...]
-# Atomic via write-then-rename.
-status_write() {
-    local heartbeat=$1; shift
-    local tmp="${KEELSON_STATUS_FILE}.tmp"
-    mkdir -p "$(dirname "$KEELSON_STATUS_FILE")"
-    {
-        printf 'heartbeat=%s\n' "$heartbeat"
-        local entry
-        for entry in "$@"; do
-            printf '%s\n' "$entry"
-        done
-    } > "$tmp"
-    mv -f "$tmp" "$KEELSON_STATUS_FILE"
+# status_write_file <path> [<line> ...]
+# Atomic via write-then-rename, so a reader never sees a half-written file.
+status_write_file() {
+    local path=$1; shift
+    local tmp="${path}.tmp"
+    mkdir -p "${path%/*}"
+    if [ "$#" -gt 0 ]; then
+        printf '%s\n' "$@" > "$tmp"
+    else
+        : > "$tmp"
+    fi
+    mv -f "$tmp" "$path"
 }
 
-# status_read
-# Populates STATUS_HEARTBEAT (0 if missing) and STATUS_PIDS["<kind>"]=<pid>.
+# status_write_heartbeat <unix-seconds>
+status_write_heartbeat() {
+    status_write_file "$KEELSON_STATUS_DIR/heartbeat" "heartbeat=$1"
+}
+
+# status_write_watchers [<kind=pid> ...]
+status_write_watchers() {
+    status_write_file "$KEELSON_STATUS_DIR/watchers" "$@"
+}
+
+# status_read_heartbeat
+# Populates STATUS_HEARTBEAT (0 if the key is absent).
 # Returns 1 if the file is missing.
-status_read() {
+status_read_heartbeat() {
     STATUS_HEARTBEAT=0
-    STATUS_PIDS=()
-    [ -r "$KEELSON_STATUS_FILE" ] || return 1
-    local line key value
+    local file="$KEELSON_STATUS_DIR/heartbeat"
+    [ -r "$file" ] || return 1
+    local key value
     while IFS='=' read -r key value; do
-        [ -z "$key" ] && continue
         case "$key" in
             heartbeat) STATUS_HEARTBEAT=$value ;;
-            *) STATUS_PIDS["$key"]=$value ;;
         esac
-    done < "$KEELSON_STATUS_FILE"
+    done < "$file"
+    return 0
+}
+
+# status_read_watchers
+# Populates STATUS_PIDS["<kind>"]=<pid>. Returns 1 if the file is missing.
+status_read_watchers() {
+    STATUS_PIDS=()
+    local file="$KEELSON_STATUS_DIR/watchers"
+    [ -r "$file" ] || return 1
+    local key value
+    while IFS='=' read -r key value; do
+        [ -z "$key" ] && continue
+        STATUS_PIDS["$key"]=$value
+    done < "$file"
+    return 0
 }
 
 # status_heartbeat_fresh <max-age-seconds>
-# True iff status file was last updated within max-age seconds.
+# True iff the heartbeat was published within max-age seconds.
 status_heartbeat_fresh() {
     local max_age=$1
-    status_read || return 1
+    status_read_heartbeat || return 1
     local now
     now=$(date -u +%s)
     [ $(( now - STATUS_HEARTBEAT )) -lt "$max_age" ]
 }
 
 # status_all_watchers_alive
-# True iff every PID listed in the status file is still alive. False if the
-# file is missing or empty of kind entries.
+# True iff every PID in the map is still alive. False if the file is missing
+# or holds no entries.
 status_all_watchers_alive() {
-    status_read || return 1
+    status_read_watchers || return 1
     [ "${#STATUS_PIDS[@]}" -gt 0 ] || return 1
     local kind pid
     for kind in "${!STATUS_PIDS[@]}"; do

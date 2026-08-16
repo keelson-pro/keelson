@@ -21,7 +21,7 @@
 **Env required:** every `KEELSON_*` variable validated by `keelson-validate`.
 The full list lives in [Configuration.md](Configuration.md). The Pod also
 needs the keelson ConfigMap mounted at `/configmap` (for `registries.yaml`)
-and an emptyDir at `/keelson/work` (for the watch queue and status file).
+and an emptyDir at `/keelson/work` (for the watch queue and status files).
 
 **Flow:**
 
@@ -48,9 +48,17 @@ and an emptyDir at `/keelson/work` (for the watch queue and status file).
      scan pick up any out-of-band edits), run `scan_run`, flush deltas
      back. The parent's state stays clean; the next child rereads the
      ConfigMap. Long scans overlap ticks but never each other.
-   - **Write the status file.** `/keelson/work/status` carries the heartbeat
-     timestamp and one `<Kind>=<pid>` line per watched kind. `keelson-probe`
-     reads it. Written atomically (tempfile + rename).
+   - **Write the heartbeat.** `/keelson/work/status/heartbeat` carries the
+     timestamp `keelson-probe liveness` reads. Written atomically (tempfile +
+     rename), once per tick, because the cadence is the signal.
+
+   The watcher PID map lives beside it in `/keelson/work/status/watchers`,
+   one `<Kind>=<pid>` line per watched kind, and is written by the supervisor
+   step above rather than here. The supervisor owns the map, so it publishes
+   it the moment it changes it: a death or a respawn, not once per tick. That
+   keeps the map on disk current for `keelson-probe readiness` instead of
+   lagging until the end of the tick, and stops a value that moves twice a
+   week from being rewritten 86,400 times a day.
 5. On `KEELSON_DRY_RUN=1` the scan still runs but no `kubectl patch` is
    issued — handy for debugging in-cluster without write RBAC.
 
@@ -63,7 +71,9 @@ Not called by anything else.
 **Args:** `startup`, `readiness`, or `liveness`. Anything else exits 64.
 
 **Env required:** `KEELSON_HEARTBEAT_MAX_AGE`. Other env defaults to the same
-path the controller writes (`/keelson/work/status`).
+directory the controller writes (`/keelson/work/status`). Each check reads
+only the file it needs, so a missing watcher map never affects liveness and a
+stale heartbeat never affects readiness.
 
 **Decisions:**
 
@@ -148,9 +158,10 @@ Deployment
    │       ├── validate_config (sources lib/validate.bash)
    │       └── loop_run
    │             ├── supervise watchers ──► kubectl get --watch &
+   │             │      └── on change ──► write status/watchers
    │             ├── drain queue
    │             ├── kick scan ──► scan_run ──► keelson-update-resource ──► kubectl
-   │             └── write status file
+   │             └── write status/heartbeat
    │
    ├── startupProbe:    keelson-probe startup     (heartbeat + PIDs)
    ├── readinessProbe:  keelson-probe readiness   (PIDs)

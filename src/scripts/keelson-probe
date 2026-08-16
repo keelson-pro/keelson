@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Kubernetes probe entry. Reads /keelson/work/status (written each loop tick
-# by the keelson controller) and answers startup, readiness, or liveness.
+# Kubernetes probe entry. Answers startup, readiness, or liveness from the
+# two files the keelson controller publishes under /keelson/work/status:
+#
+#   heartbeat  written by the controller loop every tick
+#   watchers   written by the watcher supervisor when the PID map changes
 #
 #   startup    heartbeat fresh AND every watched-kind PID alive
-#   readiness  every watched-kind PID alive
-#   liveness   heartbeat fresh
+#   readiness  every watched-kind PID alive       (reads watchers only)
+#   liveness   heartbeat fresh                    (reads heartbeat only)
 #
 # Exit 0 on pass, 1 on fail. No output on success; one log line on failure.
 
@@ -26,17 +29,19 @@ USAGE
 
 probe_liveness() {
     local max_age=${KEELSON_HEARTBEAT_MAX_AGE:?KEELSON_HEARTBEAT_MAX_AGE required}
+    local file="$KEELSON_STATUS_DIR/heartbeat"
     if ! status_heartbeat_fresh "$max_age"; then
-        log_error probe-liveness-fail max-age="$max_age" file="$KEELSON_STATUS_FILE" \
-            msg="Liveness probe failed: status file '$KEELSON_STATUS_FILE' heartbeat is older than ${max_age}s."
+        log_error probe-liveness-fail max-age="$max_age" file="$file" \
+            msg="Liveness probe failed: heartbeat in '$file' is older than ${max_age}s."
         return 1
     fi
 }
 
 probe_readiness() {
+    local file="$KEELSON_STATUS_DIR/watchers"
     if ! status_all_watchers_alive; then
-        log_error probe-readiness-fail file="$KEELSON_STATUS_FILE" \
-            msg="Readiness probe failed: not all watcher PIDs in '$KEELSON_STATUS_FILE' are alive."
+        log_error probe-readiness-fail file="$file" \
+            msg="Readiness probe failed: not all watcher PIDs in '$file' are alive."
         return 1
     fi
 }

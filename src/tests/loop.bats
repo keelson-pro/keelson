@@ -32,7 +32,9 @@ setup() {
     source "$SCRIPT_DIR/lib/loop.bash"
 
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
-    KEELSON_STATUS_FILE="$TMP_DIR/status"
+    KEELSON_STATUS_DIR="$TMP_DIR/status"
+    HEARTBEAT_FILE="$KEELSON_STATUS_DIR/heartbeat"
+    WATCHERS_FILE="$KEELSON_STATUS_DIR/watchers"
     queue_init
 
     # Stub the heavy collaborators.
@@ -147,19 +149,66 @@ emit() { "$@" 2>&1; }
     [ "$(( LOOP_WATCHER_ELIGIBLE[Deployment] - 100 ))" = "50" ]
 }
 
-# --- loop_write_status ---
+# --- loop_publish_watchers ---
 
-@test "write_status: heartbeat + one line per kind" {
+@test "publish_watchers: one line per kind" {
     LOOP_WATCHER_PIDS[Deployment]=42
-    KEELSON_WATCHED_KINDS=Deployment loop_write_status 1234
-    [ -f "$KEELSON_STATUS_FILE" ]
-    grep -q '^heartbeat=1234$' "$KEELSON_STATUS_FILE"
-    grep -q '^Deployment=42$' "$KEELSON_STATUS_FILE"
+    KEELSON_WATCHED_KINDS=Deployment loop_publish_watchers
+    [ -f "$WATCHERS_FILE" ]
+    grep -q '^Deployment=42$' "$WATCHERS_FILE"
 }
 
-@test "write_status: missing kind PID is written as 0" {
-    KEELSON_WATCHED_KINDS="Deployment CronJob" loop_write_status 5
-    grep -q '^CronJob=0$' "$KEELSON_STATUS_FILE"
+@test "publish_watchers: missing kind PID is written as 0" {
+    KEELSON_WATCHED_KINDS="Deployment CronJob" loop_publish_watchers
+    grep -q '^CronJob=0$' "$WATCHERS_FILE"
+}
+
+@test "publish_watchers: does not write the heartbeat" {
+    LOOP_WATCHER_PIDS[Deployment]=42
+    loop_publish_watchers
+    [ ! -e "$HEARTBEAT_FILE" ]
+}
+
+# --- the supervisor publishes its own map, when it changes ---
+
+@test "supervisor: publishes the map when it spawns a watcher" {
+    loop_supervise_watchers 100 300 30
+    [ -f "$WATCHERS_FILE" ]
+    grep -q "^Deployment=${LOOP_WATCHER_PIDS[Deployment]}\$" "$WATCHERS_FILE"
+}
+
+@test "supervisor: republishes the map as soon as a watcher dies" {
+    sleep() { command sleep "$@"; }
+    ( exec sleep 0.01 ) &
+    local dead_pid=$!
+    wait "$dead_pid" 2>/dev/null || true
+    sleep() { :; }
+
+    LOOP_WATCHER_PIDS[Deployment]=$dead_pid
+    loop_publish_watchers
+    grep -q "^Deployment=$dead_pid\$" "$WATCHERS_FILE"
+
+    # Death noticed at now=100, respawn deferred to 101, so the published
+    # map must drop the dead PID on this very tick rather than carry it.
+    loop_supervise_watchers 100 300 30
+    grep -q '^Deployment=0$' "$WATCHERS_FILE"
+}
+
+@test "supervisor: does not rewrite the map when nothing changed" {
+    LOOP_WATCHER_PIDS[Deployment]=$$
+    LOOP_WATCHER_STARTED[Deployment]=100
+    loop_publish_watchers
+    rm -f "$WATCHERS_FILE"
+
+    loop_supervise_watchers 100 300 30
+    [ ! -e "$WATCHERS_FILE" ]
+}
+
+@test "supervisor: returns success when nothing changed" {
+    LOOP_WATCHER_PIDS[Deployment]=$$
+    LOOP_WATCHER_STARTED[Deployment]=100
+    run loop_supervise_watchers 100 300 30
+    [ "$status" -eq 0 ]
 }
 
 # --- loop_run scheduling ---
@@ -176,8 +225,14 @@ emit() { "$@" 2>&1; }
     [ "$(cat "$TMP_DIR/scan.calls")" = "0" ]
 }
 
-@test "loop_run: writes the status file each tick" {
+@test "loop_run: writes the heartbeat each tick" {
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
-    [ -f "$KEELSON_STATUS_FILE" ]
-    grep -q '^heartbeat=' "$KEELSON_STATUS_FILE"
+    [ -f "$HEARTBEAT_FILE" ]
+    grep -q '^heartbeat=' "$HEARTBEAT_FILE"
+}
+
+@test "loop_run: first tick publishes the watcher map too" {
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ -f "$WATCHERS_FILE" ]
+    grep -q "^Deployment=${LOOP_WATCHER_PIDS[Deployment]}\$" "$WATCHERS_FILE"
 }

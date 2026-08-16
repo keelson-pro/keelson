@@ -31,10 +31,10 @@ Each row's left cell shows the env var on top and the matching Kaptain token bel
 
 | Env Var / Kaptain Token | Default | Purpose |
 |---|---|---|
-| `KEELSON_TICK_INTERVAL`<br>`Keelson/TickInterval` | `1` | Seconds between supervisor ticks. Each tick: supervise watchers, drain queue, kick scan if due, write the status file. |
+| `KEELSON_TICK_INTERVAL`<br>`Keelson/TickInterval` | `1` | Seconds between supervisor ticks. Each tick: supervise watchers, drain queue, kick scan if due, write the heartbeat. The watcher PID map is published by the supervisor when it changes, not on this cadence. |
 | `KEELSON_POLL_INTERVAL`<br>`Keelson/PollInterval` | `60` | Seconds between scan starts (measured from the previous scan's start time; long scans queue the next for the very next tick, never overlap). |
 | `KEELSON_FULL_REFRESH_INTERVAL`<br>`Keelson/FullRefreshInterval` | `3600` | Seconds between trigger-state cache reloads from the ConfigMap. Picks up any out-of-band edits an operator made. |
-| `KEELSON_HEARTBEAT_MAX_AGE`<br>`Keelson/HeartbeatMaxAge` | `5` | Seconds before the kubelet's liveness probe treats the status file as stale. Keep close to `KEELSON_TICK_INTERVAL` — too generous masks a wedged loop, too tight false-positives on jitter. |
+| `KEELSON_HEARTBEAT_MAX_AGE`<br>`Keelson/HeartbeatMaxAge` | `5` | Seconds before the kubelet's liveness probe treats the heartbeat as stale. Keep close to `KEELSON_TICK_INTERVAL` — too generous masks a wedged loop, too tight false-positives on jitter. |
 
 ### Watcher supervision
 

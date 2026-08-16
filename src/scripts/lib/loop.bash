@@ -43,12 +43,27 @@ loop_drain_queue() {
     return 0
 }
 
+# loop_publish_watchers
+# Publishes the current PID map for keelson-probe's readiness check.
+loop_publish_watchers() {
+    local kind args=()
+    for kind in $KEELSON_WATCHED_KINDS; do
+        args+=("${kind}=${LOOP_WATCHER_PIDS[$kind]:-0}")
+    done
+    status_write_watchers "${args[@]}"
+}
+
 # loop_supervise_watchers <now> <backoff_max> <healthy_reset>
 # Respawns dead watchers respecting per-kind exponential backoff. Resets the
 # failure count for any watcher that has stayed alive past <healthy_reset>.
+#
+# The supervisor owns LOOP_WATCHER_PIDS, so the supervisor publishes it, and
+# it publishes the moment the map changes rather than leaving a stale map on
+# disk until the end of the tick. Nothing changed means nothing written: the
+# map moves on a death or a respawn, not on a schedule.
 loop_supervise_watchers() {
     local now=$1 backoff_max=$2 healthy_reset=$3
-    local kind pid started fails delay new_pid
+    local kind pid started fails delay new_pid changed=0
     for kind in $KEELSON_WATCHED_KINDS; do
         pid=${LOOP_WATCHER_PIDS[$kind]:-0}
         if [ "$pid" -gt 0 ]; then
@@ -68,12 +83,14 @@ loop_supervise_watchers() {
             [ "$delay" -gt "$backoff_max" ] && delay=$backoff_max
             LOOP_WATCHER_ELIGIBLE[$kind]=$(( now + delay ))
             LOOP_WATCHER_PIDS[$kind]=0
+            changed=1
         fi
         [ "$now" -lt "${LOOP_WATCHER_ELIGIBLE[$kind]:-0}" ] && continue
         watch_run_kind "$kind" &
         new_pid=$!
         LOOP_WATCHER_PIDS[$kind]=$new_pid
         LOOP_WATCHER_STARTED[$kind]=$now
+        changed=1
         fails=${LOOP_WATCHER_FAIL[$kind]:-0}
         if [ "$fails" -eq 0 ]; then
             log_info_always watcher-spawned kind="$kind" pid="$new_pid" fails="$fails" \
@@ -83,16 +100,8 @@ loop_supervise_watchers() {
                 msg="Watcher for kind '$kind' respawned (pid $new_pid, fail count $fails)."
         fi
     done
-}
-
-# loop_write_status <now>
-# Refreshes the heartbeat + watcher PID map for keelson-probe.
-loop_write_status() {
-    local now=$1 kind args=()
-    for kind in $KEELSON_WATCHED_KINDS; do
-        args+=("${kind}=${LOOP_WATCHER_PIDS[$kind]:-0}")
-    done
-    status_write "$now" "${args[@]}"
+    [ "$changed" -eq 1 ] && loop_publish_watchers
+    return 0
 }
 
 # loop_start_scan <apply> <force_refresh>
@@ -125,8 +134,9 @@ loop_kill_children() {
 
 # loop_run
 # Tick once per KEELSON_TICK_INTERVAL: supervise watchers, drain queue,
-# kick a backgrounded scan when due, refresh the status file. Long scans
-# overlap ticks but never each other (gated on LOOP_SCAN_PID).
+# kick a backgrounded scan when due, refresh the heartbeat. The watcher map
+# is published by the supervisor itself, not from here. Long scans overlap
+# ticks but never each other (gated on LOOP_SCAN_PID).
 loop_run() {
     local tick=${KEELSON_TICK_INTERVAL:?KEELSON_TICK_INTERVAL required}
     local poll=${KEELSON_POLL_INTERVAL:?KEELSON_POLL_INTERVAL required}
@@ -164,7 +174,7 @@ loop_run() {
             last_refresh=$now
         fi
 
-        loop_write_status "$now"
+        status_write_heartbeat "$now"
 
         sleep "$tick"
         iter=$(( iter + 1 ))
