@@ -57,6 +57,11 @@ and an emptyDir at `/keelson/work` (for the watch queue and status files).
      scan pick up any out-of-band edits), run `scan_run`, flush deltas
      back. The parent's state stays clean; the next child rereads the
      ConfigMap. Long scans overlap ticks but never each other.
+   - **Rotate the log file if it is oversize.** The controller loop is the
+     only rotator. Watchers and scan children append to the same file, and
+     concurrent appends are safe, but two processes running the rename
+     shuffle at once lose or duplicate rotated files. Checking here also
+     takes a `wc -c` off every single log call.
    - **Sleep the remainder of the cycle.** `KEELSON_TICK_INTERVAL` is the
      cycle time, not the idle time: the loop sleeps the tick minus the work
      it just did, so ticks start on a fixed cadence rather than drifting by
@@ -177,6 +182,7 @@ Deployment
    │             │      └── on change ──► write status/watchers
    │             ├── drain queue
    │             ├── kick scan ──► scan_run ──► keelson-update-resource ──► kubectl
+   │             ├── rotate log if oversize        (sole rotator)
    │             └── sleep (tick - elapsed), or warn if already over
    │
    ├── startupProbe:    keelson-probe startup     (heartbeat + PIDs)

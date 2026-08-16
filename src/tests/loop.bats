@@ -239,6 +239,26 @@ emit() { "$@" 2>&1; }
     grep -q "^Deployment=${LOOP_WATCHER_PIDS[Deployment]}\$" "$WATCHERS_FILE"
 }
 
+# --- log rotation ownership ---
+
+@test "loop_run: rotates the log file when it is oversize" {
+    KEELSON_LOG_FILE_PATH="$TMP_DIR/keelson.log"
+    KEELSON_LOG_FILE_MAX_BYTES=10
+    KEELSON_LOG_FILE_KEEP=3
+    printf 'XXXXXXXXXXXXXXXXXXXX\n' > "$KEELSON_LOG_FILE_PATH"
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ -f "$KEELSON_LOG_FILE_PATH.1" ]
+    grep -q "XXXX" "$KEELSON_LOG_FILE_PATH.1"
+}
+
+@test "loop_run: leaves an under-size log file alone" {
+    KEELSON_LOG_FILE_PATH="$TMP_DIR/keelson.log"
+    KEELSON_LOG_FILE_MAX_BYTES=100000
+    printf 'small\n' > "$KEELSON_LOG_FILE_PATH"
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ ! -f "$KEELSON_LOG_FILE_PATH.1" ]
+}
+
 # --- heartbeat publication point ---
 
 @test "loop_run: publishes the heartbeat before the tick's work" {

@@ -34,6 +34,13 @@
 # The file log path is convention, not configuration:
 #   /keelson/work/log/keelson.log         active
 #   /keelson/work/log/keelson.log.1..N    rotated, oldest = highest N
+#
+# Many processes append to that file: the controller loop, one watcher per
+# watched kind, and every backgrounded scan child. Appending concurrently is
+# safe; rotating concurrently is not. Rotation therefore has exactly one
+# owner, the controller loop, via log_file_rotate_if_needed once per tick.
+# A process that only appends never rotates, so the file grows unbounded
+# while the controller is not running (one-shot entry points, tests).
 
 KEELSON_LOG_FILE_PATH=${KEELSON_LOG_FILE_PATH:-/keelson/work/log/keelson.log}
 
@@ -144,24 +151,37 @@ log_file_rotate() {
     return 0
 }
 
+# log_file_rotate_if_needed
+# Rotate when the active file has grown past KEELSON_LOG_FILE_MAX_BYTES.
+#
+# THE ONLY CALLER IS THE CONTROLLER LOOP, once per tick. Do not call this
+# from the write path: see the note above log_file_write.
+log_file_rotate_if_needed() {
+    local max=${KEELSON_LOG_FILE_MAX_BYTES:-10485760}
+    [ -f "$KEELSON_LOG_FILE_PATH" ] || return 0
+    local size
+    size=$(wc -c <"$KEELSON_LOG_FILE_PATH" 2>/dev/null || printf '0')
+    [ "$size" -ge "$max" ] || return 0
+    log_file_rotate
+}
+
 # log_file_write <plain-line>
-# Append to the rotated file. Always plain format. Always emits regardless
-# of stdout level or throttle. Best-effort: a write failure here must not
-# break the caller.
+# Append to the log file. Always plain format. Always emits regardless of
+# stdout level or throttle. Best-effort: a write failure here must not break
+# the caller.
+#
+# Appends only. This runs in every process that logs, and there are many:
+# the controller loop, one watcher per watched kind, and each backgrounded
+# scan child. Concurrent appends are safe (the fd is O_APPEND and a line is
+# one short write), but the rename shuffle in log_file_rotate is not: two
+# processes running it at once lose or duplicate rotated files. So rotation
+# is not decided here. It has a single owner, the controller loop, which
+# calls log_file_rotate_if_needed once per tick.
 log_file_write() {
     local line=$1
-    local max=${KEELSON_LOG_FILE_MAX_BYTES:-10485760}
     local dir
     dir=$(dirname "$KEELSON_LOG_FILE_PATH")
     mkdir -p "$dir" 2>/dev/null || return 0
-
-    if [ -f "$KEELSON_LOG_FILE_PATH" ]; then
-        local size
-        size=$(wc -c <"$KEELSON_LOG_FILE_PATH" 2>/dev/null || printf '0')
-        if [ "$size" -ge "$max" ]; then
-            log_file_rotate
-        fi
-    fi
     printf '%s' "$line" >> "$KEELSON_LOG_FILE_PATH" 2>/dev/null || true
 }
 

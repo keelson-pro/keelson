@@ -193,6 +193,12 @@ loop_run() {
             last_refresh=$now
         fi
 
+        # Sole owner of log rotation. Watchers and scan children append to
+        # the same file but must never rotate it; concurrent rename shuffles
+        # lose rotated files. Last thing in the tick, so it accounts for
+        # everything this tick logged.
+        log_file_rotate_if_needed
+
         clock_read
         remaining_us=$(( tick_us - (CLOCK_NOW_US - cycle_start_us) ))
         if [ "$remaining_us" -gt 0 ]; then
