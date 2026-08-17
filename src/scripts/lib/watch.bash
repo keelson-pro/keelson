@@ -14,7 +14,7 @@
 #   KEELSON_WATCH_MAX_ITERATIONS       0 = loop forever (default); >0 for tests
 #
 # Depends on (must be sourced first):
-#   lib/log.bash, lib/clock.bash, lib/queue.bash
+#   lib/log.bash, lib/clock.bash, lib/queue.bash, lib/status.bash
 
 # watch_run_kind <kind>
 # Long-running reconnect loop. Each iteration runs one kubectl --watch
@@ -38,23 +38,68 @@ watch_run_kind() {
     local reset=${KEELSON_WATCHER_RECONNECT_RESET:?KEELSON_WATCHER_RECONNECT_RESET required}
     local max_iter=${KEELSON_WATCH_MAX_ITERATIONS:-0}
     local backoff=$initial
-    local iter=0 opened held
+    local iter=0 opened held rc fails=0 err errfile rcfile
+    errfile="${KEELSON_STATUS_DIR}/watcher-${kind}.stderr"
+    rcfile="${KEELSON_STATUS_DIR}/watcher-${kind}.rc"
+    mkdir -p "$KEELSON_STATUS_DIR" 2>/dev/null || true
+    status_write_watcher_health "$kind" 0 ""
     while [ "$max_iter" -eq 0 ] || [ "$iter" -lt "$max_iter" ]; do
         log_info watch-start kind="$kind" \
             msg="Watching kind '$kind' for changes."
         clock_read
         opened=$CLOCK_NOW_US
-        watch_kubectl_stream "$kind" | watch_handle_events "$kind"
+        # kubectl's own exit code, recorded inside the pipeline's left-hand
+        # subshell. Two reasons not to read the pipeline's status instead:
+        # it reflects watch_handle_events, which returns 0 whenever stdin
+        # closes, and reading kubectl's through it would depend on pipefail
+        # being set by whoever sourced us. Recording it here is explicit and
+        # keeps the whole thing clear of set -e, which would otherwise kill
+        # this subshell on exactly the failures the loop exists to handle
+        # (denied RBAC, unknown kind, refused connection).
+        rc=0
+        # `|| rc=$?` inside the subshell as well as outside: set -e applies
+        # in there too, and would otherwise tear the subshell down the moment
+        # kubectl fails, before the code could be recorded. The newline
+        # matters too, or read hits EOF and returns 1.
+        { watch_kubectl_stream "$kind" 2>"$errfile" || rc=$?; \
+          printf '%s\n' "$rc" >"$rcfile"; } \
+            | watch_handle_events "$kind"
+        read -r rc <"$rcfile" 2>/dev/null || rc=0
         clock_read
         held=$(( (CLOCK_NOW_US - opened) / 1000000 ))
-        [ "$held" -ge "$reset" ] && backoff=$initial
-        log_warn watch-disconnected kind="$kind" backoff="$backoff" held="$held" \
-            msg="Watch for kind '$kind' held ${held}s then disconnected; reconnecting in ${backoff}s."
+        if [ "$rc" -ne 0 ]; then
+            err=$(watch_last_error "$errfile")
+            fails=$(( fails + 1 ))
+            status_write_watcher_health "$kind" "$fails" "$err"
+            log_warn watch-failed kind="$kind" rc="$rc" fails="$fails" \
+                backoff="$backoff" \
+                msg="Watch for kind '$kind' failed (exit $rc, $fails in a row): ${err:-no error output}. Retrying in ${backoff}s."
+        else
+            if [ "$held" -ge "$reset" ]; then
+                backoff=$initial
+                fails=0
+                status_write_watcher_health "$kind" 0 ""
+            fi
+            log_warn watch-disconnected kind="$kind" backoff="$backoff" held="$held" \
+                msg="Watch for kind '$kind' held ${held}s then disconnected; reconnecting in ${backoff}s."
+        fi
         sleep "$backoff"
         backoff=$(( backoff * 2 ))
         [ "$backoff" -gt "$cap" ] && backoff=$cap
         iter=$(( iter + 1 ))
     done
+}
+
+# watch_last_error <file>
+# Last non-blank line of kubectl's stderr, or empty. One line is enough to
+# tell RBAC from a bad kind from a refused connection.
+watch_last_error() {
+    local file=$1 line last=
+    [ -r "$file" ] || return 0
+    while IFS= read -r line; do
+        [ -n "$line" ] && last=$line
+    done < "$file"
+    printf '%s' "$last"
 }
 
 # watch_kubectl_stream <kind>
@@ -66,11 +111,11 @@ watch_kubectl_stream() {
         namespace)
             kubectl get "$kind" \
                 -n "${KEELSON_NAMESPACE:?KEELSON_NAMESPACE required when KEELSON_SCOPE=namespace}" \
-                --watch -o jsonpath="$jp" 2>/dev/null
+                --watch -o jsonpath="$jp"
             ;;
         cluster|*)
             kubectl get "$kind" --all-namespaces \
-                --watch -o jsonpath="$jp" 2>/dev/null
+                --watch -o jsonpath="$jp"
             ;;
     esac
 }

@@ -28,6 +28,11 @@ write_watchers() {
     printf '%s\n' "$@" > "$WATCHERS_FILE"
 }
 
+# <kind> [failures]; a watcher publishes this for itself in production.
+write_watcher_health() {
+    printf 'failures=%s\nerror=\n' "${2:-0}" > "$KEELSON_STATUS_DIR/watcher-$1"
+}
+
 now() { date -u +%s; }
 
 # --- liveness ---
@@ -83,6 +88,7 @@ now() { date -u +%s; }
 
 @test "readiness: all live PIDs passes" {
     write_watchers "Deployment=$$"
+    write_watcher_health Deployment 0
     run "$PROBE" readiness
     [ "$status" -eq 0 ]
 }
@@ -96,9 +102,31 @@ now() { date -u +%s; }
     [ "$status" -eq 1 ]
 }
 
+@test "readiness: an alive PID whose watch is not streaming fails" {
+    write_watchers "Deployment=$$"
+    write_watcher_health Deployment 3
+    run "$PROBE" readiness
+    [ "$status" -eq 1 ]
+}
+
+@test "readiness: a kind that has not published health yet fails" {
+    write_watchers "Deployment=$$"
+    run "$PROBE" readiness
+    [ "$status" -eq 1 ]
+}
+
+@test "startup: an alive PID whose watch is not streaming fails" {
+    write_heartbeat "$(now)"
+    write_watchers "Deployment=$$"
+    write_watcher_health Deployment 1
+    run "$PROBE" startup
+    [ "$status" -eq 1 ]
+}
+
 @test "readiness: does not care about the heartbeat" {
     write_heartbeat "$(( $(now) - 600 ))"
     write_watchers "Deployment=$$"
+    write_watcher_health Deployment 0
     run "$PROBE" readiness
     [ "$status" -eq 0 ]
 }
@@ -108,6 +136,7 @@ now() { date -u +%s; }
 @test "startup: fresh + alive passes" {
     write_heartbeat "$(now)"
     write_watchers "Deployment=$$"
+    write_watcher_health Deployment 0
     run "$PROBE" startup
     [ "$status" -eq 0 ]
 }

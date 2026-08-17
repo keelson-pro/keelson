@@ -49,6 +49,10 @@ and an emptyDir at `/keelson/work` (for the watch queue and status files).
      seconds, capped at `KEELSON_WATCHER_BACKOFF_MAX` (CrashLoopBackOff
      style). A watcher that stays alive past `KEELSON_WATCHER_HEALTHY_RESET`
      clears its failure count.
+
+     This layer handles the watcher *process* dying. A watch that fails
+     without the process dying (denied RBAC, an unknown kind, a refused
+     connection) is handled inside the watcher instead: see below.
    - **Drain the queue.** Events written by watchers are read and logged.
    - **Kick a scan if due.** `now - last_scan_start >= KEELSON_POLL_INTERVAL`
      and no prior scan still running → spawn the scan in a background
@@ -78,6 +82,14 @@ and an emptyDir at `/keelson/work` (for the watch queue and status files).
    keeps the map on disk current for `keelson-probe readiness` instead of
    lagging until the end of the tick, and stops a value that moves twice a
    week from being rewritten 86,400 times a day.
+
+   Each watcher publishes its own health to
+   `/keelson/work/status/watcher-<Kind>`, carrying `failures=<consecutive>`
+   and `error=<last kubectl stderr line>`. One writer per file, so watchers
+   never contend. Readiness needs this as well as the PID map, because a live
+   PID only proves the watcher process exists: the process outlives a watch
+   that is failing, so without it a watcher reconnecting into a permission
+   error for a week would report Ready.
 5. On `KEELSON_DRY_RUN=1` the scan still runs but no `kubectl patch` is
    issued — handy for debugging in-cluster without write RBAC.
 
@@ -91,16 +103,25 @@ Not called by anything else.
 
 **Env required:** `KEELSON_HEARTBEAT_MAX_AGE`. Other env defaults to the same
 directory the controller writes (`/keelson/work/status`). Each check reads
-only the file it needs, so a missing watcher map never affects liveness and a
+only the files it needs, so a missing watcher map never affects liveness and a
 stale heartbeat never affects readiness.
 
 **Decisions:**
 
 | Subcommand | Pass when |
 |---|---|
-| `startup` | Heartbeat fresh **and** every watched-kind PID alive. |
-| `readiness` | Every watched-kind PID alive. |
+| `startup` | Everything `readiness` needs, **and** the heartbeat fresh. |
+| `readiness` | Every watched-kind PID alive **and** every watcher streaming (`failures=0`). |
 | `liveness` | Heartbeat younger than `KEELSON_HEARTBEAT_MAX_AGE`. |
+
+Readiness needs both halves because they answer different questions. The PID
+says the watcher process exists; the health file says its watch is actually
+working. A watcher whose `kubectl` is being refused stays alive and keeps
+retrying, so the PID alone would report a broken kind as Ready.
+
+Startup deliberately demands the same as readiness: a kind Keelson was
+configured to watch but cannot is a misconfiguration, and the Pod should
+refuse to come up rather than run half working.
 
 Exit 0 on pass, 1 on fail. One log line is emitted on failure; success is
 silent so the kubelet's probe logs stay readable.
@@ -187,14 +208,15 @@ Deployment
    │       └── loop_run
    │             ├── write status/heartbeat        (clock read + write)
    │             ├── supervise watchers ──► kubectl get --watch &
-   │             │      └── on change ──► write status/watchers
+   │             │      ├── on change ──► write status/watchers
+   │             │      └── per watcher ──► write status/watcher-<Kind>
    │             ├── drain queue
    │             ├── kick scan ──► scan_run ──► keelson-update-resource ──► kubectl
    │             ├── rotate log if oversize        (sole rotator)
    │             └── sleep (tick - elapsed), or warn if already over
    │
-   ├── startupProbe:    keelson-probe startup     (heartbeat + PIDs)
-   ├── readinessProbe:  keelson-probe readiness   (PIDs)
+   ├── startupProbe:    keelson-probe startup     (heartbeat + PIDs + streaming)
+   ├── readinessProbe:  keelson-probe readiness   (PIDs + streaming)
    └── livenessProbe:   keelson-probe liveness    (heartbeat)
 
 humans ──► keelson-boot-scan        (same scan_run code path, no watchers)

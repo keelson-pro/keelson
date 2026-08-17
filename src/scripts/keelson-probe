@@ -52,6 +52,13 @@ probe_readiness() {
             msg="Readiness probe failed: not all watcher PIDs in '$file' are alive."
         return 1
     fi
+    # A live PID only proves the watcher process exists. Each watcher
+    # publishes whether its watch is actually streaming.
+    if ! status_all_watchers_streaming; then
+        log_error probe-readiness-fail file="$KEELSON_STATUS_DIR/watcher-<kind>" \
+            msg="Readiness probe failed: a watcher process is alive but its watch is not streaming; see the watcher-<kind> files in '$KEELSON_STATUS_DIR'."
+        return 1
+    fi
 }
 
 probe_startup() {

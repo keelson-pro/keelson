@@ -33,10 +33,10 @@ source "${SCRIPT_DIR}/lib/state.bash"
 source "${SCRIPT_DIR}/lib/scan.bash"
 # shellcheck source=lib/queue.bash
 source "${SCRIPT_DIR}/lib/queue.bash"
-# shellcheck source=lib/watch.bash
-source "${SCRIPT_DIR}/lib/watch.bash"
 # shellcheck source=lib/status.bash
 source "${SCRIPT_DIR}/lib/status.bash"
+# shellcheck source=lib/watch.bash
+source "${SCRIPT_DIR}/lib/watch.bash"
 # shellcheck source=lib/loop.bash
 source "${SCRIPT_DIR}/lib/loop.bash"
 

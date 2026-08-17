@@ -28,6 +28,8 @@ KEELSON_STATUS_DIR=${KEELSON_STATUS_DIR:-/keelson/work/status}
 
 declare -gA STATUS_PIDS=()
 STATUS_HEARTBEAT_US=0
+STATUS_WATCHER_FAILURES=0
+STATUS_WATCHER_ERROR=
 
 # status_write_file <path> [<line> ...]
 # Atomic via write-then-rename, so a reader never sees a half-written file.
@@ -87,6 +89,52 @@ status_read_watchers() {
         STATUS_PIDS["$key"]=$value
     done < "$file"
     return 0
+}
+
+# status_write_watcher_health <kind> <consecutive-failures> <error-text>
+# Written by the watcher for that kind, and by nobody else: one writer per
+# file, so watchers never contend. A live PID says the watcher process
+# exists; this says whether its watch is actually streaming.
+status_write_watcher_health() {
+    local kind=$1 failures=$2 err=$3
+    # The reader splits on the first '=' per line, so the error has to be a
+    # single line. kubectl's messages are short; keep the first 200 chars.
+    err=${err//$'\n'/ }
+    err=${err//$'\r'/ }
+    status_write_file "$KEELSON_STATUS_DIR/watcher-$kind" \
+        "failures=$failures" "error=${err:0:200}"
+}
+
+# status_read_watcher_health <kind>
+# Populates STATUS_WATCHER_FAILURES and STATUS_WATCHER_ERROR.
+# Returns 1 if the kind has not published yet.
+status_read_watcher_health() {
+    local kind=$1
+    STATUS_WATCHER_FAILURES=0
+    STATUS_WATCHER_ERROR=
+    local file="$KEELSON_STATUS_DIR/watcher-$kind"
+    [ -r "$file" ] || return 1
+    local key value
+    while IFS='=' read -r key value; do
+        case "$key" in
+            failures) STATUS_WATCHER_FAILURES=$value ;;
+            error)    STATUS_WATCHER_ERROR=$value ;;
+        esac
+    done < "$file"
+    return 0
+}
+
+# status_all_watchers_streaming
+# True iff every kind in the watcher map has published zero consecutive
+# failures. A kind that has not published at all is not streaming yet.
+status_all_watchers_streaming() {
+    status_read_watchers || return 1
+    [ "${#STATUS_PIDS[@]}" -gt 0 ] || return 1
+    local kind
+    for kind in "${!STATUS_PIDS[@]}"; do
+        status_read_watcher_health "$kind" || return 1
+        [ "$STATUS_WATCHER_FAILURES" -eq 0 ] 2>/dev/null || return 1
+    done
 }
 
 # status_heartbeat_fresh <max-age-seconds>

@@ -161,6 +161,73 @@ emit() { "$@" 2>&1; }
     [ "$status" -eq 0 ]
 }
 
+# --- watcher health, published per kind by the watcher itself ---
+
+@test "write_watcher_health: one file per kind" {
+    status_write_watcher_health Deployment 0 ""
+    status_write_watcher_health CronJob 3 "forbidden"
+    grep -q '^failures=0$' "$KEELSON_STATUS_DIR/watcher-Deployment"
+    grep -q '^failures=3$' "$KEELSON_STATUS_DIR/watcher-CronJob"
+    grep -q '^error=forbidden$' "$KEELSON_STATUS_DIR/watcher-CronJob"
+}
+
+@test "write_watcher_health: error text is flattened to one line" {
+    status_write_watcher_health CronJob 1 "$(printf 'line one\nline two')"
+    [ "$(grep -c . "$KEELSON_STATUS_DIR/watcher-CronJob")" = "2" ]
+    grep -q '^error=line one line two$' "$KEELSON_STATUS_DIR/watcher-CronJob"
+}
+
+@test "read_watcher_health: missing file returns 1" {
+    run status_read_watcher_health Deployment
+    [ "$status" -eq 1 ]
+}
+
+@test "read_watcher_health: populates the failure count" {
+    status_write_watcher_health Deployment 4 "boom"
+    status_read_watcher_health Deployment
+    [ "$STATUS_WATCHER_FAILURES" = "4" ]
+    [ "$STATUS_WATCHER_ERROR" = "boom" ]
+}
+
+# --- status_all_watchers_streaming ---
+
+@test "all_watchers_streaming: missing watcher map fails" {
+    run status_all_watchers_streaming
+    [ "$status" -eq 1 ]
+}
+
+@test "all_watchers_streaming: every kind at zero failures passes" {
+    status_write_watchers Deployment=$$ CronJob=$$
+    status_write_watcher_health Deployment 0 ""
+    status_write_watcher_health CronJob 0 ""
+    run status_all_watchers_streaming
+    [ "$status" -eq 0 ]
+}
+
+@test "all_watchers_streaming: one failing kind fails the lot" {
+    status_write_watchers Deployment=$$ CronJob=$$
+    status_write_watcher_health Deployment 0 ""
+    status_write_watcher_health CronJob 2 "forbidden"
+    run status_all_watchers_streaming
+    [ "$status" -eq 1 ]
+}
+
+@test "all_watchers_streaming: a kind with no health file yet fails" {
+    status_write_watchers Deployment=$$ CronJob=$$
+    status_write_watcher_health Deployment 0 ""
+    run status_all_watchers_streaming
+    [ "$status" -eq 1 ]
+}
+
+@test "all_watchers_streaming: an alive PID does not excuse a failing stream" {
+    # The whole point: liveness of the process says nothing about the watch.
+    status_write_watchers Deployment=$$
+    status_write_watcher_health Deployment 5 "forbidden"
+    status_all_watchers_alive
+    run status_all_watchers_streaming
+    [ "$status" -eq 1 ]
+}
+
 # --- status_all_watchers_alive ---
 
 @test "all_watchers_alive: missing file fails" {

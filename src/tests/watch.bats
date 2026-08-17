@@ -23,10 +23,14 @@ setup() {
     source "$SCRIPT_DIR/lib/clock.bash"
     # shellcheck source=../scripts/lib/queue.bash
     source "$SCRIPT_DIR/lib/queue.bash"
+    # shellcheck source=../scripts/lib/status.bash
+    source "$SCRIPT_DIR/lib/status.bash"
     # shellcheck source=../scripts/lib/watch.bash
     source "$SCRIPT_DIR/lib/watch.bash"
 
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
+    KEELSON_STATUS_DIR="$TMP_DIR/status"
+    export KEELSON_STATUS_DIR
 
     queue_init
 }
@@ -148,6 +152,95 @@ SH
     # Sleeps observed: 8, 10, 10, 10, 10 (clamped after first double)
     [ "$(head -n 1 "$TMP_DIR/sleeps")" = "8" ]
     [ "$(tail -n 1 "$TMP_DIR/sleeps")" = "10" ]
+}
+
+# --- a failing kubectl must not take the watcher down with it ---
+
+@test "watch_run_kind: survives a kubectl that exits non-zero" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "Error from server (Forbidden): cronjobs is forbidden" >&2
+exit 1
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=3 run emit watch_run_kind CronJob
+    [ "$status" -eq 0 ]
+    # All three iterations ran: set -e did not kill the loop on the first.
+    [ "$(printf '%s\n' "$output" | grep -c "Watching kind 'CronJob'")" = "3" ]
+}
+
+@test "watch_run_kind: publishes the failure outward" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "Error from server (Forbidden): cronjobs is forbidden" >&2
+exit 1
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=2 watch_run_kind CronJob 2>/dev/null
+    status_read_watcher_health CronJob
+    [ "$STATUS_WATCHER_FAILURES" = "2" ]
+    [[ "$STATUS_WATCHER_ERROR" == *"Forbidden"* ]]
+}
+
+@test "watch_run_kind: logs why kubectl failed instead of swallowing it" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "Error from server (Forbidden): cronjobs is forbidden" >&2
+exit 1
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=1 run emit watch_run_kind CronJob
+    [[ "$output" == *"Forbidden"* ]]
+}
+
+@test "watch_run_kind: marks itself healthy while a stream is open" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf 'default app\n'
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=1 \
+    KEELSON_WATCHER_RECONNECT_RESET=0 \
+        watch_run_kind Deployment 2>/dev/null
+    status_read_watcher_health Deployment
+    [ "$STATUS_WATCHER_FAILURES" = "0" ]
+}
+
+@test "watch_run_kind: a good stream clears an earlier failure" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+n=$(cat "$TMP_DIR/kcount" 2>/dev/null || echo 0)
+n=$(( n + 1 ))
+echo "$n" > "$TMP_DIR/kcount"
+if [ "$n" -le 2 ]; then
+    echo "Error from server (Forbidden)" >&2
+    exit 1
+fi
+/bin/sleep 1.2
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=3 \
+    KEELSON_WATCHER_RECONNECT_RESET=1 \
+        watch_run_kind Deployment 2>/dev/null
+    status_read_watcher_health Deployment
+    [ "$STATUS_WATCHER_FAILURES" = "0" ]
 }
 
 # --- backoff reset on a stream that held ---
