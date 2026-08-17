@@ -11,12 +11,16 @@ setup() {
     KEELSON_SCOPE=cluster
     KEELSON_WATCHER_RECONNECT_INITIAL=2
     KEELSON_WATCHER_RECONNECT_MAX=60
+    KEELSON_WATCHER_RECONNECT_RESET=30
     export PATH TMP_DIR KEELSON_WATCHED_KINDS KEELSON_SCOPE \
-        KEELSON_WATCHER_RECONNECT_INITIAL KEELSON_WATCHER_RECONNECT_MAX
+        KEELSON_WATCHER_RECONNECT_INITIAL KEELSON_WATCHER_RECONNECT_MAX \
+        KEELSON_WATCHER_RECONNECT_RESET
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash
     source "$SCRIPT_DIR/lib/log.bash"
+    # shellcheck source=../scripts/lib/clock.bash
+    source "$SCRIPT_DIR/lib/clock.bash"
     # shellcheck source=../scripts/lib/queue.bash
     source "$SCRIPT_DIR/lib/queue.bash"
     # shellcheck source=../scripts/lib/watch.bash
@@ -121,7 +125,8 @@ SH
     [ "$status" -eq 0 ]
     # Two iterations -> two "Watching kind" log lines.
     [ "$(printf '%s\n' "$output" | grep -c "Watching kind 'Deployment'")" = "2" ]
-    [[ "$output" == *"Watch for kind 'Deployment' disconnected"* ]]
+    [[ "$output" == *"Watch for kind 'Deployment' held"* ]]
+    [[ "$output" == *"then disconnected"* ]]
     # Each iteration enqueued the same identity; dedupe leaves one file.
     [ -f "$KEELSON_QUEUE_DIR/Deployment--default--app" ]
 }
@@ -143,4 +148,88 @@ SH
     # Sleeps observed: 8, 10, 10, 10, 10 (clamped after first double)
     [ "$(head -n 1 "$TMP_DIR/sleeps")" = "8" ]
     [ "$(tail -n 1 "$TMP_DIR/sleeps")" = "10" ]
+}
+
+# --- backoff reset on a stream that held ---
+#
+# Without a reset the backoff is a one-way ratchet: routine disconnects
+# (API server rollout, resourceVersion expiry) climb it to the cap and it
+# never comes back down, so a perfectly healthy watcher ends up with the
+# longest possible blind window between reconnects for the pod's whole life.
+
+@test "watch_run_kind: a stream that held past the reset clears the backoff" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+/bin/sleep 1.2
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+echo "$1" >>"$TMP_DIR/sleeps"
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=3 \
+    KEELSON_WATCHER_RECONNECT_INITIAL=1 \
+    KEELSON_WATCHER_RECONNECT_MAX=10 \
+    KEELSON_WATCHER_RECONNECT_RESET=1 \
+        watch_run_kind Deployment 2>/dev/null
+    # Every stream held 1.2s >= 1s, so every reconnect is back at initial.
+    [ "$(tr '\n' ' ' <"$TMP_DIR/sleeps")" = "1 1 1 " ]
+}
+
+@test "watch_run_kind: a stream that died instantly does not clear the backoff" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+echo "$1" >>"$TMP_DIR/sleeps"
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=3 \
+    KEELSON_WATCHER_RECONNECT_INITIAL=1 \
+    KEELSON_WATCHER_RECONNECT_MAX=10 \
+    KEELSON_WATCHER_RECONNECT_RESET=30 \
+        watch_run_kind Deployment 2>/dev/null
+    [ "$(tr '\n' ' ' <"$TMP_DIR/sleeps")" = "1 2 4 " ]
+}
+
+@test "watch_run_kind: backoff escalates, then recovers once a stream holds" {
+    # First two streams die instantly, the third and fourth hold.
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+n=$(cat "$TMP_DIR/kcount" 2>/dev/null || echo 0)
+n=$(( n + 1 ))
+echo "$n" > "$TMP_DIR/kcount"
+[ "$n" -ge 3 ] && /bin/sleep 1.2
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+echo "$1" >>"$TMP_DIR/sleeps"
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=4 \
+    KEELSON_WATCHER_RECONNECT_INITIAL=1 \
+    KEELSON_WATCHER_RECONNECT_MAX=10 \
+    KEELSON_WATCHER_RECONNECT_RESET=1 \
+        watch_run_kind Deployment 2>/dev/null
+    # 1, 2 while failing; back to 1 as soon as a stream held.
+    [ "$(tr '\n' ' ' <"$TMP_DIR/sleeps")" = "1 2 1 1 " ]
+}
+
+@test "watch_run_kind: reports how long the stream held" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=1 \
+    KEELSON_WATCHER_RECONNECT_RESET=30 \
+        run emit watch_run_kind Deployment
+    [[ "$output" == *"held"* ]]
 }

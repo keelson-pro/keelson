@@ -91,6 +91,8 @@ spec:
               value: "${Keelson/WatcherReconnectInitial}"
             - name: KEELSON_WATCHER_RECONNECT_MAX
               value: "${Keelson/WatcherReconnectMax}"
+            - name: KEELSON_WATCHER_RECONNECT_RESET
+              value: "${Keelson/WatcherReconnectReset}"
             - name: KEELSON_STATE_CONFIGMAP
               value: "${Keelson/StateConfigMap}"
             - name: KEELSON_FIELD_MANAGER_STRATEGY_OWNED

@@ -179,6 +179,7 @@ validate_config() {
     for var in KEELSON_POLL_INTERVAL KEELSON_FULL_REFRESH_INTERVAL KEELSON_TICK_INTERVAL \
                KEELSON_HEARTBEAT_MAX_AGE KEELSON_WATCHER_BACKOFF_MAX KEELSON_WATCHER_HEALTHY_RESET \
                KEELSON_WATCHER_RECONNECT_INITIAL KEELSON_WATCHER_RECONNECT_MAX \
+               KEELSON_WATCHER_RECONNECT_RESET \
                KEELSON_LOG_FILE_MAX_BYTES KEELSON_LOG_FILE_KEEP; do
         validate_env_set "$var" && validate_env_positive_int "$var" || errors=$((errors+1))
     done
