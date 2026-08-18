@@ -314,3 +314,46 @@ put_simple() {
     run inventory_enabled
     [ "$status" -eq 0 ]
 }
+
+# --- full refresh support ---
+
+@test "evict_kind: drops every entry of one kind and no others" {
+    inventory_put Deployment default web 1000 60 "" default '[]' '' 'main=a:1'
+    inventory_put Deployment other api 1000 60 "" default '[]' '' 'main=b:1'
+    inventory_put CronJob ops backup 1000 60 "" default '[]' '' 'main=c:1'
+    inventory_evict_kind Deployment
+    run inventory_get Deployment default web
+    [ "$status" -eq 1 ]
+    run inventory_get Deployment other api
+    [ "$status" -eq 1 ]
+    run inventory_get CronJob ops backup
+    [ "$status" -eq 0 ]
+}
+
+@test "evict_kind: an unknown kind is a no-op" {
+    inventory_put Deployment default web 1000 60 "" default '[]' '' 'main=a:1'
+    run inventory_evict_kind StatefulSet
+    [ "$status" -eq 0 ]
+    run inventory_get Deployment default web
+    [ "$status" -eq 0 ]
+}
+
+@test "evict_unwatched: drops kinds no longer watched" {
+    # A reconcile only evicts within the kinds it listed, so dropping a kind
+    # from the watched set would otherwise leave its entries polled forever.
+    inventory_put Deployment default web 1000 60 "" default '[]' '' 'main=a:1'
+    inventory_put CronJob ops backup 1000 60 "" default '[]' '' 'main=c:1'
+    inventory_evict_unwatched "Deployment StatefulSet"
+    run inventory_get Deployment default web
+    [ "$status" -eq 0 ]
+    run inventory_get CronJob ops backup
+    [ "$status" -eq 1 ]
+}
+
+@test "evict_unwatched: keeps everything when all kinds are watched" {
+    inventory_put Deployment default web 1000 60 "" default '[]' '' 'main=a:1'
+    inventory_put CronJob ops backup 1000 60 "" default '[]' '' 'main=c:1'
+    inventory_evict_unwatched "Deployment CronJob"
+    inventory_list
+    [ "${#INVENTORY_ALL[@]}" -eq 2 ]
+}

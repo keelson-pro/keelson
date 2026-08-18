@@ -288,6 +288,41 @@ inventory_note_change() {
     return 0
 }
 
+# inventory_evict_kind <kind>
+# Forgets every cached workload of one kind. Used by the full refresh, which
+# rebuilds a kind from the cluster rather than merely overwriting what it
+# finds: an entry that is corrupt, or whose file the reconcile pass would
+# never revisit, only goes away if something drops it.
+inventory_evict_kind() {
+    local kind=$1 f
+    shopt -s nullglob
+    for f in "$KEELSON_INVENTORY_DIR/${kind}--"*; do
+        rm -f "$f"
+    done
+    shopt -u nullglob
+    return 0
+}
+
+# inventory_evict_unwatched <watched-kinds>
+# Forgets cached workloads of any kind no longer in KEELSON_WATCHED_KINDS.
+#
+# The reconcile pass cannot do this: it only evicts within the kinds it
+# listed, so dropping a kind from the watched set leaves its entries behind
+# forever, still being polled.
+inventory_evict_unwatched() {
+    local watched=" $1 " entry ekind ens ename
+    inventory_list
+    for entry in "${INVENTORY_ALL[@]}"; do
+        ekind=${entry%% *}
+        case "$watched" in
+            *" $ekind "*) continue ;;
+        esac
+        read -r ekind ens ename <<<"$entry"
+        inventory_evict "$ekind" "$ens" "$ename"
+    done
+    return 0
+}
+
 # inventory_due <now>
 # Populates INVENTORY_DUE with "<kind> <ns> <name>" for every workload whose
 # next-due has arrived. This is what the tick asks each second; a quiet

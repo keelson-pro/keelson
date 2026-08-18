@@ -381,3 +381,31 @@ SH
     [[ "$patch" == *'"s--CronJob--ops--backup":null'* ]]
     [[ "$patch" == *'"j--CronJob--ops--backup":null'* ]]
 }
+
+# --- ledger reconciliation, after a full refresh ---
+
+@test "reconcile_ledger: forgets keys with no cached workload" {
+    # shellcheck source=../scripts/lib/inventory.bash
+    source "$SCRIPT_DIR/lib/inventory.bash"
+    KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
+    inventory_init
+    inventory_put Deployment default web 1000 60 "" default '[]' '' 'main=a:1'
+
+    state_set_next_due Deployment default web 111
+    state_set_next_due Deployment default ghost 222
+    state_set_trigger_field CronJob ops gone triggered-job 333
+
+    state_reconcile_ledger
+    [ "$(state_get_next_due Deployment default web)" = "111" ]
+    [ -z "$(state_get_next_due Deployment default ghost)" ]
+    [ -z "$(state_get_trigger_field CronJob ops gone triggered-job)" ]
+}
+
+@test "reconcile_ledger: does nothing without a cache to compare against" {
+    # shellcheck source=../scripts/lib/inventory.bash
+    source "$SCRIPT_DIR/lib/inventory.bash"
+    KEELSON_INVENTORY_DIR="$TMP_DIR/absent"
+    state_set_next_due Deployment default web 111
+    state_reconcile_ledger
+    [ "$(state_get_next_due Deployment default web)" = "111" ]
+}

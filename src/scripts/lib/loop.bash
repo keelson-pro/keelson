@@ -30,6 +30,8 @@ declare -gA LOOP_WATCHER_STARTED=()
 declare -gA LOOP_WATCHER_ELIGIBLE=()
 LOOP_SCAN_PID=0
 LOOP_POLL_PID=0
+LOOP_REFRESH_PID=0
+declare -ga LOOP_REFRESH_PENDING=()
 
 # loop_drain_queue
 # Drains watcher-enqueued work items, logs each.
@@ -105,17 +107,16 @@ loop_supervise_watchers() {
     return 0
 }
 
-# loop_start_scan <apply> <force_refresh>
-# Spawns a scan child. The child owns the state lifecycle: it reloads from
-# the ConfigMap, optionally wipes the cache to force dedupe re-emit, runs
-# the scan, and flushes deltas back. Parent state is not mutated.
+# loop_start_scan <apply>
+# Spawns a reconcile scan child. The child owns the state lifecycle: it
+# reloads from the ConfigMap, runs the scan, and flushes deltas back. Parent
+# state is not mutated.
 loop_start_scan() {
-    local apply=$1 force_refresh=$2
+    local apply=$1
     (
         state_load || log_warn state-reload-failed \
             configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
             msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
-        [ "$force_refresh" = "1" ] && state_clear_cache
         # poll-all=0: this pass refreshes the cache and evicts. Registry
         # work belongs to the due-poll above, on each workload's own cadence.
         scan_run "$apply" 0
@@ -149,6 +150,34 @@ loop_start_poll() {
     LOOP_POLL_PID=$!
 }
 
+# loop_start_refresh <apply> <kind> <finish>
+# Spawns the full-refresh child for one kind.
+#
+# One kind per tick rather than all of them at once: a full refresh lists the
+# cluster kind by kind, and doing the lot in one pass is the long-running
+# thing the tick exists to avoid. Spreading it costs nothing, since a refresh
+# makes no registry calls.
+#
+# <finish> is 1 for the last kind of the cycle, which is when the cache is
+# whole again and the ledger can safely be reconciled against it.
+loop_start_refresh() {
+    local apply=$1 kind=$2 finish=$3
+    (
+        state_load || log_warn state-reload-failed \
+            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
+            msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
+        scan_refresh_kind "$apply" "$kind"
+        if [ "$finish" -eq 1 ]; then
+            inventory_evict_unwatched "$KEELSON_WATCHED_KINDS"
+            state_reconcile_ledger
+            log_info_always full-refresh-complete kinds="$KEELSON_WATCHED_KINDS" \
+                msg="Full refresh complete: the cache was rebuilt from the cluster and the ledger reconciled against it."
+        fi
+        [ "$apply" -eq 1 ] && { state_flush || true; }
+    ) &
+    LOOP_REFRESH_PID=$!
+}
+
 # loop_kill_children
 # Best-effort kill of every spawned child. Called from the shutdown trap.
 loop_kill_children() {
@@ -159,6 +188,7 @@ loop_kill_children() {
     done
     [ "$LOOP_SCAN_PID" -gt 0 ] && kill "$LOOP_SCAN_PID" 2>/dev/null || true
     [ "$LOOP_POLL_PID" -gt 0 ] && kill "$LOOP_POLL_PID" 2>/dev/null || true
+    [ "$LOOP_REFRESH_PID" -gt 0 ] && kill "$LOOP_REFRESH_PID" 2>/dev/null || true
     return 0
 }
 
@@ -193,7 +223,7 @@ loop_run() {
 
     local tick_us=$(( tick * 1000000 ))
     local now cycle_start_us remaining_us over_us over
-    local last_scan_start=0 last_refresh force_refresh_next=0 iter=0
+    local last_scan_start=0 last_refresh iter=0
     clock_read
     last_refresh=$(( CLOCK_NOW_US / 1000000 ))
 
@@ -221,17 +251,32 @@ loop_run() {
             LOOP_SCAN_PID=0
         fi
         if [ "$LOOP_SCAN_PID" -eq 0 ] && [ $(( now - last_scan_start )) -ge "$poll" ]; then
-            loop_start_scan "$apply" "$force_refresh_next"
+            loop_start_scan "$apply"
             last_scan_start=$now
-            force_refresh_next=0
         fi
 
-        if [ $(( now - last_refresh )) -ge "$full_refresh" ]; then
+        if [ $(( now - last_refresh )) -ge "$full_refresh" ] \
+                && [ "${#LOOP_REFRESH_PENDING[@]}" -eq 0 ]; then
             local elapsed=$(( now - last_refresh ))
-            log_debug state-full-refresh elapsed="$elapsed" \
-                msg="State full refresh due (${elapsed}s elapsed), proceeding to refresh..."
-            force_refresh_next=1
+            # Queue every watched kind. One is taken per tick below, so the
+            # refresh is spread rather than being one long pass.
+            LOOP_REFRESH_PENDING=($KEELSON_WATCHED_KINDS)
             last_refresh=$now
+            log_info_always full-refresh-due elapsed="$elapsed" \
+                kinds="$KEELSON_WATCHED_KINDS" \
+                msg="Full refresh due after ${elapsed}s: rebuilding the cache from the cluster, one kind per tick."
+        fi
+
+        if [ "$LOOP_REFRESH_PID" -gt 0 ] && ! kill -0 "$LOOP_REFRESH_PID" 2>/dev/null; then
+            wait "$LOOP_REFRESH_PID" 2>/dev/null || true
+            LOOP_REFRESH_PID=0
+        fi
+        if [ "$LOOP_REFRESH_PID" -eq 0 ] && [ "${#LOOP_REFRESH_PENDING[@]}" -gt 0 ]; then
+            local refresh_kind=${LOOP_REFRESH_PENDING[0]}
+            LOOP_REFRESH_PENDING=("${LOOP_REFRESH_PENDING[@]:1}")
+            local refresh_finish=0
+            [ "${#LOOP_REFRESH_PENDING[@]}" -eq 0 ] && refresh_finish=1
+            loop_start_refresh "$apply" "$refresh_kind" "$refresh_finish"
         fi
 
         # Sole owner of log rotation. Watchers and scan children append to

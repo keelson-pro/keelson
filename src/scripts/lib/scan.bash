@@ -94,6 +94,55 @@ scan_reconcile_inventory() {
     return 0
 }
 
+# scan_refresh_kind <apply> <kind>
+# Rebuilds one kind's cache from the cluster, from nothing.
+#
+# The cluster is listed *before* anything is dropped, so a failed list leaves
+# the cache exactly as it was. Only once the list is in hand is the kind's
+# cache wiped and rebuilt, which keeps the window where those workloads are
+# invisible to the due-poll inside a single child rather than spanning ticks.
+#
+# next-due comes back from the ledger, not from the local file that was just
+# thrown away, so a refresh corrects local drift without resetting schedules
+# and triggering a poll of everything at once.
+#
+# No registry calls: this is a cache rebuild, and polling stays on each
+# workload's own cadence.
+scan_refresh_kind() {
+    local _scan_apply=${1:-0} kind=$2
+    local _scan_poll_all=0
+    inventory_enabled || return 0
+
+    local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
+          _scan_no_change=0 _scan_skip=0 _scan_error=0
+    local -A SCAN_SEEN=()
+    local -A SCAN_LISTED=()
+    local _scan_now _scan_interval=${KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT:-60}
+    clock_read
+    _scan_now=$(( CLOCK_NOW_US / 1000000 ))
+
+    local list_json count i
+    if ! list_json=$(workload_list_kind "$kind" 2>/dev/null); then
+        log_error kubectl-list-failed kind="$kind" \
+            msg="Full refresh of $kind skipped: could not list from kubectl. The cache is left as it was."
+        return 0
+    fi
+
+    inventory_evict_kind "$kind"
+
+    count=$(printf '%s' "$list_json" | yq -p=json '.items | length // 0')
+    if [ -z "$count" ] || [ "$count" = "null" ]; then
+        count=0
+    fi
+    for ((i=0; i<count; i++)); do
+        scan_workload "$list_json" "$kind" "$i"
+    done
+
+    log_info_always inventory-refreshed kind="$kind" workloads="$count" \
+        msg="Rebuilt the cache for $count $kind workloads from the cluster."
+    return 0
+}
+
 scan_kind() {
     local kind=$1 list_json count i
     if ! list_json=$(workload_list_kind "$kind" 2>/dev/null); then

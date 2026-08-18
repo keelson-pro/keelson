@@ -92,6 +92,38 @@ state_forget() {
     STATE_DIRTY["$data_key"]=1
 }
 
+# state_reconcile_ledger
+# Forgets ledger keys whose workload is no longer cached.
+#
+# Runs at the end of a full refresh, when the cache has just been rebuilt
+# from the cluster and is therefore authoritative. Eviction during a normal
+# reconcile only fires for a workload the scan saw disappear; anything that
+# went while Keelson was down, or under a kind since dropped from the watched
+# set, would otherwise keep its keys forever.
+#
+# Keys are snapshotted first: state_forget unsets entries in STATE_KEYS, and
+# iterating a map while deleting from it skips entries.
+state_reconcile_ledger() {
+    inventory_enabled || return 0
+    local keys=("${!STATE_KEYS[@]}")
+    local key rest kind ns name
+    for key in ${keys[@]+"${keys[@]}"}; do
+        case "$key" in
+            j--*|s--*) ;;
+            *) continue ;;
+        esac
+        rest=${key#*--}
+        kind=${rest%%--*}; rest=${rest#*--}
+        ns=${rest%%--*}; name=${rest#*--}
+        [ -n "$kind" ] && [ -n "$ns" ] && [ -n "$name" ] || continue
+        inventory_get "$kind" "$ns" "$name" && continue
+        state_forget "$key"
+        log_debug ledger-forgotten key="$key" \
+            msg="Dropped ledger key '$key': no such workload after a full refresh."
+    done
+    return 0
+}
+
 # state_init
 # Discover own namespace, ensure ConfigMap exists, load it into the cache.
 state_init() {

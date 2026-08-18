@@ -65,10 +65,19 @@ inventory, and the status files).
    - **Kick a scan if due.** `now - last_scan_start >= KEELSON_RECONCILE_INTERVAL`
      and no prior scan still running → spawn the scan in a background
      subshell. The child owns the full trigger-state lifecycle: load the
-     ConfigMap, clear the cache if a full refresh is due (which lets the
-     scan pick up any out-of-band edits), run `scan_run`, flush deltas
+     ConfigMap, run `scan_run`, flush deltas
      back. The parent's state stays clean; the next child rereads the
      ConfigMap. Long scans overlap ticks but never each other.
+   - **Take one kind of a full refresh, if one is due.** Every
+     `KEELSON_FULL_REFRESH_INTERVAL` the watched kinds are queued, and one is
+     taken per tick: the cluster is listed, and only once that list is in
+     hand is that kind's cache thrown away and rebuilt, so a failed list
+     leaves the cache untouched and the window where those workloads are
+     invisible stays inside a single child. next-due comes back from the
+     ledger rather than the discarded file, so a refresh corrects drift
+     without resetting every schedule at once. The last kind of the cycle
+     also drops entries for kinds no longer watched and forgets ledger keys
+     with no workload behind them.
 
      The controller's scan makes no registry calls of its own; that is the
      tick's job, above. `keelson-boot-scan` is the exception, being a

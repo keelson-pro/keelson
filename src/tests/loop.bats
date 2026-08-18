@@ -42,6 +42,9 @@ setup() {
     # Stub the heavy collaborators.
     scan_run() { printf '%s\n' "$1" >>"$TMP_DIR/scan.calls"; }
     scan_poll_due() { printf '%s\n' "$2" >>"$TMP_DIR/poll.calls"; }
+    scan_refresh_kind() { printf '%s\n' "$2" >>"$TMP_DIR/refresh.calls"; }
+    inventory_evict_unwatched() { printf 'evict-unwatched\n' >>"$TMP_DIR/refresh.calls"; }
+    state_reconcile_ledger() { printf 'reconcile-ledger\n' >>"$TMP_DIR/refresh.calls"; }
     state_flush() { printf 'flush\n' >>"$TMP_DIR/state.calls"; }
     state_clear_cache() { printf 'clear\n' >>"$TMP_DIR/state.calls"; }
     state_load() { printf 'load\n' >>"$TMP_DIR/state.calls"; }
@@ -64,6 +67,8 @@ teardown() {
     LOOP_WATCHER_STARTED=()
     LOOP_WATCHER_ELIGIBLE=()
     LOOP_SCAN_PID=0
+    LOOP_REFRESH_PID=0
+    LOOP_REFRESH_PENDING=()
     rm -rf "$TMP_DIR"
 }
 
@@ -368,4 +373,69 @@ emit() { "$@" 2>&1; }
     passed=$(head -n 1 "$TMP_DIR/poll.calls")
     [ "$passed" -gt 0 ]
     [ "$passed" -le "$(( CLOCK_NOW_US / 1000000 ))" ]
+}
+
+# --- full refresh, one kind per tick ---
+#
+# A refresh lists the cluster kind by kind. Doing all of them in one pass is
+# the long-running thing the tick exists to avoid, so the queue is drained a
+# kind at a time.
+#
+# The queue is seeded directly in most of these: last_refresh starts at now,
+# and with sleep stubbed out no wall-clock time passes, so the interval can
+# never elapse inside a test.
+
+@test "full refresh: nothing is queued before the interval elapses" {
+    KEELSON_FULL_REFRESH_INTERVAL=999999 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "${#LOOP_REFRESH_PENDING[@]}" -eq 0 ]
+    [ ! -f "$TMP_DIR/refresh.calls" ]
+}
+
+@test "full refresh: an elapsed interval queues every watched kind" {
+    KEELSON_WATCHED_KINDS="Deployment CronJob"
+    # 0 is not a legal config value; it is the only way to make the interval
+    # elapse on the first tick without waiting.
+    KEELSON_FULL_REFRESH_INTERVAL=0 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_REFRESH_PID" -gt 0 ] && wait "$LOOP_REFRESH_PID" 2>/dev/null || true
+    # Two queued, one taken on that same tick.
+    [ "${#LOOP_REFRESH_PENDING[@]}" -eq 1 ]
+}
+
+@test "full refresh: takes one kind per tick" {
+    LOOP_REFRESH_PENDING=(Deployment CronJob)
+    KEELSON_FULL_REFRESH_INTERVAL=999999 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_REFRESH_PID" -gt 0 ] && wait "$LOOP_REFRESH_PID" 2>/dev/null || true
+    [ "$(wc -l <"$TMP_DIR/refresh.calls" | tr -d ' ')" = "1" ]
+    [ "${#LOOP_REFRESH_PENDING[@]}" -eq 1 ]
+}
+
+@test "full refresh: drains the queue over successive ticks" {
+    LOOP_REFRESH_PENDING=(Deployment CronJob)
+    KEELSON_FULL_REFRESH_INTERVAL=999999 KEELSON_LOOP_MAX_ITERATIONS=2 loop_run
+    [ "$LOOP_REFRESH_PID" -gt 0 ] && wait "$LOOP_REFRESH_PID" 2>/dev/null || true
+    grep -q Deployment "$TMP_DIR/refresh.calls"
+    grep -q CronJob "$TMP_DIR/refresh.calls"
+    [ "${#LOOP_REFRESH_PENDING[@]}" -eq 0 ]
+}
+
+@test "full refresh: only the last kind reconciles the ledger" {
+    # The cache is only whole again once every kind has been rebuilt, so
+    # anything comparing the ledger against it has to wait for the last one.
+    LOOP_REFRESH_PENDING=(Deployment CronJob)
+    KEELSON_FULL_REFRESH_INTERVAL=999999 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_REFRESH_PID" -gt 0 ] && wait "$LOOP_REFRESH_PID" 2>/dev/null || true
+    ! grep -q reconcile-ledger "$TMP_DIR/refresh.calls"
+
+    KEELSON_FULL_REFRESH_INTERVAL=999999 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_REFRESH_PID" -gt 0 ] && wait "$LOOP_REFRESH_PID" 2>/dev/null || true
+    grep -q evict-unwatched "$TMP_DIR/refresh.calls"
+    grep -q reconcile-ledger "$TMP_DIR/refresh.calls"
+}
+
+@test "full refresh: a cycle in flight is not queued again" {
+    LOOP_REFRESH_PENDING=(Deployment CronJob StatefulSet)
+    KEELSON_FULL_REFRESH_INTERVAL=0 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_REFRESH_PID" -gt 0 ] && wait "$LOOP_REFRESH_PID" 2>/dev/null || true
+    # Still draining the original three, not re-seeded from the watched set.
+    [ "${#LOOP_REFRESH_PENDING[@]}" -eq 2 ]
 }
