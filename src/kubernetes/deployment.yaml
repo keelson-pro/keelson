@@ -77,6 +77,8 @@ spec:
               value: "${Keelson/WatchedKinds}"
             - name: KEELSON_POLL_INTERVAL
               value: "${Keelson/PollInterval}"
+            - name: KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT
+              value: "${Keelson/RegistryPollIntervalDefault}"
             - name: KEELSON_FULL_REFRESH_INTERVAL
               value: "${Keelson/FullRefreshInterval}"
             - name: KEELSON_TICK_INTERVAL

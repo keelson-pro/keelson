@@ -242,3 +242,91 @@ SH
     round_tripped=$(printf '%s' "$inner" | yq -p=json -r '."triggered-job"')
     [ "$round_tripped" = 'has "quote" and \slash' ]
 }
+
+# --- forgetting a key ---
+#
+# Nothing ever removed a key before, so a workload's entry outlived the
+# workload and the ConfigMap only grew. At roughly 1 MiB per object that
+# eventually fails as a mystery rather than as a bug.
+
+@test "forget: renders an unquoted null, which is what removes a merge key" {
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    STATE_DIRTY=(); STATE_DELETED=()
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    local patch
+    patch=$(state_build_patch)
+    [[ "$patch" == *'"j--CronJob--ops--backup":null'* ]]
+    [[ "$patch" != *'"null"'* ]]
+}
+
+@test "forget: the key's fields are gone" {
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    [ -z "$(state_get_trigger_field CronJob ops backup triggered-job)" ]
+    [ -z "${STATE_KEYS[j--CronJob--ops--backup]:-}" ]
+}
+
+@test "forget: a deleted key does not resurrect from its old fields" {
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    local patch
+    patch=$(state_build_patch)
+    [[ "$patch" != *"111"* ]]
+}
+
+@test "forget: deletions and writes go in the same patch" {
+    STATE_DIRTY=(); STATE_DELETED=()
+    state_set_trigger_field CronJob ops keep triggered-job 700
+    state_set_trigger_field CronJob ops gone triggered-job 800
+    state_forget "$(state_trigger_key CronJob ops gone)"
+    local patch
+    patch=$(state_build_patch)
+    [[ "$patch" == *'"j--CronJob--ops--gone":null'* ]]
+    [[ "$patch" == *"700"* ]]
+}
+
+@test "forget: a successful flush clears the deletion set" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    state_flush
+    [ "${#STATE_DELETED[@]}" -eq 0 ]
+    [ "${#STATE_DIRTY[@]}" -eq 0 ]
+}
+
+@test "clear_cache resets the deletion set too" {
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    state_clear_cache
+    [ "${#STATE_DELETED[@]}" -eq 0 ]
+}
+
+@test "forget: a failed flush keeps the deletion for the next attempt" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    run state_flush
+    [ "$status" -eq 1 ]
+    [ -n "${STATE_DELETED[j--CronJob--ops--backup]:-}" ]
+    [ -n "${STATE_DIRTY[j--CronJob--ops--backup]:-}" ]
+}
+
+@test "state_init: starts with an empty deletion set" {
+    # A forget left over from a previous cache must not delete a key that
+    # the fresh load just brought in.
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+    get) printf '{"data":{}}' ;;
+    *) exit 0 ;;
+esac
+SH
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    state_init
+    [ "${#STATE_DELETED[@]}" -eq 0 ]
+}

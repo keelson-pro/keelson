@@ -17,6 +17,7 @@
 #   STATE_FIELDS["<data-key>:<field>"] = string
 #   STATE_KEYS["<data-key>"]           = 1 if known
 #   STATE_DIRTY["<data-key>"]          = 1 if changed since last flush
+#   STATE_DELETED["<data-key>"]        = 1 if to be removed on next flush
 #
 # ConfigMap.data values are JSON object strings, one per data-key. Single
 # writer assumption: state_flush uses a merge patch with no resourceVersion
@@ -32,12 +33,31 @@
 declare -gA STATE_FIELDS=()
 declare -gA STATE_KEYS=()
 declare -gA STATE_DIRTY=()
+declare -gA STATE_DELETED=()
 STATE_NAMESPACE=""
 STATE_CONFIGMAP_NAME=""
 
 # state_trigger_key <kind> <ns> <name>
 state_trigger_key() {
     printf 'j--%s--%s--%s' "$1" "$2" "$3"
+}
+
+# state_forget <data-key>
+# Marks a key for removal on the next flush.
+#
+# A merge patch removes a key by setting it null, so the field-level "empty
+# value is omitted" rule in state_render_data_value cannot do this: dropping
+# every field leaves the key present with an empty object.
+state_forget() {
+    local data_key=$1 pair
+    for pair in "${!STATE_FIELDS[@]}"; do
+        case "$pair" in
+            "$data_key:"*) unset 'STATE_FIELDS[$pair]' ;;
+        esac
+    done
+    unset 'STATE_KEYS[$data_key]'
+    STATE_DELETED["$data_key"]=1
+    STATE_DIRTY["$data_key"]=1
 }
 
 # state_init
@@ -59,6 +79,7 @@ state_init() {
     STATE_FIELDS=()
     STATE_KEYS=()
     STATE_DIRTY=()
+    STATE_DELETED=()
     state_load
 }
 
@@ -140,6 +161,7 @@ state_clear_cache() {
     STATE_FIELDS=()
     STATE_KEYS=()
     STATE_DIRTY=()
+    STATE_DELETED=()
 }
 
 # state_json_escape <string>
@@ -182,12 +204,17 @@ state_render_data_value() {
 state_build_patch() {
     local entries="" first=1 key value
     for key in "${!STATE_DIRTY[@]}"; do
-        value=$(state_render_data_value "$key")
         if [ "$first" -eq 1 ]; then
             first=0
         else
             entries="$entries,"
         fi
+        if [ -n "${STATE_DELETED[$key]:-}" ]; then
+            # Unquoted null: that is what removes a key from a merge patch.
+            entries="$entries\"$(state_json_escape "$key")\":null"
+            continue
+        fi
+        value=$(state_render_data_value "$key")
         entries="$entries\"$(state_json_escape "$key")\":\"$(state_json_escape "$value")\""
     done
     printf '{"data":{%s}}' "$entries"
@@ -208,6 +235,7 @@ state_flush() {
             --patch "$patch" >/dev/null 2>&1; then
         local count=${#STATE_DIRTY[@]}
         STATE_DIRTY=()
+        STATE_DELETED=()
         log_debug state-flushed \
             configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
             keys="$count" \

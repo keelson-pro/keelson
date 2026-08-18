@@ -48,8 +48,16 @@ setup() {
     source "$SCRIPT_DIR/lib/update.bash"
     # shellcheck source=../scripts/lib/state.bash
     source "$SCRIPT_DIR/lib/state.bash"
+    # shellcheck source=../scripts/lib/clock.bash
+    source "$SCRIPT_DIR/lib/clock.bash"
+    # shellcheck source=../scripts/lib/inventory.bash
+    source "$SCRIPT_DIR/lib/inventory.bash"
     # shellcheck source=../scripts/lib/scan.bash
     source "$SCRIPT_DIR/lib/scan.bash"
+
+    KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
+    KEELSON_POLL_INTERVAL=60
+    export KEELSON_POLL_INTERVAL
 }
 
 teardown() {
@@ -440,3 +448,243 @@ SH
 # Log dedupe is handled in lib/log.bash's rate limiter (covered by log.bats);
 # the scan no longer carries any per-container persisted state. Old tests for
 # state-backed skip/error/no-change dedupe have been removed accordingly.
+
+# --- inventory maintenance (the reconcile pass fills the local cache) ---
+#
+# The scan is the authority: it lists the cluster, so it both records what it
+# found and forgets what has gone. Everything here is derived, so a rebuild
+# from one pass is always enough.
+
+@test "inventory: a scan with no inventory directory touches nothing" {
+    # keelson-boot-scan run outside a controller pod has no inventory to keep.
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 2>/dev/null
+    [ ! -d "$KEELSON_INVENTORY_DIR" ]
+}
+
+@test "inventory: a scan records every workload it saw" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NAME" = "app" ]
+    [ "$INVENTORY_INTERVAL" = "60" ]
+}
+
+@test "inventory: an ineligible workload is still recorded" {
+    # No policy annotation means no updates, but Keelson still needs to know
+    # it exists: an event can make it eligible later.
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0)"
+    scan_run 0 2>/dev/null
+    run inventory_get Deployment default app
+    [ "$status" -eq 0 ]
+}
+
+@test "inventory: a new workload is scheduled inside its first interval" {
+    # Offset by a hash of the identity rather than all landing on now+interval,
+    # so an estate cached in one pass does not fall due in lockstep after.
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    clock_read
+    local before=$(( CLOCK_NOW_US / 1000000 ))
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" -ge "$before" ]
+    [ "$INVENTORY_NEXT_DUE" -lt "$(( before + 60 ))" ]
+}
+
+@test "inventory: a workload already cached keeps its place in the cycle" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    local first=$INVENTORY_NEXT_DUE
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "$first" ]
+}
+
+@test "inventory: the record carries what a poll needs" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "${INVENTORY_CONTAINER_NAMES[0]}" = "main" ]
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io/x/y:1.0" ]
+    [ "$INVENTORY_SERVICE_ACCOUNT" = "default" ]
+    printf '%s' "$INVENTORY_ANNOTATIONS" | grep -q 'policy=minor'
+}
+
+@test "inventory: image-pull-secrets are cached on one line" {
+    # A pretty-printed value would be read back as several truncated entries.
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$(printf '%s' "$INVENTORY_IMAGE_PULL_SECRETS" | grep -c .)" = "1" ]
+}
+
+# --- poll-schedule, per workload ---
+
+deployment_with_schedule() {
+    local image=$1 schedule=$2
+    cat <<JSON
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "minor",
+          "keelson.pro/poll-schedule": "$schedule"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [ {"name": "main", "image": "$image"} ]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+}
+
+@test "poll-schedule: sets the workload's own interval" {
+    inventory_init
+    kubectl_returns "$(deployment_with_schedule ghcr.io/x/y:1.0 2h)"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_INTERVAL" = "7200" ]
+}
+
+@test "poll-schedule: keel's @every form is honoured" {
+    inventory_init
+    kubectl_returns "$(deployment_with_schedule ghcr.io/x/y:1.0 '@every 10m')"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_INTERVAL" = "600" ]
+}
+
+@test "poll-schedule: absent falls back to the global default" {
+    inventory_init
+    KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT=900
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_INTERVAL" = "900" ]
+}
+
+@test "poll-schedule: an unparseable value falls back and warns" {
+    inventory_init
+    KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT=900
+    kubectl_returns "$(deployment_with_schedule ghcr.io/x/y:1.0 '*/5 * * * *')"
+    run emit scan_run 0
+    [[ "$output" == *"poll-schedule-invalid"* ]]
+    inventory_get Deployment default app
+    [ "$INVENTORY_INTERVAL" = "900" ]
+}
+
+@test "poll-schedule: a sub-second value clamps to 1s and warns" {
+    inventory_init
+    KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT=900
+    kubectl_returns "$(deployment_with_schedule ghcr.io/x/y:1.0 300ms)"
+    run emit scan_run 0
+    [[ "$output" == *"poll-schedule-too-fast"* ]]
+    inventory_get Deployment default app
+    [ "$INVENTORY_INTERVAL" = "1" ]
+}
+
+@test "inventory: the fingerprint carries the image" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    [[ "$INVENTORY_FINGERPRINT" == *"ghcr.io/x/y:1.0"* ]]
+}
+
+@test "inventory: the fingerprint carries the decision annotations" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    [[ "$INVENTORY_FINGERPRINT" == *"minor"* ]]
+}
+
+@test "inventory: the fingerprint changes when the cadence changes" {
+    inventory_init
+    kubectl_returns "$(deployment_with_schedule ghcr.io/x/y:1.0 5m)"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    local first=$INVENTORY_FINGERPRINT
+    kubectl_returns "$(deployment_with_schedule ghcr.io/x/y:1.0 10m)"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_FINGERPRINT" != "$first" ]
+}
+
+@test "inventory: the fingerprint changes when the image changes" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    local first=$INVENTORY_FINGERPRINT
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:2.0 minor)"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_FINGERPRINT" != "$first" ]
+}
+
+@test "inventory: a workload gone from the cluster is evicted" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 2>/dev/null
+    inventory_get Deployment default app
+
+    kubectl_returns '{"items": []}'
+    scan_run 0 2>/dev/null
+    run inventory_get Deployment default app
+    [ "$status" -eq 1 ]
+}
+
+@test "inventory: a failed list does NOT evict that kind's entries" {
+    # A transient API error must never be read as "everything was deleted".
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 2>/dev/null
+
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "the server was unable to return a response" >&2
+exit 1
+SH
+    scan_run 0 2>/dev/null
+    run inventory_get Deployment default app
+    [ "$status" -eq 0 ]
+}
+
+@test "inventory: entries of an unwatched kind survive a scan" {
+    # Only kinds this pass actually listed are candidates for eviction.
+    inventory_init
+    inventory_put CronJob ops backup 1000 60 "fp"
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    KEELSON_WATCHED_KINDS=Deployment scan_run 0 2>/dev/null
+    run inventory_get CronJob ops backup
+    [ "$status" -eq 0 ]
+}
+
+@test "inventory: an evicted workload is forgotten in the ledger too" {
+    # Otherwise a CronJob's trigger entry outlives the CronJob and the state
+    # ConfigMap only ever grows.
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 2>/dev/null
+
+    kubectl_returns '{"items": []}'
+    scan_run 0 2>/dev/null
+    [ -n "${STATE_DELETED[j--Deployment--default--app]:-}" ]
+}

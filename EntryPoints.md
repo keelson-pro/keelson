@@ -21,7 +21,8 @@
 **Env required:** every `KEELSON_*` variable validated by `keelson-validate`.
 The full list lives in [Configuration.md](Configuration.md). The Pod also
 needs the keelson ConfigMap mounted at `/configmap` (for `registries.yaml`)
-and an emptyDir at `/keelson/work` (for the watch queue and status files).
+and an emptyDir at `/keelson/work` (for the watch queue, the workload
+inventory, and the status files).
 
 **Flow:**
 
@@ -61,6 +62,13 @@ and an emptyDir at `/keelson/work` (for the watch queue and status files).
      scan pick up any out-of-band edits), run `scan_run`, flush deltas
      back. The parent's state stays clean; the next child rereads the
      ConfigMap. Long scans overlap ticks but never each other.
+
+     The scan is also the reconciler for the workload inventory under
+     `/keelson/work/inventory`: it records every workload it saw, eligible or
+     not, and forgets any it no longer finds. Eviction is confined to kinds
+     the pass listed successfully, because from here "kubectl errored" and
+     "all of them were deleted" look identical and only one of those should
+     empty the cache.
    - **Rotate the log file if it is oversize.** The controller loop is the
      only rotator. Watchers and scan children append to the same file, and
      concurrent appends are safe, but two processes running the rename

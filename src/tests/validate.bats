@@ -68,6 +68,7 @@ set_required_env() {
     export KEELSON_STATE_CONFIGMAP=keelson-state
     export KEELSON_WATCHED_KINDS="Deployment CronJob"
     export KEELSON_POLL_INTERVAL=60
+    export KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT=60
     export KEELSON_FULL_REFRESH_INTERVAL=3600
     export KEELSON_TICK_INTERVAL=1
     export KEELSON_HEARTBEAT_MAX_AGE=5
