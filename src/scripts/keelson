@@ -73,10 +73,10 @@ main() {
         version="${KEELSON_VERSION:-0.0.0-DEV-VERSION}" \
         scope="$KEELSON_SCOPE" \
         config-mode="$KEELSON_CONFIG_MODE" \
-        poll-interval="$KEELSON_POLL_INTERVAL" \
+        poll-interval="$KEELSON_RECONCILE_INTERVAL" \
         tick-interval="$KEELSON_TICK_INTERVAL" \
         dry-run="${KEELSON_DRY_RUN:-0}" \
-        msg="Keelson ${KEELSON_VERSION:-0.0.0-DEV-VERSION} booting in '$KEELSON_SCOPE' scope (config-mode='$KEELSON_CONFIG_MODE', poll-interval=${KEELSON_POLL_INTERVAL}s, tick-interval=${KEELSON_TICK_INTERVAL}s, dry-run=${KEELSON_DRY_RUN:-0})."
+        msg="Keelson ${KEELSON_VERSION:-0.0.0-DEV-VERSION} booting in '$KEELSON_SCOPE' scope (config-mode='$KEELSON_CONFIG_MODE', poll-interval=${KEELSON_RECONCILE_INTERVAL}s, tick-interval=${KEELSON_TICK_INTERVAL}s, dry-run=${KEELSON_DRY_RUN:-0})."
 
     trap 'shutdown SIGTERM' TERM
     trap 'shutdown SIGINT' INT

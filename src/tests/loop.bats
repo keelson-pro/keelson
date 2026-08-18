@@ -11,12 +11,12 @@ setup() {
     PATH="$TMP_BIN:$PATH"
     KEELSON_WATCHED_KINDS=Deployment
     KEELSON_TICK_INTERVAL=1
-    KEELSON_POLL_INTERVAL=60
+    KEELSON_RECONCILE_INTERVAL=60
     KEELSON_FULL_REFRESH_INTERVAL=3600
     KEELSON_WATCHER_BACKOFF_MAX=300
     KEELSON_WATCHER_HEALTHY_RESET=30
     export PATH TMP_DIR KEELSON_WATCHED_KINDS \
-        KEELSON_TICK_INTERVAL KEELSON_POLL_INTERVAL KEELSON_FULL_REFRESH_INTERVAL \
+        KEELSON_TICK_INTERVAL KEELSON_RECONCILE_INTERVAL KEELSON_FULL_REFRESH_INTERVAL \
         KEELSON_WATCHER_BACKOFF_MAX KEELSON_WATCHER_HEALTHY_RESET
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
@@ -41,6 +41,7 @@ setup() {
 
     # Stub the heavy collaborators.
     scan_run() { printf '%s\n' "$1" >>"$TMP_DIR/scan.calls"; }
+    scan_poll_due() { printf '%s\n' "$2" >>"$TMP_DIR/poll.calls"; }
     state_flush() { printf 'flush\n' >>"$TMP_DIR/state.calls"; }
     state_clear_cache() { printf 'clear\n' >>"$TMP_DIR/state.calls"; }
     state_load() { printf 'load\n' >>"$TMP_DIR/state.calls"; }
@@ -337,4 +338,34 @@ emit() { "$@" 2>&1; }
     [ "$status" -eq 0 ]
     [ ! -f "$TMP_DIR/sleeps" ]
     [[ "$output" == *"longer than the 1s tick interval"* ]]
+}
+
+# --- the tick drives the due poll ---
+
+@test "loop_run: asks what is due every tick" {
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
+    [ -f "$TMP_DIR/poll.calls" ]
+}
+
+@test "loop_run: the poll child loads and flushes state" {
+    # It is a subshell, so the CronJob always-once trigger it may record is
+    # lost unless it flushes, and without loading first the gate reads empty
+    # and re-fires a Job that already ran.
+    rm -f "$TMP_DIR/state.calls"
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
+    grep -q load "$TMP_DIR/state.calls"
+    grep -q flush "$TMP_DIR/state.calls"
+}
+
+@test "loop_run: the poll is passed the tick's own clock" {
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
+    clock_read
+    local passed
+    passed=$(head -n 1 "$TMP_DIR/poll.calls")
+    [ "$passed" -gt 0 ]
+    [ "$passed" -le "$(( CLOCK_NOW_US / 1000000 ))" ]
 }

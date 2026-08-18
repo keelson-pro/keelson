@@ -64,7 +64,8 @@ main() {
         fi
     fi
 
-    scan_run "$apply"
+    # poll-all: a one-shot has no tick to drive next-due polling.
+    scan_run "$apply" 1
 
     if [ "$apply" -eq 1 ]; then
         state_flush || true

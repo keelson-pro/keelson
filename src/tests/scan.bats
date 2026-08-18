@@ -9,7 +9,7 @@ setup() {
     TMP_BIN="$TMP_DIR/bin"
     mkdir -p "$TMP_BIN"
     PATH="$TMP_BIN:$PATH"
-    export PATH
+    export PATH TMP_DIR
 
     KEELSON_WATCHED_KINDS=Deployment
     KEELSON_SCOPE=cluster
@@ -56,8 +56,8 @@ setup() {
     source "$SCRIPT_DIR/lib/scan.bash"
 
     KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
-    KEELSON_POLL_INTERVAL=60
-    export KEELSON_POLL_INTERVAL
+    KEELSON_RECONCILE_INTERVAL=60
+    export KEELSON_RECONCILE_INTERVAL
 }
 
 teardown() {
@@ -687,4 +687,168 @@ SH
     kubectl_returns '{"items": []}'
     scan_run 0 2>/dev/null
     [ -n "${STATE_DELETED[j--Deployment--default--app]:-}" ]
+}
+
+# --- next-due drives the registry, not the scan ---
+#
+# The tick asks the cache what is due and polls only that, so a workload's
+# cadence is its own. The controller's scan makes no registry calls at all;
+# it refreshes the cache and evicts. A one-shot boot scan passes poll-all=1
+# and behaves as it always did.
+
+# A skopeo shim that records every invocation, so a test can assert on the
+# absence of registry traffic rather than merely the absence of an update.
+skopeo_counting() {
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+echo call >> "$TMP_DIR/skopeo.calls"
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+}
+
+skopeo_call_count() {
+    [ -f "$TMP_DIR/skopeo.calls" ] || { printf '0'; return 0; }
+    wc -l < "$TMP_DIR/skopeo.calls" | tr -d ' '
+}
+
+# now, far enough past any next-due the cache holds
+LATE=99999999999
+
+@test "poll: the controller's scan makes no registry calls" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    skopeo_counting
+    scan_run 0 0 2>/dev/null
+    [ "$(skopeo_call_count)" = "0" ]
+}
+
+@test "poll: a boot scan with poll-all still polls everything" {
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    skopeo_counting
+    scan_run 0 1 2>/dev/null
+    [ "$(skopeo_call_count)" = "1" ]
+}
+
+@test "poll: a due workload is polled from cache, with no cluster read" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    # kubectl now fails: a poll must need nothing from the cluster except
+    # managedFields, which is allowed to come back empty.
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    [ "$(skopeo_call_count)" = "1" ]
+}
+
+@test "poll: nothing due means no registry calls" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    # Its next-due is at most one interval out, and this is now.
+    scan_poll_due 0 1 2>/dev/null
+    [ "$(skopeo_call_count)" = "0" ]
+}
+
+@test "poll: a polled workload drops out until its interval elapses" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    [ "$(skopeo_call_count)" = "1" ]
+}
+
+@test "poll: next-due advances by the workload's own interval" {
+    inventory_init
+    kubectl_returns "$(deployment_with_schedule ghcr.io/x/y:1.2.3 2h)"
+    skopeo_counting
+    scan_run 0 0 2>/dev/null
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "$(( LATE + 7200 ))" ]
+}
+
+@test "poll: an empty cache polls nothing" {
+    inventory_init
+    skopeo_counting
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    [ "$(skopeo_call_count)" = "0" ]
+}
+
+@test "poll: with no cache at all it does nothing" {
+    skopeo_counting
+    run scan_poll_due 0 "$LATE"
+    [ "$status" -eq 0 ]
+    [ "$(skopeo_call_count)" = "0" ]
+}
+
+@test "poll: a cached update is applied" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    run emit scan_poll_due 0 "$LATE"
+    [[ "$output" == *"dry-run-would-update"* ]]
+}
+
+# --- the scan is the safety net for what events missed ---
+#
+# A watch stream can gap while a watcher is down, and it cannot carry
+# annotation changes at all. The reconcile pass is the only thing that sees
+# the whole cluster, so a record it finds changed has to become due now
+# rather than waiting out a schedule that could be a day long.
+
+@test "resync: an image changed behind our back makes the workload due now" {
+    inventory_init
+    kubectl_returns "$(deployment_with_schedule ghcr.io/x/y:1.0 1d)"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" -gt "$(( $(date -u +%s) + 1000 ))" ]
+
+    kubectl_returns "$(deployment_with_schedule ghcr.io/x/y:2.0 1d)"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" -le "$(date -u +%s)" ]
+}
+
+@test "resync: an annotation change makes the workload due now" {
+    # The watch stream cannot see these at all, so only the scan can.
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 4242424242
+
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 patch)"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" -le "$(date -u +%s)" ]
+}
+
+@test "resync: an unchanged workload keeps its place in the cycle" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 4242424242
+
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "4242424242" ]
+}
+
+@test "resync: it says so, so an operator knows the watch missed something" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:2.0 minor)"
+    run emit scan_run 0 0
+    [[ "$output" == *"scan-resync"* ]]
 }

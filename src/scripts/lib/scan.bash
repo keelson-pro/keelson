@@ -14,8 +14,15 @@
 # state. The only persisted state is the CronJob always-once trigger gate,
 # read once per scan via state_get_trigger_field.
 
+# scan_run <apply> [poll-all]
+#
+# poll-all defaults to 1: a scan scans, which is what a one-shot
+# keelson-boot-scan wants. The controller passes 0, because its scan only
+# refreshes the cache and evicts; registry work is driven off next-due by the
+# tick, so a workload's cadence is its own rather than the scan's.
 scan_run() {
     local _scan_apply=${1:-0}
+    local _scan_poll_all=${2:-1}
     local mode=dry-run
     [ "$_scan_apply" -eq 1 ] && mode=apply
 
@@ -141,14 +148,16 @@ scan_workload() {
     local n j cname cimage _workload_updated=0 \
           _workload_last_from="" _workload_last_to="" _workload_last_repo=""
 
-    n=$(printf '%s' "$containers_json" | yq -p=json 'length')
-    for ((j=0; j<n; j++)); do
-        cname=$(printf '%s' "$containers_json" | yq -p=json ".[$j].name")
-        cimage=$(printf '%s' "$containers_json" | yq -p=json ".[$j].image")
-        _scan_total=$((_scan_total + 1))
-        scan_container "$kind" "$ns" "$name" "$cname" "$cimage" \
-            "$annotations" "$ips_json" "$mf_json" "$sa_name"
-    done
+    if [ "$_scan_poll_all" -eq 1 ]; then
+        n=$(printf '%s' "$containers_json" | yq -p=json 'length')
+        for ((j=0; j<n; j++)); do
+            cname=$(printf '%s' "$containers_json" | yq -p=json ".[$j].name")
+            cimage=$(printf '%s' "$containers_json" | yq -p=json ".[$j].image")
+            _scan_total=$((_scan_total + 1))
+            scan_container "$kind" "$ns" "$name" "$cname" "$cimage" \
+                "$annotations" "$ips_json" "$mf_json" "$sa_name"
+        done
+    fi
 
     scan_cache_workload "$kind" "$ns" "$name" "$annotations" "$suspend" \
         "$sa_name" "$ips_json" "$containers_json"
@@ -199,12 +208,27 @@ scan_cache_workload() {
         fi
     fi
 
+    inventory_fingerprint "$interval" "$suspend" "$sa" "$ips" \
+        "$annotations" "$containers"
+    local computed_fingerprint=$INVENTORY_COMPUTED_FINGERPRINT
+
     # A workload already cached keeps its place in the cycle; a new one gets
     # an offset inside its first interval, so workloads cached in the same
     # pass do not all fall due together forever after.
     local next_due
     if inventory_get "$kind" "$ns" "$name"; then
         next_due=$INVENTORY_NEXT_DUE
+        if [ "$INVENTORY_FINGERPRINT" != "$computed_fingerprint" ]; then
+            # This pass is the only thing that sees the whole cluster, so it
+            # is the safety net for anything the watch stream missed: a gap
+            # while a watcher was down, and every annotation change, which
+            # the stream cannot carry at all. Making it due now is what stops
+            # a workload on a long schedule sitting out of sync until its
+            # next scheduled poll.
+            next_due=$_scan_now
+            log_info_always scan-resync kind="$kind" ns="$ns" name="$name" \
+                msg="$kind '$name' in '$ns' changed while Keelson was not watching; polling it now rather than waiting for its schedule."
+        fi
     else
         inventory_first_due "$kind" "$ns" "$name" "$interval" "$_scan_now"
         next_due=$INVENTORY_FIRST_DUE
@@ -397,4 +421,64 @@ scan_tag_passes_filter() {
             esac
             ;;
     esac
+}
+
+# scan_poll_due <apply> <now>
+# Polls every workload whose next-due has arrived, straight from the cache.
+#
+# This is what the tick asks each second, so a workload's cadence is its own
+# and not the scan's. Nothing here lists the cluster: the record already
+# holds the containers, annotations and credentials a decision needs.
+#
+# managedFields is the one thing deliberately not cached. It changes whenever
+# anyone writes the object, so a cached copy could be hours stale and drive
+# the field-manager strategy to the wrong owner. It is fetched here, once per
+# workload actually due, rather than kept.
+scan_poll_due() {
+    local _scan_apply=${1:-0} now=$2
+    inventory_enabled || return 0
+
+    inventory_due "$now"
+    [ "${#INVENTORY_DUE[@]}" -eq 0 ] && return 0
+
+    local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
+          _scan_no_change=0 _scan_skip=0 _scan_error=0
+    registry_init
+
+    local entry kind ns name i mf_json
+    for entry in "${INVENTORY_DUE[@]}"; do
+        read -r kind ns name <<<"$entry"
+        inventory_get "$kind" "$ns" "$name" || continue
+
+        mf_json=$(workload_managed_fields "$kind" "$ns" "$name" 2>/dev/null) || mf_json='[]'
+        [ -n "$mf_json" ] || mf_json='[]'
+
+        local _workload_updated=0 \
+              _workload_last_from="" _workload_last_to="" _workload_last_repo=""
+        for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do
+            _scan_total=$((_scan_total + 1))
+            scan_container "$kind" "$ns" "$name" \
+                "${INVENTORY_CONTAINER_NAMES[$i]}" "${INVENTORY_CONTAINER_IMAGES[$i]}" \
+                "$INVENTORY_ANNOTATIONS" "$INVENTORY_IMAGE_PULL_SECRETS" \
+                "$mf_json" "$INVENTORY_SERVICE_ACCOUNT"
+        done
+
+        if [ "$kind" = "CronJob" ] && [ "$_scan_apply" -eq 1 ]; then
+            scan_check_cronjob_trigger "$ns" "$name" "$INVENTORY_ANNOTATIONS" \
+                "$INVENTORY_SUSPEND" "$_workload_updated" \
+                "$_workload_last_from" "$_workload_last_to" "$_workload_last_repo"
+        fi
+
+        inventory_mark_polled "$kind" "$ns" "$name" "$now"
+    done
+
+    log_debug poll-summary \
+        workloads="${#INVENTORY_DUE[@]}" \
+        resources="$_scan_total" \
+        updated="$_scan_updated" \
+        no-change="$_scan_no_change" \
+        skip="$_scan_skip" \
+        error="$_scan_error" \
+        msg="Polled ${#INVENTORY_DUE[@]} due workloads: $_scan_total containers examined, $_scan_updated updated, $_scan_no_change no-change, $_scan_skip skipped, $_scan_error errored."
+    return 0
 }

@@ -13,6 +13,17 @@
 
 # workload_list_kind <kind>
 # Echoes the kubectl JSON list for <kind>, scope-aware (KEELSON_SCOPE).
+# workload_managed_fields <kind> <ns> <name>
+# Echoes the workload's managedFields as compact JSON, or "[]" if it has
+# none. Fetched at poll time rather than cached: it changes whenever anyone
+# writes the object, so a stale copy would drive the field-manager strategy
+# to the wrong owner.
+workload_managed_fields() {
+    local kind=$1 ns=$2 name=$3
+    kubectl get "$kind" -n "$ns" "$name" -o json 2>/dev/null \
+        | yq -p=json -o=json -I=0 '.metadata.managedFields // []'
+}
+
 workload_list_kind() {
     local kind=$1
     case "${KEELSON_SCOPE:?KEELSON_SCOPE required}" in

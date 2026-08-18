@@ -64,6 +64,7 @@ INVENTORY_SERVICE_ACCOUNT=
 INVENTORY_IMAGE_PULL_SECRETS=
 INVENTORY_ANNOTATIONS=
 INVENTORY_FINGERPRINT=
+INVENTORY_COMPUTED_FINGERPRINT=
 INVENTORY_HASH=0
 INVENTORY_FIRST_DUE=0
 declare -ga INVENTORY_CONTAINER_NAMES=()
@@ -122,6 +123,24 @@ inventory_first_due() {
     INVENTORY_FIRST_DUE=$(( $5 + INVENTORY_HASH % $4 ))
 }
 
+# inventory_fingerprint <interval> <suspend> <sa> <ips> <annotations>
+#                       <containers>
+# Sets INVENTORY_COMPUTED_FINGERPRINT: everything a decision depends on
+# except next-due, so a change to any of it reads as "this changed".
+#
+# One formula, used by inventory_put when writing and by callers wanting to
+# know whether what they just read from the cluster differs from what is
+# cached. Deriving it twice would let the two drift.
+#
+# The multi-line inputs are stripped of a trailing newline first. Whether one
+# is present depends on how the caller built the list, and without this a
+# rebuilt-but-identical record fingerprints differently, which reads as a
+# change on every pass and resyncs forever.
+inventory_fingerprint() {
+    local annotations=${5%$'\n'} containers=${6%$'\n'}
+    INVENTORY_COMPUTED_FINGERPRINT="${1}|${2}|${3}|${4}|${annotations//$'\n'/;}|${containers//$'\n'/;}"
+}
+
 # inventory_put <kind> <ns> <name> <next-due> <interval> <suspend>
 #               <service-account> <image-pull-secrets> <annotations>
 #               <containers>
@@ -133,9 +152,9 @@ inventory_put() {
           sa=$7 ips=$8 annotations=$9 containers=${10}
     local line fp
 
-    # Everything but next-due, so a change to any input forces a poll.
-    fp="${interval}|${suspend}|${sa}|${ips}"
-    fp="${fp}|${annotations//$'\n'/;}|${containers//$'\n'/;}"
+    inventory_fingerprint "$interval" "$suspend" "$sa" "$ips" \
+        "$annotations" "$containers"
+    fp=$INVENTORY_COMPUTED_FINGERPRINT
 
     inventory_path "$kind" "$ns" "$name"
     local tmp="${INVENTORY_PATH}.tmp"

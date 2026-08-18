@@ -3,7 +3,7 @@
 #
 # Configuration (all required, validated at boot):
 #   KEELSON_TICK_INTERVAL          seconds between supervisor ticks
-#   KEELSON_POLL_INTERVAL          seconds between scan starts (measured from
+#   KEELSON_RECONCILE_INTERVAL          seconds between scan starts (measured from
 #                                  scan start time; long scans queue the next
 #                                  for the very next tick, never overlap)
 #   KEELSON_FULL_REFRESH_INTERVAL  seconds between dedupe-cache refreshes
@@ -29,6 +29,7 @@ declare -gA LOOP_WATCHER_FAIL=()
 declare -gA LOOP_WATCHER_STARTED=()
 declare -gA LOOP_WATCHER_ELIGIBLE=()
 LOOP_SCAN_PID=0
+LOOP_POLL_PID=0
 
 # loop_drain_queue
 # Drains watcher-enqueued work items, logs each.
@@ -115,10 +116,37 @@ loop_start_scan() {
             configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
             msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
         [ "$force_refresh" = "1" ] && state_clear_cache
-        scan_run "$apply"
+        # poll-all=0: this pass refreshes the cache and evicts. Registry
+        # work belongs to the due-poll above, on each workload's own cadence.
+        scan_run "$apply" 0
         [ "$apply" -eq 1 ] && { state_flush || true; }
     ) &
     LOOP_SCAN_PID=$!
+}
+
+# loop_start_poll <apply> <now>
+# Spawns the due-poll child: registry lookups for whatever the cache says is
+# due right now.
+#
+# Owns the same state lifecycle as the scan child, and for the same reason:
+# it is a subshell, so the CronJob always-once trigger it may record is lost
+# unless it flushes before exiting, and without loading first the gate reads
+# empty and re-fires a Job that already ran.
+#
+# Backgrounded for the same reason the scan is: skopeo against a slow
+# registry must not hold up the tick. Gated on LOOP_POLL_PID so a long poll
+# never overlaps itself; the cache is on disk, so the child's next-due writes
+# outlive it.
+loop_start_poll() {
+    local apply=$1 now=$2
+    (
+        state_load || log_warn state-reload-failed \
+            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
+            msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
+        scan_poll_due "$apply" "$now"
+        [ "$apply" -eq 1 ] && { state_flush || true; }
+    ) &
+    LOOP_POLL_PID=$!
 }
 
 # loop_kill_children
@@ -130,11 +158,14 @@ loop_kill_children() {
         [ "$pid" -gt 0 ] && kill "$pid" 2>/dev/null || true
     done
     [ "$LOOP_SCAN_PID" -gt 0 ] && kill "$LOOP_SCAN_PID" 2>/dev/null || true
+    [ "$LOOP_POLL_PID" -gt 0 ] && kill "$LOOP_POLL_PID" 2>/dev/null || true
+    return 0
 }
 
 # loop_run
 # Tick once per KEELSON_TICK_INTERVAL: publish the heartbeat, supervise
-# watchers, drain queue, kick a backgrounded scan when due. The watcher map
+# watchers, drain queue, poll whatever the cache says is due, kick a
+# backgrounded reconcile scan when due. The watcher map
 # is published by the supervisor itself, not from here. Long scans overlap
 # ticks but never each other (gated on LOOP_SCAN_PID).
 #
@@ -152,7 +183,7 @@ loop_kill_children() {
 #   and the cadence is reported as broken rather than silently stretched.
 loop_run() {
     local tick=${KEELSON_TICK_INTERVAL:?KEELSON_TICK_INTERVAL required}
-    local poll=${KEELSON_POLL_INTERVAL:?KEELSON_POLL_INTERVAL required}
+    local poll=${KEELSON_RECONCILE_INTERVAL:?KEELSON_RECONCILE_INTERVAL required}
     local full_refresh=${KEELSON_FULL_REFRESH_INTERVAL:?KEELSON_FULL_REFRESH_INTERVAL required}
     local backoff_max=${KEELSON_WATCHER_BACKOFF_MAX:?KEELSON_WATCHER_BACKOFF_MAX required}
     local healthy_reset=${KEELSON_WATCHER_HEALTHY_RESET:?KEELSON_WATCHER_HEALTHY_RESET required}
@@ -174,6 +205,16 @@ loop_run() {
 
         loop_supervise_watchers "$now" "$backoff_max" "$healthy_reset"
         loop_drain_queue
+
+        # Every tick: what needs polling now? The cache answers without
+        # touching the cluster, so this costs nothing when nothing is due.
+        if [ "$LOOP_POLL_PID" -gt 0 ] && ! kill -0 "$LOOP_POLL_PID" 2>/dev/null; then
+            wait "$LOOP_POLL_PID" 2>/dev/null || true
+            LOOP_POLL_PID=0
+        fi
+        if [ "$LOOP_POLL_PID" -eq 0 ]; then
+            loop_start_poll "$apply" "$now"
+        fi
 
         if [ "$LOOP_SCAN_PID" -gt 0 ] && ! kill -0 "$LOOP_SCAN_PID" 2>/dev/null; then
             wait "$LOOP_SCAN_PID" 2>/dev/null || true

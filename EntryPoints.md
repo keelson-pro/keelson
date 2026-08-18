@@ -55,7 +55,7 @@ inventory, and the status files).
      without the process dying (denied RBAC, an unknown kind, a refused
      connection) is handled inside the watcher instead: see below.
    - **Drain the queue.** Events written by watchers are read and logged.
-   - **Kick a scan if due.** `now - last_scan_start >= KEELSON_POLL_INTERVAL`
+   - **Kick a scan if due.** `now - last_scan_start >= KEELSON_RECONCILE_INTERVAL`
      and no prior scan still running → spawn the scan in a background
      subshell. The child owns the full trigger-state lifecycle: load the
      ConfigMap, clear the cache if a full refresh is due (which lets the
@@ -63,12 +63,23 @@ inventory, and the status files).
      back. The parent's state stays clean; the next child rereads the
      ConfigMap. Long scans overlap ticks but never each other.
 
-     The scan is also the reconciler for the workload inventory under
+     The controller's scan makes no registry calls of its own; that is the
+     tick's job, above. `keelson-boot-scan` is the exception, being a
+     one-shot with no tick behind it, so it polls everything in the same
+     pass. Otherwise the scan is the reconciler for the workload inventory under
      `/keelson/work/inventory`: it records every workload it saw, eligible or
      not, and forgets any it no longer finds. Eviction is confined to kinds
      the pass listed successfully, because from here "kubectl errored" and
      "all of them were deleted" look identical and only one of those should
      empty the cache.
+
+     The inventory is what decouples the two costs. Listing is one call per
+     kind however many workloads exist; a registry tag lookup is one call per
+     eligible container and is the rate-limited one. So the scan asks the
+     registry about a workload only when its `next-due` has arrived, or when
+     its fingerprint shows the image or a decision annotation changed. A
+     workload nobody has touched, on a long `poll-schedule`, costs nothing
+     between polls.
    - **Rotate the log file if it is oversize.** The controller loop is the
      only rotator. Watchers and scan children append to the same file, and
      concurrent appends are safe, but two processes running the rename
