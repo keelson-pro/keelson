@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 
 # Tests for lib/state.bash. kubectl is shimmed via $TMP_BIN on PATH.
-# The state ConfigMap now carries only the CronJob always-once trigger ledger.
+# The state ConfigMap carries the CronJob always-once trigger ledger and
+# each workload's next-due, the one part of the cache worth surviving a restart.
 
 setup() {
     TMP_DIR=$(mktemp -d)
@@ -329,4 +330,54 @@ SH
     state_forget "$(state_trigger_key CronJob ops backup)"
     state_init
     [ "${#STATE_DELETED[@]}" -eq 0 ]
+}
+
+# --- per-workload schedule ---
+#
+# The cache is derived and rebuilt from the cluster on any restart, but a
+# schedule is not derivable. Without persisting it, a restart makes every
+# workload due at once and every repository gets polled the moment the pod
+# comes back.
+
+@test "next-due: round-trips through the ledger" {
+    state_set_next_due Deployment default web 1786868000
+    [ "$(state_get_next_due Deployment default web)" = "1786868000" ]
+}
+
+@test "next-due: unknown workload reads empty" {
+    [ -z "$(state_get_next_due Deployment default nope)" ]
+}
+
+@test "next-due: uses its own key, leaving the trigger ledger alone" {
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_set_next_due CronJob ops backup 222
+    [ "$(state_get_trigger_field CronJob ops backup triggered-job)" = "111" ]
+    [ "$(state_get_next_due CronJob ops backup)" = "222" ]
+    [ -n "${STATE_KEYS[s--CronJob--ops--backup]:-}" ]
+    [ -n "${STATE_KEYS[j--CronJob--ops--backup]:-}" ]
+}
+
+@test "next-due: marks the key dirty for the next flush" {
+    STATE_DIRTY=()
+    state_set_next_due Deployment default web 500
+    [ -n "${STATE_DIRTY[s--Deployment--default--web]:-}" ]
+}
+
+@test "forget_workload: drops both of a workload's keys" {
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_set_next_due CronJob ops backup 222
+    state_forget_workload CronJob ops backup
+    [ -z "$(state_get_next_due CronJob ops backup)" ]
+    [ -z "$(state_get_trigger_field CronJob ops backup triggered-job)" ]
+}
+
+@test "forget_workload: both keys go null in the same patch" {
+    STATE_DIRTY=(); STATE_DELETED=()
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_set_next_due CronJob ops backup 222
+    state_forget_workload CronJob ops backup
+    local patch
+    patch=$(state_build_patch)
+    [[ "$patch" == *'"s--CronJob--ops--backup":null'* ]]
+    [[ "$patch" == *'"j--CronJob--ops--backup":null'* ]]
 }

@@ -852,3 +852,54 @@ SH
     run emit scan_run 0 0
     [[ "$output" == *"scan-resync"* ]]
 }
+
+# --- schedules survive a restart ---
+#
+# The cache is derived and dies with the pod; the ledger does not. A restart
+# must resume each workload's place in its cycle rather than making every
+# watched workload due at once.
+
+@test "restart: a new cache entry resumes a persisted next-due" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    state_set_next_due Deployment default app 4242424242
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "4242424242" ]
+}
+
+@test "restart: with nothing persisted it takes a fresh offset and records it" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$(state_get_next_due Deployment default app)" = "$INVENTORY_NEXT_DUE" ]
+}
+
+@test "poll: the new next-due is written back to the ledger" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3"]}'
+SH
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    inventory_get Deployment default app
+    [ "$(state_get_next_due Deployment default app)" = "$INVENTORY_NEXT_DUE" ]
+    [ "$INVENTORY_NEXT_DUE" -gt "$LATE" ]
+}
+
+@test "evict: a workload gone from the cluster is forgotten in the ledger too" {
+    # Otherwise the ConfigMap accumulates keys for workloads that no longer
+    # exist and walks into its size limit over months.
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    [ -n "$(state_get_next_due Deployment default app)" ]
+
+    kubectl_returns '{"items": []}'
+    scan_run 0 0 2>/dev/null
+    [ -z "$(state_get_next_due Deployment default app)" ]
+    [ -n "${STATE_DELETED[s--Deployment--default--app]:-}" ]
+}

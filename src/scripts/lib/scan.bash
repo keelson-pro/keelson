@@ -84,9 +84,10 @@ scan_reconcile_inventory() {
         [ -n "${SCAN_SEEN[$entry]:-}" ] && continue
         read -r ekind ens ename <<<"$entry"
         inventory_evict "$ekind" "$ens" "$ename"
-        # The ledger has to forget it too, or a CronJob's trigger entry
-        # outlives the CronJob and the ConfigMap only ever grows.
-        state_forget "$(state_trigger_key "$ekind" "$ens" "$ename")"
+        # The ledger has to forget it too, or a workload's schedule and its
+        # CronJob trigger entry outlive the workload and the ConfigMap only
+        # ever grows.
+        state_forget_workload "$ekind" "$ens" "$ename"
         log_debug inventory-evicted kind="$ekind" ns="$ens" name="$ename" \
             msg="Forgot $ekind '$ename' in '$ens': no longer present in the cluster."
     done
@@ -215,7 +216,7 @@ scan_cache_workload() {
     # A workload already cached keeps its place in the cycle; a new one gets
     # an offset inside its first interval, so workloads cached in the same
     # pass do not all fall due together forever after.
-    local next_due
+    local next_due persisted
     if inventory_get "$kind" "$ns" "$name"; then
         next_due=$INVENTORY_NEXT_DUE
         if [ "$INVENTORY_FINGERPRINT" != "$computed_fingerprint" ]; then
@@ -230,8 +231,17 @@ scan_cache_workload() {
                 msg="$kind '$name' in '$ns' changed while Keelson was not watching; polling it now rather than waiting for its schedule."
         fi
     else
-        inventory_first_due "$kind" "$ns" "$name" "$interval" "$_scan_now"
-        next_due=$INVENTORY_FIRST_DUE
+        # A restart empties the cache but not the ledger, so a workload
+        # resumes its schedule rather than falling due immediately along with
+        # everything else.
+        persisted=$(state_get_next_due "$kind" "$ns" "$name")
+        if [ -n "$persisted" ]; then
+            next_due=$persisted
+        else
+            inventory_first_due "$kind" "$ns" "$name" "$interval" "$_scan_now"
+            next_due=$INVENTORY_FIRST_DUE
+            state_set_next_due "$kind" "$ns" "$name" "$next_due"
+        fi
     fi
 
     inventory_put "$kind" "$ns" "$name" "$next_due" "$interval" "$suspend" \
@@ -470,6 +480,8 @@ scan_poll_due() {
         fi
 
         inventory_mark_polled "$kind" "$ns" "$name" "$now"
+        inventory_get "$kind" "$ns" "$name" \
+            && state_set_next_due "$kind" "$ns" "$name" "$INVENTORY_NEXT_DUE"
     done
 
     log_debug poll-summary \

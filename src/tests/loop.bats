@@ -349,9 +349,9 @@ emit() { "$@" 2>&1; }
 }
 
 @test "loop_run: the poll child loads and flushes state" {
-    # It is a subshell, so the CronJob always-once trigger it may record is
-    # lost unless it flushes, and without loading first the gate reads empty
-    # and re-fires a Job that already ran.
+    # It is a subshell, so anything it records (a CronJob trigger, a new
+    # next-due) is lost unless it flushes, and without loading first the
+    # trigger gate reads empty and re-fires a Job that already ran.
     rm -f "$TMP_DIR/state.calls"
     scan_run() { :; }
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run

@@ -32,7 +32,8 @@ inventory, and the status files).
 2. Log a `boot` event and install `TERM`/`INT` traps that kill watcher PIDs
    and any in-flight scan.
 3. Initialise the work queue under `/keelson/work` and load the trigger-state
-   ConfigMap into memory (per-CronJob always-once ledger; log dedupe is held
+   ConfigMap into memory (per-CronJob always-once ledger and each workload's
+   next-due, so schedules survive a restart; log dedupe is held
    in-memory by `lib/log.bash` and does not touch the ConfigMap).
 4. Enter the tick loop (`KEELSON_TICK_INTERVAL=1s`). Each tick:
    - **Publish the heartbeat.** The clock is read and written in the same

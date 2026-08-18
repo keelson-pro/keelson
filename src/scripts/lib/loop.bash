@@ -129,9 +129,9 @@ loop_start_scan() {
 # due right now.
 #
 # Owns the same state lifecycle as the scan child, and for the same reason:
-# it is a subshell, so the CronJob always-once trigger it may record is lost
-# unless it flushes before exiting, and without loading first the gate reads
-# empty and re-fires a Job that already ran.
+# it is a subshell, so anything it records (a CronJob trigger, a workload's
+# new next-due) is lost unless it flushes before exiting, and without loading
+# first the trigger gate reads empty and re-fires a Job that already ran.
 #
 # Backgrounded for the same reason the scan is: skopeo against a slow
 # registry must not hold up the tick. Gated on LOOP_POLL_PID so a long poll

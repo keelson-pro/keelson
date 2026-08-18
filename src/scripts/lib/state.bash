@@ -7,6 +7,7 @@
 #
 # Data-key shape:
 #   j--<kind>--<ns>--<name>     per-workload trigger state (CronJob only)
+#   s--<kind>--<ns>--<name>     per-workload schedule: next-due
 #
 # Per-workload trigger fields:
 #   triggered-job, triggered-at    last manual Job, when (the scan reads
@@ -40,6 +41,37 @@ STATE_CONFIGMAP_NAME=""
 # state_trigger_key <kind> <ns> <name>
 state_trigger_key() {
     printf 'j--%s--%s--%s' "$1" "$2" "$3"
+}
+
+# state_schedule_key <kind> <ns> <name>
+# Separate from the trigger key so the CronJob ledger keeps its shape. A
+# schedule applies to every kind; the trigger gate only to CronJobs.
+state_schedule_key() {
+    printf 's--%s--%s--%s' "$1" "$2" "$3"
+}
+
+# state_get_next_due <kind> <ns> <name>
+# Echoes the persisted next-due, or empty if this workload has none.
+state_get_next_due() {
+    state_get "$(state_schedule_key "$1" "$2" "$3")" next-due
+}
+
+# state_set_next_due <kind> <ns> <name> <unix-seconds>
+#
+# Persisted because it is the one piece of the cache worth surviving a
+# restart. Everything else is rebuilt by one list per kind, but a schedule
+# is not derivable: without this, a pod restart resets every workload to due
+# now, and every watched workload polls its repository at once on every
+# restart.
+state_set_next_due() {
+    state_set "$(state_schedule_key "$1" "$2" "$3")" next-due "$4"
+}
+
+# state_forget_workload <kind> <ns> <name>
+# Drops both of a workload's keys on the next flush.
+state_forget_workload() {
+    state_forget "$(state_schedule_key "$1" "$2" "$3")"
+    state_forget "$(state_trigger_key "$1" "$2" "$3")"
 }
 
 # state_forget <data-key>
