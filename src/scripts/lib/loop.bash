@@ -7,8 +7,8 @@
 #                                  scan start time; long scans queue the next
 #                                  for the very next tick, never overlap)
 #   KEELSON_FULL_REFRESH_INTERVAL  seconds between dedupe-cache refreshes
-#   KEELSON_WATCHER_BACKOFF_MAX    cap on per-kind respawn delay (s)
-#   KEELSON_WATCHER_HEALTHY_RESET  alive duration that clears a kind's failure count
+#   KEELSON_WATCHER_RESPAWN_BACKOFF_MAX    cap on per-kind respawn delay (s)
+#   KEELSON_WATCHER_RESPAWN_HEALTHY_RESET  alive duration that clears a kind's failure count
 #
 # Test overrides:
 #   KEELSON_LOOP_MAX_ITERATIONS    0 = forever (default); >0 for tests
@@ -185,8 +185,8 @@ loop_run() {
     local tick=${KEELSON_TICK_INTERVAL:?KEELSON_TICK_INTERVAL required}
     local poll=${KEELSON_RECONCILE_INTERVAL:?KEELSON_RECONCILE_INTERVAL required}
     local full_refresh=${KEELSON_FULL_REFRESH_INTERVAL:?KEELSON_FULL_REFRESH_INTERVAL required}
-    local backoff_max=${KEELSON_WATCHER_BACKOFF_MAX:?KEELSON_WATCHER_BACKOFF_MAX required}
-    local healthy_reset=${KEELSON_WATCHER_HEALTHY_RESET:?KEELSON_WATCHER_HEALTHY_RESET required}
+    local backoff_max=${KEELSON_WATCHER_RESPAWN_BACKOFF_MAX:?KEELSON_WATCHER_RESPAWN_BACKOFF_MAX required}
+    local healthy_reset=${KEELSON_WATCHER_RESPAWN_HEALTHY_RESET:?KEELSON_WATCHER_RESPAWN_HEALTHY_RESET required}
     local max_iter=${KEELSON_LOOP_MAX_ITERATIONS:-0}
     local apply=1
     [ "${KEELSON_DRY_RUN:-0}" = "1" ] && apply=0

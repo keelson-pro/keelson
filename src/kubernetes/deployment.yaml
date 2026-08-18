@@ -85,10 +85,10 @@ spec:
               value: "${Keelson/TickInterval}"
             - name: KEELSON_HEARTBEAT_MAX_AGE
               value: "${Keelson/HeartbeatMaxAge}"
-            - name: KEELSON_WATCHER_BACKOFF_MAX
-              value: "${Keelson/WatcherBackoffMax}"
-            - name: KEELSON_WATCHER_HEALTHY_RESET
-              value: "${Keelson/WatcherHealthyReset}"
+            - name: KEELSON_WATCHER_RESPAWN_BACKOFF_MAX
+              value: "${Keelson/WatcherRespawnBackoffMax}"
+            - name: KEELSON_WATCHER_RESPAWN_HEALTHY_RESET
+              value: "${Keelson/WatcherRespawnHealthyReset}"
             - name: KEELSON_WATCHER_RECONNECT_INITIAL
               value: "${Keelson/WatcherReconnectInitial}"
             - name: KEELSON_WATCHER_RECONNECT_MAX

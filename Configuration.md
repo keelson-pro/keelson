@@ -41,11 +41,11 @@ Each row's left cell shows the env var on top and the matching Kaptain token bel
 
 | Env Var / Kaptain Token | Default | Purpose |
 |---|---|---|
-| `KEELSON_WATCHER_BACKOFF_MAX`<br>`Keelson/WatcherBackoffMax` | `300` | Cap on per-kind respawn delay (s). Failures back off `1, 2, 4, 8...` capped here, CrashLoopBackOff-style. |
-| `KEELSON_WATCHER_HEALTHY_RESET`<br>`Keelson/WatcherHealthyReset` | `30` | Seconds a watcher must stay alive before its failure count resets to zero. |
+| `KEELSON_WATCHER_RESPAWN_BACKOFF_MAX`<br>`Keelson/WatcherRespawnBackoffMax` | `300` | Cap on per-kind respawn delay (s). Failures back off `1, 2, 4, 8...` capped here, CrashLoopBackOff-style. |
+| `KEELSON_WATCHER_RESPAWN_HEALTHY_RESET`<br>`Keelson/WatcherRespawnHealthyReset` | `30` | Seconds a watcher must stay alive before its failure count resets to zero. |
 | `KEELSON_WATCHER_RECONNECT_INITIAL`<br>`Keelson/WatcherReconnectInitial` | `2` | Initial delay (s) inside a single watcher before it reconnects to its `kubectl watch` stream. Independent from the supervisor's respawn backoff above — the watcher reconnects in-process when its stream ends. |
 | `KEELSON_WATCHER_RECONNECT_MAX`<br>`Keelson/WatcherReconnectMax` | `60` | Cap on the in-watcher reconnect delay. |
-| `KEELSON_WATCHER_RECONNECT_RESET`<br>`Keelson/WatcherReconnectReset` | `30` | Seconds a single watch stream must hold before it counts as healthy and the reconnect delay drops back to `WatcherReconnectInitial`. Streams end for routine reasons, so without this the delay only ever climbs and a healthy watcher sits at the cap for the life of the Pod. Distinct from `WatcherHealthyReset`, which measures how long the watcher *process* has been alive; this measures how long one *stream* lasted. |
+| `KEELSON_WATCHER_RECONNECT_RESET`<br>`Keelson/WatcherReconnectReset` | `30` | Seconds a single watch stream must hold before it counts as healthy and the reconnect delay drops back to `WatcherReconnectInitial`. Streams end for routine reasons, so without this the delay only ever climbs and a healthy watcher sits at the cap for the life of the Pod. Distinct from `WatcherRespawnHealthyReset`, which measures how long the watcher *process* has been alive; this measures how long one *stream* lasted. |
 
 ### Log throttling and the file log
 

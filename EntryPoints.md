@@ -54,8 +54,8 @@ inventory, and the status files).
      changes are not visible to the stream and arrive with the reconcile scan.
      A dead watcher's PID becomes 0 and its
      failure count increments; the next respawn waits `1, 2, 4, 8...`
-     seconds, capped at `KEELSON_WATCHER_BACKOFF_MAX` (CrashLoopBackOff
-     style). A watcher that stays alive past `KEELSON_WATCHER_HEALTHY_RESET`
+     seconds, capped at `KEELSON_WATCHER_RESPAWN_BACKOFF_MAX` (CrashLoopBackOff
+     style). A watcher that stays alive past `KEELSON_WATCHER_RESPAWN_HEALTHY_RESET`
      clears its failure count.
 
      This layer handles the watcher *process* dying. A watch that fails
