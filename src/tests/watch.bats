@@ -23,6 +23,8 @@ setup() {
     source "$SCRIPT_DIR/lib/clock.bash"
     # shellcheck source=../scripts/lib/queue.bash
     source "$SCRIPT_DIR/lib/queue.bash"
+    # shellcheck source=../scripts/lib/inventory.bash
+    source "$SCRIPT_DIR/lib/inventory.bash"
     # shellcheck source=../scripts/lib/status.bash
     source "$SCRIPT_DIR/lib/status.bash"
     # shellcheck source=../scripts/lib/watch.bash
@@ -30,7 +32,9 @@ setup() {
 
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
     KEELSON_STATUS_DIR="$TMP_DIR/status"
-    export KEELSON_STATUS_DIR
+    KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
+    export KEELSON_STATUS_DIR KEELSON_INVENTORY_DIR
+    inventory_init
 
     queue_init
 }
@@ -50,7 +54,8 @@ install_shim() {
 # --- watch_handle_events: pure stdin → queue ---
 
 @test "watch_handle_events: enqueues one line per event" {
-    printf 'default app\nns2 other\n' | watch_handle_events Deployment
+    printf 'MODIFIED default app main=a:1,\nMODIFIED ns2 other main=b:1,\n' \
+        | watch_handle_events Deployment 2>/dev/null
     run queue_size
     [ "$output" = "2" ]
     [ -f "$KEELSON_QUEUE_DIR/Deployment--default--app" ]
@@ -58,19 +63,21 @@ install_shim() {
 }
 
 @test "watch_handle_events: blank lines are ignored" {
-    printf '\ndefault app\n\n' | watch_handle_events Deployment
+    printf '\nMODIFIED default app main=a:1,\n\n' \
+        | watch_handle_events Deployment 2>/dev/null
     run queue_size
     [ "$output" = "1" ]
 }
 
 @test "watch_handle_events: duplicate events dedupe to one queue entry" {
-    printf 'default app\ndefault app\ndefault app\n' | watch_handle_events Deployment
+    printf 'MODIFIED default app main=a:1,\nMODIFIED default app main=a:1,\n' \
+        | watch_handle_events Deployment 2>/dev/null
     run queue_size
     [ "$output" = "1" ]
 }
 
 @test "watch_handle_events: line with only namespace (no name) is skipped" {
-    printf 'default \n' | watch_handle_events Deployment
+    printf 'MODIFIED default \n' | watch_handle_events Deployment 2>/dev/null
     run queue_size
     [ "$output" = "0" ]
 }
@@ -116,7 +123,7 @@ SH
 @test "watch_run_kind: streams events then reconnects on disconnect" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
-printf 'default app\n'
+printf 'MODIFIED default app main=a:1,\n'
 exit 0
 SH
     # Avoid real-time delays.
@@ -205,7 +212,7 @@ SH
 @test "watch_run_kind: marks itself healthy while a stream is open" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
-printf 'default app\n'
+printf 'MODIFIED default app main=a:1,\n'
 exit 0
 SH
     install_shim sleep <<'SH'
@@ -325,4 +332,130 @@ SH
     KEELSON_WATCHER_RECONNECT_RESET=30 \
         run emit watch_run_kind Deployment
     [[ "$output" == *"held"* ]]
+}
+
+# --- events keep the cache current ---
+#
+# A watch fires on every write to the object, and most of those are status
+# churn. The handler's job is to tell a real image change from that noise
+# cheaply, and to evict on delete.
+
+cache_one() {
+    local images=${1:-'main=ghcr.io/x/y:1.0'} next_due=${2:-5000}
+    inventory_put Deployment default app "$next_due" 300 "" default '[]' \
+        'keelson.pro/policy=minor' "$images"
+}
+
+@test "events: a changed image updates the cache and makes it due now" {
+    cache_one 'main=ghcr.io/x/y:1.0' 5000
+    printf 'MODIFIED default app main=ghcr.io/x/y:2.0,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    inventory_get Deployment default app
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io/x/y:2.0" ]
+    clock_read
+    [ "$INVENTORY_NEXT_DUE" -le "$(( CLOCK_NOW_US / 1000000 ))" ]
+}
+
+@test "events: an unchanged image leaves the schedule alone" {
+    # Status churn is most of what a watch delivers; it must cost nothing.
+    cache_one 'main=ghcr.io/x/y:1.0' 5000
+    printf 'MODIFIED default app main=ghcr.io/x/y:1.0,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "5000" ]
+}
+
+@test "events: the record is rewritten, so the next event is not a change too" {
+    cache_one 'main=ghcr.io/x/y:1.0' 5000
+    printf 'MODIFIED default app main=ghcr.io/x/y:2.0,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    inventory_get Deployment default app
+    local after=$INVENTORY_NEXT_DUE
+    inventory_set_next_due Deployment default app 9000
+    printf 'MODIFIED default app main=ghcr.io/x/y:2.0,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "9000" ]
+    [ -n "$after" ]
+}
+
+@test "events: a multi-container change is applied in full" {
+    cache_one "$(printf 'main=a:1\nside=b:1')" 5000
+    printf 'MODIFIED default app main=a:2,side=b:1,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    inventory_get Deployment default app
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "a:2" ]
+    [ "${INVENTORY_CONTAINER_IMAGES[1]}" = "b:1" ]
+}
+
+@test "events: a delete evicts the entry" {
+    cache_one
+    printf 'DELETED default app main=ghcr.io/x/y:1.0,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    run inventory_get Deployment default app
+    [ "$status" -eq 1 ]
+}
+
+@test "events: a delete for something never cached is not an error" {
+    run bash -c 'printf "DELETED default ghost main=a:1,\n" | true'
+    printf 'DELETED default ghost main=a:1,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    run inventory_get Deployment default ghost
+    [ "$status" -eq 1 ]
+}
+
+@test "events: an uncached workload is left for the reconcile scan" {
+    # An event carries no annotations, so there is nothing to build a full
+    # record from.
+    printf 'ADDED default fresh main=a:1,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    run inventory_get Deployment default fresh
+    [ "$status" -eq 1 ]
+}
+
+@test "events: the identity is still enqueued for the trail" {
+    cache_one
+    printf 'MODIFIED default app main=ghcr.io/x/y:2.0,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    [ -f "$KEELSON_QUEUE_DIR/Deployment--default--app" ]
+}
+
+@test "events: a blank line is ignored" {
+    printf '\n' | watch_handle_events Deployment 2>/dev/null
+    run queue_size
+    [ "$output" = "0" ]
+}
+
+# --- the stream template ---
+
+@test "stream: asks for watch event types" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "$@" >>"$TMP_DIR/kubectl.args"
+exit 0
+SH
+    watch_kubectl_stream Deployment >/dev/null
+    grep -q -- "--output-watch-events=true" "$TMP_DIR/kubectl.args"
+}
+
+@test "stream: template carries type, identity and images" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "$@" >>"$TMP_DIR/kubectl.args"
+exit 0
+SH
+    watch_kubectl_stream Deployment >/dev/null
+    grep -q -- "{.type}" "$TMP_DIR/kubectl.args"
+    grep -q -- "{.object.metadata.name}" "$TMP_DIR/kubectl.args"
+    grep -q -- "spec.template.spec.containers" "$TMP_DIR/kubectl.args"
+}
+
+@test "stream: CronJob containers come from under jobTemplate" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "$@" >>"$TMP_DIR/kubectl.args"
+exit 0
+SH
+    watch_kubectl_stream CronJob >/dev/null
+    grep -q -- "jobTemplate.spec.template.spec.containers" "$TMP_DIR/kubectl.args"
 }

@@ -45,7 +45,13 @@ inventory, and the status files).
      `keelson-probe` compares in microseconds too, so the answer is never
      rounded across the limit by where a second boundary happened to fall.
    - **Supervise watchers.** Each kind in `KEELSON_WATCHED_KINDS` gets one
-     `kubectl get --watch` child. A dead watcher's PID becomes 0 and its
+     `kubectl get --watch --output-watch-events` child, which keeps the cache
+     current itself: a delete evicts, and a changed image updates the record
+     and makes the workload due immediately, so a manual deploy is picked up
+     within a tick rather than at the end of its schedule. Status churn, which
+     is most of what a watch delivers, costs a string compare. Annotation
+     changes are not visible to the stream and arrive with the reconcile scan.
+     A dead watcher's PID becomes 0 and its
      failure count increments; the next respawn waits `1, 2, 4, 8...`
      seconds, capped at `KEELSON_WATCHER_BACKOFF_MAX` (CrashLoopBackOff
      style). A watcher that stays alive past `KEELSON_WATCHER_HEALTHY_RESET`
@@ -54,7 +60,7 @@ inventory, and the status files).
      This layer handles the watcher *process* dying. A watch that fails
      without the process dying (denied RBAC, an unknown kind, a refused
      connection) is handled inside the watcher instead: see below.
-   - **Drain the queue.** Events written by watchers are read and logged.
+   - **Drain the queue.** Identities written by watchers are read and logged; the watchers have already applied the change to the cache themselves.
    - **Kick a scan if due.** `now - last_scan_start >= KEELSON_RECONCILE_INTERVAL`
      and no prior scan still running → spawn the scan in a background
      subshell. The child owns the full trigger-state lifecycle: load the
