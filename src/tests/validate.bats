@@ -67,14 +67,17 @@ set_required_env() {
     export KEELSON_RESPECT_SA_PULL_SECRETS=false
     export KEELSON_STATE_CONFIGMAP=keelson-state
     export KEELSON_WATCHED_KINDS="Deployment CronJob"
-    export KEELSON_POLL_INTERVAL=60
+    export KEELSON_RECONCILE_INTERVAL=60
+    export KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT=60
     export KEELSON_FULL_REFRESH_INTERVAL=3600
     export KEELSON_TICK_INTERVAL=1
     export KEELSON_HEARTBEAT_MAX_AGE=5
-    export KEELSON_WATCHER_BACKOFF_MAX=300
-    export KEELSON_WATCHER_HEALTHY_RESET=30
+    export KEELSON_WATCHER_RESPAWN_BACKOFF_MAX=300
+    export KEELSON_WATCHER_RESPAWN_HEALTHY_RESET=30
     export KEELSON_WATCHER_RECONNECT_INITIAL=2
     export KEELSON_WATCHER_RECONNECT_MAX=60
+    export KEELSON_WATCHER_RECONNECT_RESET=30
+    export KEELSON_REGISTRY_POLL_INTERVAL=60
     export KEELSON_LOG_DEBUG_REPEAT_INTERVAL=0
     export KEELSON_LOG_INFO_REPEAT_INTERVAL=120
     export KEELSON_LOG_WARN_REPEAT_INTERVAL=300
@@ -164,6 +167,34 @@ install_required_binaries() {
     v_run emit validate_binary nope-not-here
     [ "$status" -eq 1 ]
     [[ "$output" == *"required binary 'nope-not-here' not found on PATH."* ]]
+}
+
+@test "utc_clock: passes when the environment is UTC" {
+    TZ=UTC v_run validate_utc_clock
+    [ "$status" -eq 0 ]
+}
+
+@test "utc_clock: fails when the environment is not UTC" {
+    # POSIX offset form so the check does not depend on tzdata being installed.
+    TZ=AEST-10 v_run emit validate_utc_clock
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"the environment is not UTC"* ]]
+}
+
+@test "decimal_point: passes for a dot" {
+    v_run validate_decimal_point 1786867629.967696
+    [ "$status" -eq 0 ]
+}
+
+@test "decimal_point: fails for a comma" {
+    v_run emit validate_decimal_point 1786867629,967696
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"does not use '.' as the decimal point"* ]]
+}
+
+@test "decimal_point: reads EPOCHREALTIME when given no sample" {
+    v_run validate_decimal_point
+    [ "$status" -eq 0 ]
 }
 
 @test "yq_v4: passes for v4" {

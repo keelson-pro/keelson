@@ -220,42 +220,95 @@ emit() { "$@" 2>&1; }
     ! grep -q "update-applied" "$KEELSON_LOG_FILE_PATH"
 }
 
-# --- rotation ---
+# --- the file channel can be switched off ---
 
-@test "rotation: oversize file rotates to .1 before append" {
+@test "file channel: an empty path writes no file at all" {
+    KEELSON_LOG_FILE_PATH=
+    log_info evt k=v 2>/dev/null
+    [ -z "$(find "$TMP_DIR" -type f)" ]
+}
+
+@test "file channel: an empty path still emits on stderr" {
+    KEELSON_LOG_FILE_PATH=
+    run emit log_error evt k=v
+    [[ "$output" == *"evt"* ]]
+}
+
+@test "file channel: an empty path survives sourcing" {
+    # :- would treat empty as unset and hand back the default path, which
+    # would silently re-enable the file for a caller that switched it off.
+    KEELSON_LOG_FILE_PATH= bash -c '
+        KEELSON_LOG_FILE_PATH=
+        source "'"$SCRIPT_DIR"'/lib/log.bash"
+        [ -z "$KEELSON_LOG_FILE_PATH" ]
+    '
+}
+
+# --- rotation ---
+#
+# Appending is safe from any number of processes; the mv-shuffle is not.
+# Rotation therefore has one owner (the controller loop) and never happens
+# on the write path, which every watcher and scan child also runs.
+
+@test "rotation: writing does NOT rotate, however oversize the file is" {
     KEELSON_LOG_FILE_MAX_BYTES=10
     KEELSON_LOG_FILE_KEEP=3
-    # Seed with content > max.
     mkdir -p "$(dirname "$KEELSON_LOG_FILE_PATH")"
     printf 'XXXXXXXXXXXXXXXXXXXX\n' > "$KEELSON_LOG_FILE_PATH"
     log_info evt k=v 2>/dev/null
-    [ -f "$KEELSON_LOG_FILE_PATH.1" ]
-    grep -q "XXXX" "$KEELSON_LOG_FILE_PATH.1"
+    [ ! -f "$KEELSON_LOG_FILE_PATH.1" ]
+    # The line still lands, it just lands in the current file.
+    grep -q "XXXX" "$KEELSON_LOG_FILE_PATH"
     grep -q "evt" "$KEELSON_LOG_FILE_PATH"
 }
 
-@test "rotation: cascades .1 -> .2 -> .3 and drops past keep" {
+@test "rotate_if_needed: oversize file rotates to .1" {
+    KEELSON_LOG_FILE_MAX_BYTES=10
+    KEELSON_LOG_FILE_KEEP=3
+    mkdir -p "$(dirname "$KEELSON_LOG_FILE_PATH")"
+    printf 'XXXXXXXXXXXXXXXXXXXX\n' > "$KEELSON_LOG_FILE_PATH"
+    log_file_rotate_if_needed
+    [ -f "$KEELSON_LOG_FILE_PATH.1" ]
+    grep -q "XXXX" "$KEELSON_LOG_FILE_PATH.1"
+    [ ! -s "$KEELSON_LOG_FILE_PATH" ] || [ ! -f "$KEELSON_LOG_FILE_PATH" ]
+}
+
+@test "rotate_if_needed: cascades .1 -> .2 -> .3 and drops past keep" {
     KEELSON_LOG_FILE_MAX_BYTES=10
     KEELSON_LOG_FILE_KEEP=2
     mkdir -p "$(dirname "$KEELSON_LOG_FILE_PATH")"
     printf 'one\n' > "$KEELSON_LOG_FILE_PATH.1"
     printf 'two\n' > "$KEELSON_LOG_FILE_PATH.2"
     printf 'XXXXXXXXXXXXXXXXXXXX\n' > "$KEELSON_LOG_FILE_PATH"
-    log_info evt k=v 2>/dev/null
-    # After rotation: current = new, .1 = old current (oversize), .2 = previous .1
-    grep -q "evt" "$KEELSON_LOG_FILE_PATH"
+    log_file_rotate_if_needed
     grep -q "XXXX" "$KEELSON_LOG_FILE_PATH.1"
     grep -q "one"  "$KEELSON_LOG_FILE_PATH.2"
-    # KEEP=2 means .3 should not exist after the cascade.
     [ ! -f "$KEELSON_LOG_FILE_PATH.3" ]
 }
 
-@test "rotation: under-size file is NOT rotated" {
+@test "rotate_if_needed: under-size file is NOT rotated" {
     KEELSON_LOG_FILE_MAX_BYTES=10000
     mkdir -p "$(dirname "$KEELSON_LOG_FILE_PATH")"
     printf 'small\n' > "$KEELSON_LOG_FILE_PATH"
-    log_info evt k=v 2>/dev/null
+    log_file_rotate_if_needed
     [ ! -f "$KEELSON_LOG_FILE_PATH.1" ]
     grep -q "small" "$KEELSON_LOG_FILE_PATH"
-    grep -q "evt"   "$KEELSON_LOG_FILE_PATH"
+}
+
+@test "rotate_if_needed: missing file is a no-op and succeeds" {
+    KEELSON_LOG_FILE_MAX_BYTES=10
+    run log_file_rotate_if_needed
+    [ "$status" -eq 0 ]
+    [ ! -f "$KEELSON_LOG_FILE_PATH.1" ]
+}
+
+@test "rotate_if_needed: appends after rotation land in the fresh file" {
+    KEELSON_LOG_FILE_MAX_BYTES=10
+    KEELSON_LOG_FILE_KEEP=3
+    mkdir -p "$(dirname "$KEELSON_LOG_FILE_PATH")"
+    printf 'XXXXXXXXXXXXXXXXXXXX\n' > "$KEELSON_LOG_FILE_PATH"
+    log_file_rotate_if_needed
+    log_info evt k=v 2>/dev/null
+    grep -q "evt" "$KEELSON_LOG_FILE_PATH"
+    ! grep -q "XXXX" "$KEELSON_LOG_FILE_PATH"
 }

@@ -7,6 +7,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/log.bash
 source "${SCRIPT_DIR}/lib/log.bash"
+# shellcheck source=lib/clock.bash
+source "${SCRIPT_DIR}/lib/clock.bash"
 # shellcheck source=lib/validate.bash
 source "${SCRIPT_DIR}/lib/validate.bash"
 # shellcheck source=lib/policy.bash
@@ -31,10 +33,12 @@ source "${SCRIPT_DIR}/lib/state.bash"
 source "${SCRIPT_DIR}/lib/scan.bash"
 # shellcheck source=lib/queue.bash
 source "${SCRIPT_DIR}/lib/queue.bash"
-# shellcheck source=lib/watch.bash
-source "${SCRIPT_DIR}/lib/watch.bash"
+# shellcheck source=lib/inventory.bash
+source "${SCRIPT_DIR}/lib/inventory.bash"
 # shellcheck source=lib/status.bash
 source "${SCRIPT_DIR}/lib/status.bash"
+# shellcheck source=lib/watch.bash
+source "${SCRIPT_DIR}/lib/watch.bash"
 # shellcheck source=lib/loop.bash
 source "${SCRIPT_DIR}/lib/loop.bash"
 
@@ -69,15 +73,16 @@ main() {
         version="${KEELSON_VERSION:-0.0.0-DEV-VERSION}" \
         scope="$KEELSON_SCOPE" \
         config-mode="$KEELSON_CONFIG_MODE" \
-        poll-interval="$KEELSON_POLL_INTERVAL" \
+        poll-interval="$KEELSON_RECONCILE_INTERVAL" \
         tick-interval="$KEELSON_TICK_INTERVAL" \
         dry-run="${KEELSON_DRY_RUN:-0}" \
-        msg="Keelson ${KEELSON_VERSION:-0.0.0-DEV-VERSION} booting in '$KEELSON_SCOPE' scope (config-mode='$KEELSON_CONFIG_MODE', poll-interval=${KEELSON_POLL_INTERVAL}s, tick-interval=${KEELSON_TICK_INTERVAL}s, dry-run=${KEELSON_DRY_RUN:-0})."
+        msg="Keelson ${KEELSON_VERSION:-0.0.0-DEV-VERSION} booting in '$KEELSON_SCOPE' scope (config-mode='$KEELSON_CONFIG_MODE', poll-interval=${KEELSON_RECONCILE_INTERVAL}s, tick-interval=${KEELSON_TICK_INTERVAL}s, dry-run=${KEELSON_DRY_RUN:-0})."
 
     trap 'shutdown SIGTERM' TERM
     trap 'shutdown SIGINT' INT
 
     queue_init
+    inventory_init
     if ! state_init; then
         log_warn state-init-failed \
             configmap="${KEELSON_STATE_CONFIGMAP:-keelson-state}" \

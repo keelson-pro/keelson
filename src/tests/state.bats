@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 
 # Tests for lib/state.bash. kubectl is shimmed via $TMP_BIN on PATH.
-# The state ConfigMap now carries only the CronJob always-once trigger ledger.
+# The state ConfigMap carries the CronJob always-once trigger ledger and
+# each workload's next-due, the one part of the cache worth surviving a restart.
 
 setup() {
     TMP_DIR=$(mktemp -d)
@@ -241,4 +242,170 @@ SH
         "$TMP_DIR/patch.json")
     round_tripped=$(printf '%s' "$inner" | yq -p=json -r '."triggered-job"')
     [ "$round_tripped" = 'has "quote" and \slash' ]
+}
+
+# --- forgetting a key ---
+#
+# Nothing ever removed a key before, so a workload's entry outlived the
+# workload and the ConfigMap only grew. At roughly 1 MiB per object that
+# eventually fails as a mystery rather than as a bug.
+
+@test "forget: renders an unquoted null, which is what removes a merge key" {
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    STATE_DIRTY=(); STATE_DELETED=()
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    local patch
+    patch=$(state_build_patch)
+    [[ "$patch" == *'"j--CronJob--ops--backup":null'* ]]
+    [[ "$patch" != *'"null"'* ]]
+}
+
+@test "forget: the key's fields are gone" {
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    [ -z "$(state_get_trigger_field CronJob ops backup triggered-job)" ]
+    [ -z "${STATE_KEYS[j--CronJob--ops--backup]:-}" ]
+}
+
+@test "forget: a deleted key does not resurrect from its old fields" {
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    local patch
+    patch=$(state_build_patch)
+    [[ "$patch" != *"111"* ]]
+}
+
+@test "forget: deletions and writes go in the same patch" {
+    STATE_DIRTY=(); STATE_DELETED=()
+    state_set_trigger_field CronJob ops keep triggered-job 700
+    state_set_trigger_field CronJob ops gone triggered-job 800
+    state_forget "$(state_trigger_key CronJob ops gone)"
+    local patch
+    patch=$(state_build_patch)
+    [[ "$patch" == *'"j--CronJob--ops--gone":null'* ]]
+    [[ "$patch" == *"700"* ]]
+}
+
+@test "forget: a successful flush clears the deletion set" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    state_flush
+    [ "${#STATE_DELETED[@]}" -eq 0 ]
+    [ "${#STATE_DIRTY[@]}" -eq 0 ]
+}
+
+@test "clear_cache resets the deletion set too" {
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    state_clear_cache
+    [ "${#STATE_DELETED[@]}" -eq 0 ]
+}
+
+@test "forget: a failed flush keeps the deletion for the next attempt" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    run state_flush
+    [ "$status" -eq 1 ]
+    [ -n "${STATE_DELETED[j--CronJob--ops--backup]:-}" ]
+    [ -n "${STATE_DIRTY[j--CronJob--ops--backup]:-}" ]
+}
+
+@test "state_init: starts with an empty deletion set" {
+    # A forget left over from a previous cache must not delete a key that
+    # the fresh load just brought in.
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+    get) printf '{"data":{}}' ;;
+    *) exit 0 ;;
+esac
+SH
+    state_forget "$(state_trigger_key CronJob ops backup)"
+    state_init
+    [ "${#STATE_DELETED[@]}" -eq 0 ]
+}
+
+# --- per-workload schedule ---
+#
+# The cache is derived and rebuilt from the cluster on any restart, but a
+# schedule is not derivable. Without persisting it, a restart makes every
+# workload due at once and every repository gets polled the moment the pod
+# comes back.
+
+@test "next-due: round-trips through the ledger" {
+    state_set_next_due Deployment default web 1786868000
+    [ "$(state_get_next_due Deployment default web)" = "1786868000" ]
+}
+
+@test "next-due: unknown workload reads empty" {
+    [ -z "$(state_get_next_due Deployment default nope)" ]
+}
+
+@test "next-due: uses its own key, leaving the trigger ledger alone" {
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_set_next_due CronJob ops backup 222
+    [ "$(state_get_trigger_field CronJob ops backup triggered-job)" = "111" ]
+    [ "$(state_get_next_due CronJob ops backup)" = "222" ]
+    [ -n "${STATE_KEYS[s--CronJob--ops--backup]:-}" ]
+    [ -n "${STATE_KEYS[j--CronJob--ops--backup]:-}" ]
+}
+
+@test "next-due: marks the key dirty for the next flush" {
+    STATE_DIRTY=()
+    state_set_next_due Deployment default web 500
+    [ -n "${STATE_DIRTY[s--Deployment--default--web]:-}" ]
+}
+
+@test "forget_workload: drops both of a workload's keys" {
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_set_next_due CronJob ops backup 222
+    state_forget_workload CronJob ops backup
+    [ -z "$(state_get_next_due CronJob ops backup)" ]
+    [ -z "$(state_get_trigger_field CronJob ops backup triggered-job)" ]
+}
+
+@test "forget_workload: both keys go null in the same patch" {
+    STATE_DIRTY=(); STATE_DELETED=()
+    state_set_trigger_field CronJob ops backup triggered-job 111
+    state_set_next_due CronJob ops backup 222
+    state_forget_workload CronJob ops backup
+    local patch
+    patch=$(state_build_patch)
+    [[ "$patch" == *'"s--CronJob--ops--backup":null'* ]]
+    [[ "$patch" == *'"j--CronJob--ops--backup":null'* ]]
+}
+
+# --- ledger reconciliation, after a full refresh ---
+
+@test "reconcile_ledger: forgets keys with no cached workload" {
+    # shellcheck source=../scripts/lib/inventory.bash
+    source "$SCRIPT_DIR/lib/inventory.bash"
+    KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
+    inventory_init
+    inventory_put Deployment default web 1000 60 "" default '[]' '' 'main=a:1'
+
+    state_set_next_due Deployment default web 111
+    state_set_next_due Deployment default ghost 222
+    state_set_trigger_field CronJob ops gone triggered-job 333
+
+    state_reconcile_ledger
+    [ "$(state_get_next_due Deployment default web)" = "111" ]
+    [ -z "$(state_get_next_due Deployment default ghost)" ]
+    [ -z "$(state_get_trigger_field CronJob ops gone triggered-job)" ]
+}
+
+@test "reconcile_ledger: does nothing without a cache to compare against" {
+    # shellcheck source=../scripts/lib/inventory.bash
+    source "$SCRIPT_DIR/lib/inventory.bash"
+    KEELSON_INVENTORY_DIR="$TMP_DIR/absent"
+    state_set_next_due Deployment default web 111
+    state_reconcile_ledger
+    [ "$(state_get_next_due Deployment default web)" = "111" ]
 }

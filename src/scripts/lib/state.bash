@@ -7,6 +7,7 @@
 #
 # Data-key shape:
 #   j--<kind>--<ns>--<name>     per-workload trigger state (CronJob only)
+#   s--<kind>--<ns>--<name>     per-workload schedule: next-due
 #
 # Per-workload trigger fields:
 #   triggered-job, triggered-at    last manual Job, when (the scan reads
@@ -17,6 +18,7 @@
 #   STATE_FIELDS["<data-key>:<field>"] = string
 #   STATE_KEYS["<data-key>"]           = 1 if known
 #   STATE_DIRTY["<data-key>"]          = 1 if changed since last flush
+#   STATE_DELETED["<data-key>"]        = 1 if to be removed on next flush
 #
 # ConfigMap.data values are JSON object strings, one per data-key. Single
 # writer assumption: state_flush uses a merge patch with no resourceVersion
@@ -32,12 +34,94 @@
 declare -gA STATE_FIELDS=()
 declare -gA STATE_KEYS=()
 declare -gA STATE_DIRTY=()
+declare -gA STATE_DELETED=()
 STATE_NAMESPACE=""
 STATE_CONFIGMAP_NAME=""
 
 # state_trigger_key <kind> <ns> <name>
 state_trigger_key() {
     printf 'j--%s--%s--%s' "$1" "$2" "$3"
+}
+
+# state_schedule_key <kind> <ns> <name>
+# Separate from the trigger key so the CronJob ledger keeps its shape. A
+# schedule applies to every kind; the trigger gate only to CronJobs.
+state_schedule_key() {
+    printf 's--%s--%s--%s' "$1" "$2" "$3"
+}
+
+# state_get_next_due <kind> <ns> <name>
+# Echoes the persisted next-due, or empty if this workload has none.
+state_get_next_due() {
+    state_get "$(state_schedule_key "$1" "$2" "$3")" next-due
+}
+
+# state_set_next_due <kind> <ns> <name> <unix-seconds>
+#
+# Persisted because it is the one piece of the cache worth surviving a
+# restart. Everything else is rebuilt by one list per kind, but a schedule
+# is not derivable: without this, a pod restart resets every workload to due
+# now, and every watched workload polls its repository at once on every
+# restart.
+state_set_next_due() {
+    state_set "$(state_schedule_key "$1" "$2" "$3")" next-due "$4"
+}
+
+# state_forget_workload <kind> <ns> <name>
+# Drops both of a workload's keys on the next flush.
+state_forget_workload() {
+    state_forget "$(state_schedule_key "$1" "$2" "$3")"
+    state_forget "$(state_trigger_key "$1" "$2" "$3")"
+}
+
+# state_forget <data-key>
+# Marks a key for removal on the next flush.
+#
+# A merge patch removes a key by setting it null, so the field-level "empty
+# value is omitted" rule in state_render_data_value cannot do this: dropping
+# every field leaves the key present with an empty object.
+state_forget() {
+    local data_key=$1 pair
+    for pair in "${!STATE_FIELDS[@]}"; do
+        case "$pair" in
+            "$data_key:"*) unset 'STATE_FIELDS[$pair]' ;;
+        esac
+    done
+    unset 'STATE_KEYS[$data_key]'
+    STATE_DELETED["$data_key"]=1
+    STATE_DIRTY["$data_key"]=1
+}
+
+# state_reconcile_ledger
+# Forgets ledger keys whose workload is no longer cached.
+#
+# Runs at the end of a full refresh, when the cache has just been rebuilt
+# from the cluster and is therefore authoritative. Eviction during a normal
+# reconcile only fires for a workload the scan saw disappear; anything that
+# went while Keelson was down, or under a kind since dropped from the watched
+# set, would otherwise keep its keys forever.
+#
+# Keys are snapshotted first: state_forget unsets entries in STATE_KEYS, and
+# iterating a map while deleting from it skips entries.
+state_reconcile_ledger() {
+    inventory_enabled || return 0
+    local keys=("${!STATE_KEYS[@]}")
+    local key rest kind ns name
+    for key in ${keys[@]+"${keys[@]}"}; do
+        case "$key" in
+            j--*|s--*) ;;
+            *) continue ;;
+        esac
+        rest=${key#*--}
+        kind=${rest%%--*}; rest=${rest#*--}
+        ns=${rest%%--*}; name=${rest#*--}
+        [ -n "$kind" ] && [ -n "$ns" ] && [ -n "$name" ] || continue
+        inventory_get "$kind" "$ns" "$name" && continue
+        state_forget "$key"
+        log_debug ledger-forgotten key="$key" \
+            msg="Dropped ledger key '$key': no such workload after a full refresh."
+    done
+    return 0
 }
 
 # state_init
@@ -59,6 +143,7 @@ state_init() {
     STATE_FIELDS=()
     STATE_KEYS=()
     STATE_DIRTY=()
+    STATE_DELETED=()
     state_load
 }
 
@@ -140,6 +225,7 @@ state_clear_cache() {
     STATE_FIELDS=()
     STATE_KEYS=()
     STATE_DIRTY=()
+    STATE_DELETED=()
 }
 
 # state_json_escape <string>
@@ -182,12 +268,17 @@ state_render_data_value() {
 state_build_patch() {
     local entries="" first=1 key value
     for key in "${!STATE_DIRTY[@]}"; do
-        value=$(state_render_data_value "$key")
         if [ "$first" -eq 1 ]; then
             first=0
         else
             entries="$entries,"
         fi
+        if [ -n "${STATE_DELETED[$key]:-}" ]; then
+            # Unquoted null: that is what removes a key from a merge patch.
+            entries="$entries\"$(state_json_escape "$key")\":null"
+            continue
+        fi
+        value=$(state_render_data_value "$key")
         entries="$entries\"$(state_json_escape "$key")\":\"$(state_json_escape "$value")\""
     done
     printf '{"data":{%s}}' "$entries"
@@ -208,6 +299,7 @@ state_flush() {
             --patch "$patch" >/dev/null 2>&1; then
         local count=${#STATE_DIRTY[@]}
         STATE_DIRTY=()
+        STATE_DELETED=()
         log_debug state-flushed \
             configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
             keys="$count" \
@@ -224,5 +316,5 @@ state_flush() {
 # state_now
 # Echoes the current time as an ISO-8601 UTC timestamp.
 state_now() {
-    date -u +"%Y-%m-%dT%H:%M:%SZ"
+    printf '%(%Y-%m-%dT%H:%M:%SZ)T\n' -1
 }

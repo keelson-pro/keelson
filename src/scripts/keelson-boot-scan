@@ -6,6 +6,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/log.bash
 source "${SCRIPT_DIR}/lib/log.bash"
+# shellcheck source=lib/clock.bash
+source "${SCRIPT_DIR}/lib/clock.bash"
+# shellcheck source=lib/inventory.bash
+source "${SCRIPT_DIR}/lib/inventory.bash"
 # shellcheck source=lib/policy.bash
 source "${SCRIPT_DIR}/lib/policy.bash"
 # shellcheck source=lib/image.bash
@@ -60,7 +64,8 @@ main() {
         fi
     fi
 
-    scan_run "$apply"
+    # poll-all: a one-shot has no tick to drive next-due polling.
+    scan_run "$apply" 1
 
     if [ "$apply" -eq 1 ]; then
         state_flush || true

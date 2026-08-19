@@ -11,18 +11,30 @@ setup() {
     KEELSON_SCOPE=cluster
     KEELSON_WATCHER_RECONNECT_INITIAL=2
     KEELSON_WATCHER_RECONNECT_MAX=60
+    KEELSON_WATCHER_RECONNECT_RESET=30
     export PATH TMP_DIR KEELSON_WATCHED_KINDS KEELSON_SCOPE \
-        KEELSON_WATCHER_RECONNECT_INITIAL KEELSON_WATCHER_RECONNECT_MAX
+        KEELSON_WATCHER_RECONNECT_INITIAL KEELSON_WATCHER_RECONNECT_MAX \
+        KEELSON_WATCHER_RECONNECT_RESET
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash
     source "$SCRIPT_DIR/lib/log.bash"
+    # shellcheck source=../scripts/lib/clock.bash
+    source "$SCRIPT_DIR/lib/clock.bash"
     # shellcheck source=../scripts/lib/queue.bash
     source "$SCRIPT_DIR/lib/queue.bash"
+    # shellcheck source=../scripts/lib/inventory.bash
+    source "$SCRIPT_DIR/lib/inventory.bash"
+    # shellcheck source=../scripts/lib/status.bash
+    source "$SCRIPT_DIR/lib/status.bash"
     # shellcheck source=../scripts/lib/watch.bash
     source "$SCRIPT_DIR/lib/watch.bash"
 
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
+    KEELSON_STATUS_DIR="$TMP_DIR/status"
+    KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
+    export KEELSON_STATUS_DIR KEELSON_INVENTORY_DIR
+    inventory_init
 
     queue_init
 }
@@ -42,7 +54,8 @@ install_shim() {
 # --- watch_handle_events: pure stdin → queue ---
 
 @test "watch_handle_events: enqueues one line per event" {
-    printf 'default app\nns2 other\n' | watch_handle_events Deployment
+    printf 'MODIFIED default app main=a:1,\nMODIFIED ns2 other main=b:1,\n' \
+        | watch_handle_events Deployment 2>/dev/null
     run queue_size
     [ "$output" = "2" ]
     [ -f "$KEELSON_QUEUE_DIR/Deployment--default--app" ]
@@ -50,19 +63,21 @@ install_shim() {
 }
 
 @test "watch_handle_events: blank lines are ignored" {
-    printf '\ndefault app\n\n' | watch_handle_events Deployment
+    printf '\nMODIFIED default app main=a:1,\n\n' \
+        | watch_handle_events Deployment 2>/dev/null
     run queue_size
     [ "$output" = "1" ]
 }
 
 @test "watch_handle_events: duplicate events dedupe to one queue entry" {
-    printf 'default app\ndefault app\ndefault app\n' | watch_handle_events Deployment
+    printf 'MODIFIED default app main=a:1,\nMODIFIED default app main=a:1,\n' \
+        | watch_handle_events Deployment 2>/dev/null
     run queue_size
     [ "$output" = "1" ]
 }
 
 @test "watch_handle_events: line with only namespace (no name) is skipped" {
-    printf 'default \n' | watch_handle_events Deployment
+    printf 'MODIFIED default \n' | watch_handle_events Deployment 2>/dev/null
     run queue_size
     [ "$output" = "0" ]
 }
@@ -108,7 +123,7 @@ SH
 @test "watch_run_kind: streams events then reconnects on disconnect" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
-printf 'default app\n'
+printf 'MODIFIED default app main=a:1,\n'
 exit 0
 SH
     # Avoid real-time delays.
@@ -121,7 +136,8 @@ SH
     [ "$status" -eq 0 ]
     # Two iterations -> two "Watching kind" log lines.
     [ "$(printf '%s\n' "$output" | grep -c "Watching kind 'Deployment'")" = "2" ]
-    [[ "$output" == *"Watch for kind 'Deployment' disconnected"* ]]
+    [[ "$output" == *"Watch for kind 'Deployment' held"* ]]
+    [[ "$output" == *"then disconnected"* ]]
     # Each iteration enqueued the same identity; dedupe leaves one file.
     [ -f "$KEELSON_QUEUE_DIR/Deployment--default--app" ]
 }
@@ -143,4 +159,303 @@ SH
     # Sleeps observed: 8, 10, 10, 10, 10 (clamped after first double)
     [ "$(head -n 1 "$TMP_DIR/sleeps")" = "8" ]
     [ "$(tail -n 1 "$TMP_DIR/sleeps")" = "10" ]
+}
+
+# --- a failing kubectl must not take the watcher down with it ---
+
+@test "watch_run_kind: survives a kubectl that exits non-zero" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "Error from server (Forbidden): cronjobs is forbidden" >&2
+exit 1
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=3 run emit watch_run_kind CronJob
+    [ "$status" -eq 0 ]
+    # All three iterations ran: set -e did not kill the loop on the first.
+    [ "$(printf '%s\n' "$output" | grep -c "Watching kind 'CronJob'")" = "3" ]
+}
+
+@test "watch_run_kind: publishes the failure outward" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "Error from server (Forbidden): cronjobs is forbidden" >&2
+exit 1
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=2 watch_run_kind CronJob 2>/dev/null
+    status_read_watcher_health CronJob
+    [ "$STATUS_WATCHER_FAILURES" = "2" ]
+    [[ "$STATUS_WATCHER_ERROR" == *"Forbidden"* ]]
+}
+
+@test "watch_run_kind: logs why kubectl failed instead of swallowing it" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "Error from server (Forbidden): cronjobs is forbidden" >&2
+exit 1
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=1 run emit watch_run_kind CronJob
+    [[ "$output" == *"Forbidden"* ]]
+}
+
+@test "watch_run_kind: marks itself healthy while a stream is open" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf 'MODIFIED default app main=a:1,\n'
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=1 \
+    KEELSON_WATCHER_RECONNECT_RESET=0 \
+        watch_run_kind Deployment 2>/dev/null
+    status_read_watcher_health Deployment
+    [ "$STATUS_WATCHER_FAILURES" = "0" ]
+}
+
+@test "watch_run_kind: a good stream clears an earlier failure" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+n=$(cat "$TMP_DIR/kcount" 2>/dev/null || echo 0)
+n=$(( n + 1 ))
+echo "$n" > "$TMP_DIR/kcount"
+if [ "$n" -le 2 ]; then
+    echo "Error from server (Forbidden)" >&2
+    exit 1
+fi
+/bin/sleep 1.2
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=3 \
+    KEELSON_WATCHER_RECONNECT_RESET=1 \
+        watch_run_kind Deployment 2>/dev/null
+    status_read_watcher_health Deployment
+    [ "$STATUS_WATCHER_FAILURES" = "0" ]
+}
+
+# --- backoff reset on a stream that held ---
+#
+# Without a reset the backoff is a one-way ratchet: routine disconnects
+# (API server rollout, resourceVersion expiry) climb it to the cap and it
+# never comes back down, so a perfectly healthy watcher ends up with the
+# longest possible blind window between reconnects for the pod's whole life.
+
+@test "watch_run_kind: a stream that held past the reset clears the backoff" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+/bin/sleep 1.2
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+echo "$1" >>"$TMP_DIR/sleeps"
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=3 \
+    KEELSON_WATCHER_RECONNECT_INITIAL=1 \
+    KEELSON_WATCHER_RECONNECT_MAX=10 \
+    KEELSON_WATCHER_RECONNECT_RESET=1 \
+        watch_run_kind Deployment 2>/dev/null
+    # Every stream held 1.2s >= 1s, so every reconnect is back at initial.
+    [ "$(tr '\n' ' ' <"$TMP_DIR/sleeps")" = "1 1 1 " ]
+}
+
+@test "watch_run_kind: a stream that died instantly does not clear the backoff" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+echo "$1" >>"$TMP_DIR/sleeps"
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=3 \
+    KEELSON_WATCHER_RECONNECT_INITIAL=1 \
+    KEELSON_WATCHER_RECONNECT_MAX=10 \
+    KEELSON_WATCHER_RECONNECT_RESET=30 \
+        watch_run_kind Deployment 2>/dev/null
+    [ "$(tr '\n' ' ' <"$TMP_DIR/sleeps")" = "1 2 4 " ]
+}
+
+@test "watch_run_kind: backoff escalates, then recovers once a stream holds" {
+    # First two streams die instantly, the third and fourth hold.
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+n=$(cat "$TMP_DIR/kcount" 2>/dev/null || echo 0)
+n=$(( n + 1 ))
+echo "$n" > "$TMP_DIR/kcount"
+[ "$n" -ge 3 ] && /bin/sleep 1.2
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+echo "$1" >>"$TMP_DIR/sleeps"
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=4 \
+    KEELSON_WATCHER_RECONNECT_INITIAL=1 \
+    KEELSON_WATCHER_RECONNECT_MAX=10 \
+    KEELSON_WATCHER_RECONNECT_RESET=1 \
+        watch_run_kind Deployment 2>/dev/null
+    # 1, 2 while failing; back to 1 as soon as a stream held.
+    [ "$(tr '\n' ' ' <"$TMP_DIR/sleeps")" = "1 2 1 1 " ]
+}
+
+@test "watch_run_kind: reports how long the stream held" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=1 \
+    KEELSON_WATCHER_RECONNECT_RESET=30 \
+        run emit watch_run_kind Deployment
+    [[ "$output" == *"held"* ]]
+}
+
+# --- events keep the cache current ---
+#
+# A watch fires on every write to the object, and most of those are status
+# churn. The handler's job is to tell a real image change from that noise
+# cheaply, and to evict on delete.
+
+cache_one() {
+    local images=${1:-'main=ghcr.io/x/y:1.0'} next_due=${2:-5000}
+    inventory_put Deployment default app "$next_due" 300 "" default '[]' \
+        'keelson.pro/policy=minor' "$images"
+}
+
+@test "events: a changed image updates the cache and makes it due now" {
+    cache_one 'main=ghcr.io/x/y:1.0' 5000
+    printf 'MODIFIED default app main=ghcr.io/x/y:2.0,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    inventory_get Deployment default app
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io/x/y:2.0" ]
+    clock_read
+    [ "$INVENTORY_NEXT_DUE" -le "$(( CLOCK_NOW_US / 1000000 ))" ]
+}
+
+@test "events: an unchanged image leaves the schedule alone" {
+    # Status churn is most of what a watch delivers; it must cost nothing.
+    cache_one 'main=ghcr.io/x/y:1.0' 5000
+    printf 'MODIFIED default app main=ghcr.io/x/y:1.0,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "5000" ]
+}
+
+@test "events: the record is rewritten, so the next event is not a change too" {
+    cache_one 'main=ghcr.io/x/y:1.0' 5000
+    printf 'MODIFIED default app main=ghcr.io/x/y:2.0,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    inventory_get Deployment default app
+    local after=$INVENTORY_NEXT_DUE
+    inventory_set_next_due Deployment default app 9000
+    printf 'MODIFIED default app main=ghcr.io/x/y:2.0,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "9000" ]
+    [ -n "$after" ]
+}
+
+@test "events: a multi-container change is applied in full" {
+    cache_one "$(printf 'main=a:1\nside=b:1')" 5000
+    printf 'MODIFIED default app main=a:2,side=b:1,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    inventory_get Deployment default app
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "a:2" ]
+    [ "${INVENTORY_CONTAINER_IMAGES[1]}" = "b:1" ]
+}
+
+@test "events: a delete evicts the entry" {
+    cache_one
+    printf 'DELETED default app main=ghcr.io/x/y:1.0,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    run inventory_get Deployment default app
+    [ "$status" -eq 1 ]
+}
+
+@test "events: a delete for something never cached is not an error" {
+    run bash -c 'printf "DELETED default ghost main=a:1,\n" | true'
+    printf 'DELETED default ghost main=a:1,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    run inventory_get Deployment default ghost
+    [ "$status" -eq 1 ]
+}
+
+@test "events: an uncached workload is left for the reconcile scan" {
+    # An event carries no annotations, so there is nothing to build a full
+    # record from.
+    printf 'ADDED default fresh main=a:1,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    run inventory_get Deployment default fresh
+    [ "$status" -eq 1 ]
+}
+
+@test "events: the identity is still enqueued for the trail" {
+    cache_one
+    printf 'MODIFIED default app main=ghcr.io/x/y:2.0,\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    [ -f "$KEELSON_QUEUE_DIR/Deployment--default--app" ]
+}
+
+@test "events: a blank line is ignored" {
+    printf '\n' | watch_handle_events Deployment 2>/dev/null
+    run queue_size
+    [ "$output" = "0" ]
+}
+
+# --- the stream template ---
+
+@test "stream: asks for watch event types" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "$@" >>"$TMP_DIR/kubectl.args"
+exit 0
+SH
+    watch_kubectl_stream Deployment >/dev/null
+    grep -q -- "--output-watch-events=true" "$TMP_DIR/kubectl.args"
+}
+
+@test "stream: template carries type, identity and images" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "$@" >>"$TMP_DIR/kubectl.args"
+exit 0
+SH
+    watch_kubectl_stream Deployment >/dev/null
+    grep -q -- "{.type}" "$TMP_DIR/kubectl.args"
+    grep -q -- "{.object.metadata.name}" "$TMP_DIR/kubectl.args"
+    grep -q -- "spec.template.spec.containers" "$TMP_DIR/kubectl.args"
+}
+
+@test "stream: CronJob containers come from under jobTemplate" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "$@" >>"$TMP_DIR/kubectl.args"
+exit 0
+SH
+    watch_kubectl_stream CronJob >/dev/null
+    grep -q -- "jobTemplate.spec.template.spec.containers" "$TMP_DIR/kubectl.args"
 }

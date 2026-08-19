@@ -85,11 +85,40 @@ validate_binary() {
 }
 
 validate_bash_version() {
-    if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
-        log_error validate-bash-too-old version="${BASH_VERSION:-unknown}" required=4 \
-            msg="Validation failed: Bash version '${BASH_VERSION:-unknown}' is older than required v4."
+    # v5 for EPOCHREALTIME: the controller loop times its own cycle with it.
+    if [ "${BASH_VERSINFO[0]:-0}" -lt 5 ]; then
+        log_error validate-bash-too-old version="${BASH_VERSION:-unknown}" required=5 \
+            msg="Validation failed: Bash version '${BASH_VERSION:-unknown}' is older than required v5."
         return 1
     fi
+}
+
+validate_utc_clock() {
+    # log_emit and state_now format timestamps with the printf built-in and a
+    # literal Z instead of forking date -u, which is only correct while the
+    # environment is UTC. The base image sets TZ=UTC; rendering a known epoch
+    # proves the property rather than trusting the variable, so an override or
+    # a base image without it fails here instead of silently logging local time.
+    local epoch_zero
+    printf -v epoch_zero '%(%Y-%m-%dT%H:%M:%SZ)T' 0
+    if [ "$epoch_zero" != "1970-01-01T00:00:00Z" ]; then
+        log_error validate-clock-not-utc tz="${TZ:-unset}" rendered="$epoch_zero" \
+            msg="Validation failed: the environment is not UTC (epoch 0 rendered as '$epoch_zero'). Set TZ=UTC."
+        return 1
+    fi
+}
+
+validate_decimal_point() {
+    # clock_parse splits EPOCHREALTIME on a literal dot rather than accepting
+    # either separator, which only holds while the locale uses a dot. The base
+    # image sets LC_ALL=C; reading the live value proves it.
+    local sample=${1:-$EPOCHREALTIME}
+    case $sample in
+        *.*) return 0 ;;
+    esac
+    log_error validate-decimal-point-not-dot locale="${LC_ALL:-unset}" rendered="$sample" \
+        msg="Validation failed: the locale does not use '.' as the decimal point (time rendered as '$sample'). Set LC_ALL=C."
+    return 1
 }
 
 validate_yq_v4() {
@@ -156,6 +185,8 @@ validate_config() {
     local var
 
     validate_bash_version || errors=$((errors+1))
+    validate_utc_clock || errors=$((errors+1))
+    validate_decimal_point || errors=$((errors+1))
 
     for var in KEELSON_SCOPE KEELSON_CONFIG_MODE KEELSON_LOG_LEVEL KEELSON_LOG_FORMAT \
                KEELSON_RESPECT_SA_PULL_SECRETS KEELSON_STATE_CONFIGMAP \
@@ -175,9 +206,11 @@ validate_config() {
         validate_env_set KEELSON_NAMESPACE || errors=$((errors+1))
     fi
 
-    for var in KEELSON_POLL_INTERVAL KEELSON_FULL_REFRESH_INTERVAL KEELSON_TICK_INTERVAL \
-               KEELSON_HEARTBEAT_MAX_AGE KEELSON_WATCHER_BACKOFF_MAX KEELSON_WATCHER_HEALTHY_RESET \
+    for var in KEELSON_RECONCILE_INTERVAL KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT \
+               KEELSON_FULL_REFRESH_INTERVAL KEELSON_TICK_INTERVAL \
+               KEELSON_HEARTBEAT_MAX_AGE KEELSON_WATCHER_RESPAWN_BACKOFF_MAX KEELSON_WATCHER_RESPAWN_HEALTHY_RESET \
                KEELSON_WATCHER_RECONNECT_INITIAL KEELSON_WATCHER_RECONNECT_MAX \
+               KEELSON_WATCHER_RECONNECT_RESET \
                KEELSON_LOG_FILE_MAX_BYTES KEELSON_LOG_FILE_KEEP; do
         validate_env_set "$var" && validate_env_positive_int "$var" || errors=$((errors+1))
     done

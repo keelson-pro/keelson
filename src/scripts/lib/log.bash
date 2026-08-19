@@ -34,33 +34,61 @@
 # The file log path is convention, not configuration:
 #   /keelson/work/log/keelson.log         active
 #   /keelson/work/log/keelson.log.1..N    rotated, oldest = highest N
+#
+# Many processes append to that file: the controller loop, one watcher per
+# watched kind, and every backgrounded scan child. Appending concurrently is
+# safe; rotating concurrently is not. Rotation therefore has exactly one
+# owner, the controller loop, via log_file_rotate_if_needed once per tick.
+# A process that only appends never rotates, so the file grows unbounded
+# while the controller is not running (one-shot entry points, tests).
+#
+# keelson-probe writes no file at all. It reads the controller's state; it
+# does not author the controller's trail. Its failure message reaches the
+# operator as a kubelet event, and on a liveness kill the container restarts
+# and takes the emptyDir with it, so a file write would buy nothing while
+# costing forks on the one path already closest to its exec timeout.
 
-KEELSON_LOG_FILE_PATH=${KEELSON_LOG_FILE_PATH:-/keelson/work/log/keelson.log}
+# Set this to the empty string before sourcing to switch the file channel
+# off entirely; keelson-probe does. Note the `-` rather than `:-`: an empty
+# value must survive, or a caller that deliberately switched the file off
+# would silently get the default path back.
+KEELSON_LOG_FILE_PATH=${KEELSON_LOG_FILE_PATH-/keelson/work/log/keelson.log}
 
 declare -gA LOG_THROTTLE_LAST=()
 
+# Results land in globals rather than on stdout. Every one of these is called
+# for every log line, and a command substitution forks a subshell each time:
+# eight or so processes per line, before the level filter has even decided
+# whether the line will be printed. loop_drain_queue pays that per queue item.
+LOG_LEVEL_NUM=0
+LOG_LINE=
+LOG_ESCAPED=
+
+# log_level_num <level>  -> LOG_LEVEL_NUM
 log_level_num() {
     case "$1" in
-        debug) printf '0' ;;
-        info)  printf '1' ;;
-        warn)  printf '2' ;;
-        error) printf '3' ;;
-        *)     printf '1' ;;
+        debug) LOG_LEVEL_NUM=0 ;;
+        info)  LOG_LEVEL_NUM=1 ;;
+        warn)  LOG_LEVEL_NUM=2 ;;
+        error) LOG_LEVEL_NUM=3 ;;
+        *)     LOG_LEVEL_NUM=1 ;;
     esac
 }
 
 log_should_emit_stdout() {
-    local lvl_num threshold
-    lvl_num=$(log_level_num "$1")
-    threshold=$(log_level_num "${KEELSON_LOG_LEVEL:-info}")
-    [ "$lvl_num" -ge "$threshold" ]
+    local lvl_num
+    log_level_num "$1"
+    lvl_num=$LOG_LEVEL_NUM
+    log_level_num "${KEELSON_LOG_LEVEL:-info}"
+    [ "$lvl_num" -ge "$LOG_LEVEL_NUM" ]
 }
 
+# log_json_escape <string>  -> LOG_ESCAPED
 log_json_escape() {
     local s=$1
     s=${s//\\/\\\\}
     s=${s//\"/\\\"}
-    printf '%s' "$s"
+    LOG_ESCAPED=$s
 }
 
 # log_throttle_interval <level>
@@ -95,29 +123,31 @@ log_render_plain() {
     local pair
     for pair in "$@"; do
         if [[ "$pair" == msg=* ]]; then
-            printf '%s %s %s\n' "$ts" "$level" "${pair#msg=}"
+            LOG_LINE="$ts $level ${pair#msg=}"
             return
         fi
     done
-    local line="$ts $level $event"
+    LOG_LINE="$ts $level $event"
     for pair in "$@"; do
-        line+=" $pair"
+        LOG_LINE+=" $pair"
     done
-    printf '%s\n' "$line"
 }
 
 # log_render_json <ts> <LEVEL> <event> <kv...>
 log_render_json() {
     local ts=$1 level=$2 event=$3; shift 3
     local out k v pair
-    out='{"ts":"'$ts'","level":"'$level'","event":"'$(log_json_escape "$event")'"'
+    log_json_escape "$event"
+    out='{"ts":"'$ts'","level":"'$level'","event":"'$LOG_ESCAPED'"'
     for pair in "$@"; do
         k=${pair%%=*}
         v=${pair#*=}
-        out+=',"'$(log_json_escape "$k")'":"'$(log_json_escape "$v")'"'
+        log_json_escape "$k"; k=$LOG_ESCAPED
+        log_json_escape "$v"; v=$LOG_ESCAPED
+        out+=',"'$k'":"'$v'"'
     done
     out+='}'
-    printf '%s\n' "$out"
+    LOG_LINE=$out
 }
 
 # log_file_rotate
@@ -144,24 +174,38 @@ log_file_rotate() {
     return 0
 }
 
+# log_file_rotate_if_needed
+# Rotate when the active file has grown past KEELSON_LOG_FILE_MAX_BYTES.
+#
+# THE ONLY CALLER IS THE CONTROLLER LOOP, once per tick. Do not call this
+# from the write path: see the note above log_file_write.
+log_file_rotate_if_needed() {
+    local max=${KEELSON_LOG_FILE_MAX_BYTES:-10485760}
+    [ -f "$KEELSON_LOG_FILE_PATH" ] || return 0
+    local size
+    size=$(wc -c <"$KEELSON_LOG_FILE_PATH" 2>/dev/null || printf '0')
+    [ "$size" -ge "$max" ] || return 0
+    log_file_rotate
+}
+
 # log_file_write <plain-line>
-# Append to the rotated file. Always plain format. Always emits regardless
-# of stdout level or throttle. Best-effort: a write failure here must not
-# break the caller.
+# Append to the log file. Always plain format. Always emits regardless of
+# stdout level or throttle. Best-effort: a write failure here must not break
+# the caller.
+#
+# Appends only. This runs in every process that logs, and there are many:
+# the controller loop, one watcher per watched kind, and each backgrounded
+# scan child. Concurrent appends are safe (the fd is O_APPEND and a line is
+# one short write), but the rename shuffle in log_file_rotate is not: two
+# processes running it at once lose or duplicate rotated files. So rotation
+# is not decided here. It has a single owner, the controller loop, which
+# calls log_file_rotate_if_needed once per tick.
 log_file_write() {
     local line=$1
-    local max=${KEELSON_LOG_FILE_MAX_BYTES:-10485760}
+    [ -n "$KEELSON_LOG_FILE_PATH" ] || return 0
     local dir
     dir=$(dirname "$KEELSON_LOG_FILE_PATH")
     mkdir -p "$dir" 2>/dev/null || return 0
-
-    if [ -f "$KEELSON_LOG_FILE_PATH" ]; then
-        local size
-        size=$(wc -c <"$KEELSON_LOG_FILE_PATH" 2>/dev/null || printf '0')
-        if [ "$size" -ge "$max" ]; then
-            log_file_rotate
-        fi
-    fi
     printf '%s' "$line" >> "$KEELSON_LOG_FILE_PATH" 2>/dev/null || true
 }
 
@@ -172,11 +216,16 @@ log_emit() {
     shift 3
 
     local ts level_uc
-    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    # Built-in time formatting rather than a date fork on every line. The Z is
+    # literal because the image sets TZ=UTC, which validate_config enforces.
+    printf -v ts '%(%Y-%m-%dT%H:%M:%SZ)T' -1
     level_uc=$(printf '%s' "$level" | tr '[:lower:]' '[:upper:]')
 
+    # Copied out of the shared global: log_render_json overwrites LOG_LINE,
+    # and the plain line is still needed after it for the non-JSON branch.
     local plain_line
-    plain_line=$(log_render_plain "$ts" "$level_uc" "$event" "$@")
+    log_render_plain "$ts" "$level_uc" "$event" "$@"
+    plain_line=$LOG_LINE
 
     # File channel: always, regardless of stdout level or throttle.
     log_file_write "$plain_line"$'\n'
@@ -198,15 +247,14 @@ log_emit() {
         fi
     fi
 
-    local out
     if [ "${KEELSON_LOG_FORMAT:-plain}" = "json" ]; then
-        out=$(log_render_json "$ts" "$level_uc" "$event" "$@")
+        log_render_json "$ts" "$level_uc" "$event" "$@"
     else
-        out=$plain_line
+        LOG_LINE=$plain_line
     fi
     # Logs go to stderr so pure functions can use stdout for return values
     # (annotation_get etc.) without their callers having to disentangle the two.
-    printf '%s\n' "$out" >&2
+    printf '%s\n' "$LOG_LINE" >&2
 }
 
 log_debug()        { log_emit debug 1 "$@"; }
