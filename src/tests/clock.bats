@@ -15,11 +15,6 @@ setup() {
     [ "$CLOCK_PARSED_US" = "1786867629967696" ]
 }
 
-@test "clock_parse: decimal comma (locales that render one)" {
-    clock_parse 1786867629,967696
-    [ "$CLOCK_PARSED_US" = "1786867629967696" ]
-}
-
 @test "clock_parse: whole seconds with no fraction" {
     clock_parse 1786867629
     [ "$CLOCK_PARSED_US" = "1786867629000000" ]

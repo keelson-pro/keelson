@@ -169,6 +169,34 @@ install_required_binaries() {
     [[ "$output" == *"required binary 'nope-not-here' not found on PATH."* ]]
 }
 
+@test "utc_clock: passes when the environment is UTC" {
+    TZ=UTC v_run validate_utc_clock
+    [ "$status" -eq 0 ]
+}
+
+@test "utc_clock: fails when the environment is not UTC" {
+    # POSIX offset form so the check does not depend on tzdata being installed.
+    TZ=AEST-10 v_run emit validate_utc_clock
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"the environment is not UTC"* ]]
+}
+
+@test "decimal_point: passes for a dot" {
+    v_run validate_decimal_point 1786867629.967696
+    [ "$status" -eq 0 ]
+}
+
+@test "decimal_point: fails for a comma" {
+    v_run emit validate_decimal_point 1786867629,967696
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"does not use '.' as the decimal point"* ]]
+}
+
+@test "decimal_point: reads EPOCHREALTIME when given no sample" {
+    v_run validate_decimal_point
+    [ "$status" -eq 0 ]
+}
+
 @test "yq_v4: passes for v4" {
     install_yq_v4
     v_run validate_yq_v4

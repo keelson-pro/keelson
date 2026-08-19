@@ -216,7 +216,9 @@ log_emit() {
     shift 3
 
     local ts level_uc
-    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    # Built-in time formatting rather than a date fork on every line. The Z is
+    # literal because the image sets TZ=UTC, which validate_config enforces.
+    printf -v ts '%(%Y-%m-%dT%H:%M:%SZ)T' -1
     level_uc=$(printf '%s' "$level" | tr '[:lower:]' '[:upper:]')
 
     # Copied out of the shared global: log_render_json overwrites LOG_LINE,

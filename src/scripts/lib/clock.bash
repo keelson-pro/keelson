@@ -16,8 +16,8 @@
 #   call a fresh heartbeat stale, or a stale one fresh.
 #
 # Reads bash 5's EPOCHREALTIME rather than forking date, so the hot path
-# costs nothing. EPOCHREALTIME renders with the locale's decimal point, so
-# both separators are accepted.
+# costs nothing. EPOCHREALTIME renders with the locale's decimal point, which
+# is a dot because the image sets LC_ALL=C and validate_config enforces it.
 #
 # Public API (results land in globals; a command substitution would fork and
 # defeat the point):
@@ -31,13 +31,12 @@ CLOCK_TEXT=
 CLOCK_DURATION=0
 
 # clock_parse <decimal-seconds>
-# Accepts "<secs>", "<secs>.<frac>" or "<secs>,<frac>". A fraction shorter
-# than six digits is scaled up rather than read as microseconds, one longer
-# is truncated.
+# Accepts "<secs>" or "<secs>.<frac>". A fraction shorter than six digits is
+# scaled up rather than read as microseconds, one longer is truncated.
 clock_parse() {
     local t=$1 secs frac
-    secs=${t%%[.,]*}
-    frac=${t#*[.,]}
+    secs=${t%%.*}
+    frac=${t#*.}
     [ "$frac" = "$t" ] && frac=0
     frac="${frac}000000"
     # 10# so a leading zero is not read as octal.

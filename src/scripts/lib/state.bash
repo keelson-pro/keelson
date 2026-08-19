@@ -316,5 +316,5 @@ state_flush() {
 # state_now
 # Echoes the current time as an ISO-8601 UTC timestamp.
 state_now() {
-    date -u +"%Y-%m-%dT%H:%M:%SZ"
+    printf '%(%Y-%m-%dT%H:%M:%SZ)T\n' -1
 }
