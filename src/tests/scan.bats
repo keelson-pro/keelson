@@ -52,10 +52,13 @@ setup() {
     source "$SCRIPT_DIR/lib/clock.bash"
     # shellcheck source=../scripts/lib/inventory.bash
     source "$SCRIPT_DIR/lib/inventory.bash"
+    # shellcheck source=../scripts/lib/queue.bash
+    source "$SCRIPT_DIR/lib/queue.bash"
     # shellcheck source=../scripts/lib/scan.bash
     source "$SCRIPT_DIR/lib/scan.bash"
 
     KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
+    KEELSON_QUEUE_DIR="$TMP_DIR/queue"
     KEELSON_RECONCILE_INTERVAL=60
     export KEELSON_RECONCILE_INTERVAL
 }
@@ -902,4 +905,115 @@ SH
     scan_run 0 0 2>/dev/null
     [ -z "$(state_get_next_due Deployment default app)" ]
     [ -n "${STATE_DELETED[s--Deployment--default--app]:-}" ]
+}
+
+# --- the queued re-read: what a watch event actually turns into ---
+#
+# The event carries coordinates only, so the cluster is the only thing that
+# can say what changed. These cover the read itself and the one comparison
+# that decides whether a workload's schedule is brought forward.
+
+@test "queue refresh: an empty queue reads nothing" {
+    inventory_init
+    queue_init
+    kubectl_returns '{"items": []}'
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >>"$TMP_DIR/kubectl.calls"
+printf '{"items": []}'
+SH
+    scan_refresh_queued 0 2>/dev/null
+    [ ! -f "$TMP_DIR/kubectl.calls" ]
+}
+
+@test "queue refresh: a queued identity is read and cached" {
+    inventory_init
+    queue_init
+    kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' minor)"
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io/x/y:1.0" ]
+    [ "$(queue_size)" = "0" ]
+}
+
+@test "queue refresh: the read is scoped to the one workload" {
+    inventory_init
+    queue_init
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMP_DIR/kubectl.calls"
+printf '{"items": []}'
+SH
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    grep -q -- "--field-selector metadata.name=app" "$TMP_DIR/kubectl.calls"
+    grep -q -- "-n default" "$TMP_DIR/kubectl.calls"
+}
+
+@test "queue refresh: a changed annotation brings the poll forward" {
+    # The case the whole re-read exists for: nothing about the image moved,
+    # but the decision Keelson would make did.
+    inventory_init
+    queue_init
+    kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' minor)"
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    inventory_get Deployment default app
+    inventory_set_next_due Deployment default app 9999999999
+
+    kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' major)"
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    inventory_get Deployment default app
+    clock_read
+    [ "$INVENTORY_NEXT_DUE" -le "$(( CLOCK_NOW_US / 1000000 ))" ]
+}
+
+@test "queue refresh: an unchanged workload keeps its schedule" {
+    # Status churn is most of what a watch delivers and must cost nothing
+    # beyond the read itself.
+    inventory_init
+    queue_init
+    kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' minor)"
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    inventory_set_next_due Deployment default app 9999999999
+
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "9999999999" ]
+}
+
+@test "queue refresh: a workload that has gone is left for the delete event" {
+    inventory_init
+    queue_init
+    kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' minor)"
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+
+    kubectl_returns '{"items": []}'
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io/x/y:1.0" ]
+}
+
+@test "queue refresh: a burst lists the kind instead of reading one at a time" {
+    inventory_init
+    queue_init
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMP_DIR/kubectl.calls"
+printf '{"items": []}'
+SH
+    SCAN_QUEUE_LIST_THRESHOLD=3
+    queue_enqueue Deployment default a
+    queue_enqueue Deployment default b
+    queue_enqueue Deployment default c
+    scan_refresh_queued 0 2>/dev/null
+    [ "$(wc -l <"$TMP_DIR/kubectl.calls")" -eq 1 ]
+    ! grep -q -- "--field-selector" "$TMP_DIR/kubectl.calls"
+    grep -q -- "--all-namespaces" "$TMP_DIR/kubectl.calls"
 }

@@ -43,6 +43,7 @@ setup() {
     scan_run() { printf '%s\n' "$1" >>"$TMP_DIR/scan.calls"; }
     scan_poll_due() { printf '%s\n' "$2" >>"$TMP_DIR/poll.calls"; }
     scan_refresh_kind() { printf '%s\n' "$2" >>"$TMP_DIR/refresh.calls"; }
+    scan_refresh_queued() { printf '%s\n' "$1" >>"$TMP_DIR/queue.calls"; }
     inventory_evict_unwatched() { printf 'evict-unwatched\n' >>"$TMP_DIR/refresh.calls"; }
     state_reconcile_ledger() { printf 'reconcile-ledger\n' >>"$TMP_DIR/refresh.calls"; }
     state_flush() { printf 'flush\n' >>"$TMP_DIR/state.calls"; }
@@ -67,6 +68,7 @@ teardown() {
     LOOP_WATCHER_STARTED=()
     LOOP_WATCHER_ELIGIBLE=()
     LOOP_SCAN_PID=0
+    LOOP_QUEUE_PID=0
     LOOP_REFRESH_PID=0
     LOOP_REFRESH_PENDING=()
     rm -rf "$TMP_DIR"
@@ -74,21 +76,20 @@ teardown() {
 
 emit() { "$@" 2>&1; }
 
-# --- loop_drain_queue ---
+# --- loop_start_queue_refresh ---
 
-@test "loop_drain_queue: empty queue emits nothing" {
-    run emit loop_drain_queue
-    [ "$status" -eq 0 ]
-    [[ "$output" != *"queue-drained"* ]]
+@test "queue refresh: the child loads and flushes state" {
+    loop_start_queue_refresh 1
+    wait "$LOOP_QUEUE_PID"
+    grep -q "load" "$TMP_DIR/state.calls"
+    grep -q "flush" "$TMP_DIR/state.calls"
 }
 
-@test "loop_drain_queue: non-empty queue reports count" {
-    queue_enqueue Deployment default app
-    queue_enqueue CronJob ns2 cron
-    KEELSON_LOG_LEVEL=debug run emit loop_drain_queue
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"queue-drained count=2"* ]]
-    [ "$(queue_size)" = "0" ]
+@test "queue refresh: dry-run passes apply=0 and does not flush" {
+    loop_start_queue_refresh 0
+    wait "$LOOP_QUEUE_PID" || true
+    [ "$(cat "$TMP_DIR/queue.calls")" = "0" ]
+    [ ! -f "$TMP_DIR/state.calls" ] || ! grep -q "flush" "$TMP_DIR/state.calls"
 }
 
 # --- loop_supervise_watchers ---
@@ -270,7 +271,9 @@ emit() { "$@" 2>&1; }
 @test "loop_run: publishes the heartbeat before the tick's work" {
     # The stamp must be readable by a probe that fires while the tick is
     # still working, not only after the work is done.
-    loop_drain_queue() {
+    # The supervisor is the first synchronous work after the stamp is
+    # written, so it stands in for "the tick's work" here.
+    loop_supervise_watchers() {
         [ -f "$HEARTBEAT_FILE" ] && : > "$TMP_DIR/heartbeat-was-first"
         return 0
     }
@@ -282,7 +285,7 @@ emit() { "$@" 2>&1; }
     local before after stamp
     clock_read
     before=$CLOCK_NOW_US
-    loop_drain_queue() { command sleep 2; return 0; }
+    loop_supervise_watchers() { command sleep 2; return 0; }
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     clock_read
     after=$CLOCK_NOW_US
@@ -307,7 +310,7 @@ emit() { "$@" 2>&1; }
     # watch_run_kind's stub sleeps too; keep it off the real sleep stub.
     watch_run_kind() { command sleep 10; }
     sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
-    loop_drain_queue() { command sleep 0.4; return 0; }
+    loop_supervise_watchers() { command sleep 0.4; return 0; }
     KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     # ~0.6s left of the 1s cycle: definitely less than a full tick.
     awk '{ exit ($1 < 0.9 && $1 > 0.2) ? 0 : 1 }' "$TMP_DIR/sleeps"
@@ -327,7 +330,7 @@ emit() { "$@" 2>&1; }
     # watch_run_kind's stub sleeps too; keep it off the real sleep stub.
     watch_run_kind() { command sleep 10; }
     sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
-    loop_drain_queue() { command sleep 0.3; return 0; }
+    loop_supervise_watchers() { command sleep 0.3; return 0; }
     KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=3 run emit loop_run
     [ "$status" -eq 0 ]
     [[ "$output" != *"longer than the"* ]]
@@ -338,7 +341,7 @@ emit() { "$@" 2>&1; }
     # watch_run_kind's stub sleeps too; keep it off the real sleep stub.
     watch_run_kind() { command sleep 10; }
     sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
-    loop_drain_queue() { command sleep 1.3; return 0; }
+    loop_supervise_watchers() { command sleep 1.3; return 0; }
     KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=1 run emit loop_run
     [ "$status" -eq 0 ]
     [ ! -f "$TMP_DIR/sleeps" ]

@@ -256,38 +256,6 @@ inventory_mark_polled() {
     inventory_set_next_due "$1" "$2" "$3" "$(( $4 + INVENTORY_INTERVAL ))"
 }
 
-# inventory_note_change <kind> <ns> <name> <containers> <now>
-# Applies an observed image change: if <containers> differs from what is
-# cached, the record is updated and next-due set to <now> so the next tick
-# polls it. Returns 0 when something changed, 1 when it did not or the
-# workload is not cached.
-#
-# Updating the record matters as much as the reschedule. A watch fires on
-# every write to the object, most of them status churn, and Keelson's own
-# patches fire one too. Without writing the new images back, the very next
-# event would compare against the stale record and look like a change again,
-# so a busy workload would poll on every status tick.
-#
-# A workload not yet cached is left alone: an event carries no annotations,
-# so there is nothing to build a full record from. The reconcile scan picks
-# it up.
-inventory_note_change() {
-    local kind=$1 ns=$2 name=$3 containers=$4 now=$5
-    inventory_get "$kind" "$ns" "$name" || return 1
-
-    local cached= i
-    for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do
-        cached="${cached}${INVENTORY_CONTAINER_NAMES[$i]}=${INVENTORY_CONTAINER_IMAGES[$i]}"$'\n'
-    done
-    # Compare without trailing newlines: the caller may or may not have one.
-    [ "${cached%$'\n'}" = "${containers%$'\n'}" ] && return 1
-
-    inventory_put "$kind" "$ns" "$name" "$now" "$INVENTORY_INTERVAL" \
-        "$INVENTORY_SUSPEND" "$INVENTORY_SERVICE_ACCOUNT" \
-        "$INVENTORY_IMAGE_PULL_SECRETS" "$INVENTORY_ANNOTATIONS" "$containers"
-    return 0
-}
-
 # inventory_evict_kind <kind>
 # Forgets every cached workload of one kind. Used by the full refresh, which
 # rebuilds a kind from the cluster rather than merely overwriting what it

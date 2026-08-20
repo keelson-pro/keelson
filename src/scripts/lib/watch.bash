@@ -1,10 +1,17 @@
 # Watcher primitives: one kubectl --watch per kind, with reconnect/backoff.
 # Sourced; not directly executable.
 #
-# Each event from kubectl produces one line of
-# "<type> <ns> <name> <name=image,...>" via jsonpath; the per-line handler
-# keeps the local cache current from it, so a real image change is polled at
-# once rather than waiting out the workload's schedule.
+# Each event from kubectl produces one line of "<type> <ns> <name>" via
+# jsonpath: coordinates and nothing else. The handler evicts on a delete and
+# queues everything else for the tick to re-read from the cluster.
+#
+# Carrying no detail is deliberate. An event cannot say what changed, so
+# anything short of the whole object leaves a class of change invisible, and
+# the whole object is not something jsonpath can hand over safely: annotations
+# are a map it cannot enumerate, and their values can contain the spaces and
+# newlines the line format is built out of. The re-read gets real JSON through
+# the same extraction the reconcile scan uses, so there is one code path
+# deciding what a workload looks like rather than two that can drift.
 #
 # Eligibility is NOT evaluated here - the scanner does that from authoritative
 # cluster state, so the watcher stays dumb about policy.
@@ -124,32 +131,16 @@ watch_error_hint() {
     done < "$file"
 }
 
-# watch_containers_jsonpath <kind>
-# Echoes the jsonpath to a kind's container list. CronJob nests its pod spec
-# under jobTemplate; everything else Keelson watches does not.
-watch_containers_jsonpath() {
-    case "$1" in
-        CronJob) printf '.object.spec.jobTemplate.spec.template.spec.containers' ;;
-        *)       printf '.object.spec.template.spec.containers' ;;
-    esac
-}
-
 # watch_kubectl_stream <kind>
-# Emits one line per event as "<type> <namespace> <name> <name=image,...>".
+# Emits one line per event as "<type> <namespace> <name>".
 # Honours KEELSON_SCOPE.
 #
 # --output-watch-events wraps each object with its type, which is the only
 # way to tell a delete from an update: without it a deleted object arrives
 # looking exactly like a live one, and the cache would never evict.
-#
-# The images ride along in the same line so the handler can spot a real
-# change without a fork or a read of the cluster. Annotations do not: a
-# jsonpath cannot enumerate map keys usefully, so an annotation change is
-# picked up by the reconcile scan instead.
 watch_kubectl_stream() {
-    local kind=$1 cpath
-    cpath=$(watch_containers_jsonpath "$kind")
-    local jp="{.type} {.object.metadata.namespace} {.object.metadata.name} {range ${cpath}[*]}{.name}={.image},{end}{\"\n\"}"
+    local kind=$1
+    local jp="{.type} {.object.metadata.namespace} {.object.metadata.name}{\"\n\"}"
     case "${KEELSON_SCOPE:?KEELSON_SCOPE required}" in
         namespace)
             kubectl get "$kind" \
@@ -164,21 +155,18 @@ watch_kubectl_stream() {
 }
 
 # watch_handle_events <kind>
-# Reads the stream and keeps the cache current.
+# Reads the stream and turns each event into work for the tick.
 #
-# A delete evicts. Anything else is compared against the cached images: a
-# real change updates the record and makes the workload due now, so the next
-# tick polls it rather than waiting out its schedule. Everything else is
-# status churn, which is most of what a watch delivers, and costs a string
-# compare and nothing more.
+# A delete evicts and stops there, since there is nothing left to read.
+# Anything else is queued. The queue is keyed by identity, so a workload
+# writing its status fifty times in a second costs fifty file writes and one
+# re-read, which is what keeps the churn a cluster-wide watch delivers from
+# turning into cluster-wide API traffic.
 watch_handle_events() {
-    local kind=$1 type ns name csv containers now
-    while read -r type ns name csv; do
+    local kind=$1 type ns name
+    while read -r type ns name; do
         [ -z "$ns" ] && continue
         [ -z "$name" ] && continue
-
-        queue_enqueue "$kind" "$ns" "$name"
-        log_debug watch-enqueued kind="$kind" ns="$ns" name="$name" type="$type"
 
         if [ "$type" = "DELETED" ]; then
             inventory_evict "$kind" "$ns" "$name"
@@ -187,17 +175,8 @@ watch_handle_events() {
             continue
         fi
 
-        # "a=1,b=2," from the jsonpath range, to one "name=image" per line.
-        containers=${csv%,}
-        containers=${containers//,/$'\n'}
-        [ -n "$containers" ] || continue
-
-        clock_read
-        now=$(( CLOCK_NOW_US / 1000000 ))
-        if inventory_note_change "$kind" "$ns" "$name" "$containers" "$now"; then
-            log_info_always watch-image-changed kind="$kind" ns="$ns" name="$name" \
-                msg="$kind '$name' in '$ns' changed image; polling it now rather than waiting for its schedule."
-        fi
+        queue_enqueue "$kind" "$ns" "$name"
+        log_debug watch-enqueued kind="$kind" ns="$ns" name="$name" type="$type"
     done
 }
 

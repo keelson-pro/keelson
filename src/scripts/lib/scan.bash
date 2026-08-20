@@ -143,6 +143,86 @@ scan_refresh_kind() {
     return 0
 }
 
+# scan_refresh_queued
+# Re-reads every identity the watchers queued and rewrites its cache record.
+#
+# This is what makes a watch event mean anything. The event carries only
+# coordinates, so the cluster is the only place that can say what changed, and
+# scan_workload already knows how to read it: annotations, containers, service
+# account, pull secrets, suspend. The fingerprint it writes decides the rest.
+# A workload whose decision inputs moved comes back due now, so the next tick
+# polls it; one that only wrote its status fingerprints identically and keeps
+# its schedule.
+#
+# Reads are per workload up to SCAN_QUEUE_LIST_THRESHOLD identities and one
+# list per kind beyond it. A reconnect replays the entire cluster as ADDED, so
+# the large case is routine rather than exceptional, and past a couple of
+# dozen a single list is both fewer round trips and less total data than the
+# gets it replaces.
+#
+# No registry calls and no eviction: a delete is handled by the watcher when
+# it sees one, and anything missed there is the reconcile scan's job.
+SCAN_QUEUE_LIST_THRESHOLD=25
+scan_refresh_queued() {
+    local _scan_apply=${1:-0}
+    local _scan_poll_all=0
+    inventory_enabled || return 0
+
+    local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
+          _scan_no_change=0 _scan_skip=0 _scan_error=0
+    local -A SCAN_SEEN=()
+    local -A SCAN_LISTED=()
+    local _scan_now _scan_interval=${KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT:-60}
+    clock_read
+    _scan_now=$(( CLOCK_NOW_US / 1000000 ))
+
+    local line kind ns name count=0
+    local -a queued=()
+    local -A kinds=()
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        queued+=("$line")
+        kinds["${line%% *}"]=1
+        count=$(( count + 1 ))
+    done < <(queue_drain)
+    [ "$count" -eq 0 ] && return 0
+
+    if [ "$count" -ge "$SCAN_QUEUE_LIST_THRESHOLD" ]; then
+        log_debug queue-refresh-listing kinds="${!kinds[*]}" queued="$count" \
+            msg="Re-reading $count queued workloads by listing ${#kinds[@]} kinds rather than one get each."
+        for kind in "${!kinds[@]}"; do
+            scan_kind "$kind"
+        done
+        return 0
+    fi
+
+    for line in "${queued[@]}"; do
+        read -r kind ns name <<<"$line"
+        scan_refresh_workload "$kind" "$ns" "$name"
+    done
+    log_debug queue-refreshed queued="$count" \
+        msg="Re-read $count queued workloads from the cluster."
+    return 0
+}
+
+# scan_refresh_workload <kind> <ns> <name>
+# Re-reads one workload and rewrites its cache record. Runs inside a caller
+# that has already set up the _scan_* locals scan_workload reads.
+#
+# A workload that has gone returns an empty list rather than an error, and is
+# left alone: the DELETED event that follows is what evicts it.
+scan_refresh_workload() {
+    local kind=$1 ns=$2 name=$3 obj_json count
+    if ! obj_json=$(workload_get_one "$kind" "$ns" "$name" 2>/dev/null); then
+        log_debug queue-refresh-failed kind="$kind" ns="$ns" name="$name" \
+            msg="Could not re-read $kind '$name' in '$ns'; leaving its cache record as it was."
+        return 0
+    fi
+    count=$(printf '%s' "$obj_json" | yq -p=json '.items | length // 0')
+    [ "$count" = "1" ] || return 0
+    scan_workload "$obj_json" "$kind" 0
+}
+
 scan_kind() {
     local kind=$1 list_json count i
     if ! list_json=$(workload_list_kind "$kind" 2>/dev/null); then
@@ -269,15 +349,15 @@ scan_cache_workload() {
     if inventory_get "$kind" "$ns" "$name"; then
         next_due=$INVENTORY_NEXT_DUE
         if [ "$INVENTORY_FINGERPRINT" != "$computed_fingerprint" ]; then
-            # This pass is the only thing that sees the whole cluster, so it
-            # is the safety net for anything the watch stream missed: a gap
-            # while a watcher was down, and every annotation change, which
-            # the stream cannot carry at all. Making it due now is what stops
-            # a workload on a long schedule sitting out of sync until its
-            # next scheduled poll.
+            # The one comparison that decides whether anything Keelson cares
+            # about moved, wherever the read came from: a queued re-read after
+            # a watch event, or this pass sweeping the whole cluster for what
+            # the watchers missed while one was down. Making it due now is
+            # what stops a workload on a long schedule sitting out of sync
+            # until its next scheduled poll.
             next_due=$_scan_now
             log_info_always scan-resync kind="$kind" ns="$ns" name="$name" \
-                msg="$kind '$name' in '$ns' changed while Keelson was not watching; polling it now rather than waiting for its schedule."
+                msg="$kind '$name' in '$ns' changed; polling it now rather than waiting for its schedule."
         fi
     else
         # A restart empties the cache but not the ledger, so a workload

@@ -46,12 +46,13 @@ inventory, and the status files).
      `keelson-probe` compares in microseconds too, so the answer is never
      rounded across the limit by where a second boundary happened to fall.
    - **Supervise watchers.** Each kind in `KEELSON_WATCHED_KINDS` gets one
-     `kubectl get --watch --output-watch-events` child, which keeps the cache
-     current itself: a delete evicts, and a changed image updates the record
-     and makes the workload due immediately, so a manual deploy is picked up
-     within a tick rather than at the end of its schedule. Status churn, which
-     is most of what a watch delivers, costs a string compare. Annotation
-     changes are not visible to the stream and arrive with the reconcile scan.
+     `kubectl get --watch --output-watch-events` child. The stream carries the
+     event type and the workload's identity and nothing else: an event cannot
+     say *what* changed, so the watcher draws no conclusions from it. A delete
+     evicts the cache entry, since there is nothing left to read; anything else
+     is written to the queue for the tick to re-read. The queue is keyed by
+     identity, so a workload writing its status fifty times in a second costs
+     fifty file writes and one re-read.
      A dead watcher's PID becomes 0 and its
      failure count increments; the next respawn waits `1, 2, 4, 8...`
      seconds, capped at `KEELSON_WATCHER_RESPAWN_BACKOFF_MAX` (CrashLoopBackOff
@@ -61,7 +62,18 @@ inventory, and the status files).
      This layer handles the watcher *process* dying. A watch that fails
      without the process dying (denied RBAC, an unknown kind, a refused
      connection) is handled inside the watcher instead: see below.
-   - **Drain the queue.** Identities written by watchers are read and logged; the watchers have already applied the change to the cache themselves.
+   - **Re-read what the watchers queued.** Spawned in a background subshell
+     and gated so one never overlaps itself, for the same reason as the scan:
+     it talks to the API server and the tick must not wait on it. Each queued
+     identity is read back from the cluster and run through the same
+     extraction the reconcile scan uses, so there is one definition of what a
+     workload looks like rather than two that can drift. If the workload's
+     decision inputs moved — image, annotations, service account, pull
+     secrets, suspend — it becomes due now and the next tick polls it;
+     if only its status moved it fingerprints identically and keeps its
+     schedule. Past a couple of dozen queued identities the kinds are listed
+     once each instead, which is the routine case after a reconnect, since
+     kubectl replays the entire cluster as `ADDED`.
    - **Kick a scan if due.** `now - last_scan_start >= KEELSON_RECONCILE_INTERVAL`
      and no prior scan still running → spawn the scan in a background
      subshell. The child owns the full trigger-state lifecycle: load the
@@ -245,7 +257,8 @@ Deployment
    │             ├── supervise watchers ──► kubectl get --watch &
    │             │      ├── on change ──► write status/watchers
    │             │      └── per watcher ──► write status/watcher-<Kind>
-   │             ├── drain queue
+   │             ├── re-read queued ──► scan_refresh_queued ──► kubectl &
+   │             ├── poll what is due ──► scan_poll_due ──► skopeo &
    │             ├── kick scan ──► scan_run ──► keelson-update-resource ──► kubectl
    │             ├── rotate log if oversize        (sole rotator)
    │             └── sleep (tick - elapsed), or warn if already over

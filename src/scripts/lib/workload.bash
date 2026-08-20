@@ -38,6 +38,19 @@ workload_list_kind() {
     esac
 }
 
+# workload_get_one <kind> <ns> <name>
+# Echoes the kubectl JSON for a single workload, in the same List shape
+# workload_list_kind returns so the same extraction reads either.
+#
+# A field selector rather than naming the resource directly: `kubectl get X
+# name` returns the bare object and errors when it is absent, while this
+# returns a list with one item or none. A workload deleted between the event
+# and this read is then an empty list rather than a failure to explain.
+workload_get_one() {
+    local kind=$1 ns=$2 name=$3
+    kubectl get "$kind" -n "$ns" --field-selector "metadata.name=$name" -o json
+}
+
 # workload_pod_spec_path <kind>
 # Echoes the yq path expression to the pod spec under a single resource.
 # CronJob nests its pod template under spec.jobTemplate; everything else uses
