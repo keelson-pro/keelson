@@ -18,21 +18,26 @@
 # straight into f:template. We try both well-known paths via yq's
 # alternative operator (//) and accept whichever resolves.
 
-# managedfields_apply_owner_of_image <managed-fields-json-array> <container>
+# managedfields_apply_owner_of_image <managed-fields-json-array> <list>
+#                                    <container>
 # Echoes the manager name of the most-recent Apply-op entry that owns the
 # named container's image field, or empty if none. Multiple Apply owners
 # on the same field are rare but possible; the tie-breaker is .time
 # descending, then array-order last.
+#
+# <list> is "containers" or "initContainers", and it has to be right: an init
+# container's ownership lives under f:initContainers, so looking in the wrong
+# array finds no owner and the mimic strategy refuses the update.
 managedfields_apply_owner_of_image() {
-    local mf_json=$1 container=$2
+    local mf_json=$1 clist=${2:-containers} container=$3
     [ -z "$mf_json" ] && return 0
     local count i entry hit op manager t
     count=$(printf '%s' "$mf_json" | yq -p=json 'length // 0' 2>/dev/null)
     if [ -z "$count" ] || [ "$count" = "null" ] || [ "$count" -eq 0 ]; then
         return 0
     fi
-    local p1='.fieldsV1["f:spec"]["f:template"]["f:spec"]["f:containers"]["k:{\"name\":\"'"$container"'\"}"]["f:image"]'
-    local p2='.fieldsV1["f:spec"]["f:jobTemplate"]["f:spec"]["f:template"]["f:spec"]["f:containers"]["k:{\"name\":\"'"$container"'\"}"]["f:image"]'
+    local p1='.fieldsV1["f:spec"]["f:template"]["f:spec"]["f:'"$clist"'"]["k:{\"name\":\"'"$container"'\"}"]["f:image"]'
+    local p2='.fieldsV1["f:spec"]["f:jobTemplate"]["f:spec"]["f:template"]["f:spec"]["f:'"$clist"'"]["k:{\"name\":\"'"$container"'\"}"]["f:image"]'
     local expr="($p1) // ($p2)"
     local best_manager="" best_time=""
     for ((i=0; i<count; i++)); do

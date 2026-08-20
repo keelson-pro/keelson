@@ -1017,3 +1017,132 @@ SH
     ! grep -q -- "--field-selector" "$TMP_DIR/kubectl.calls"
     grep -q -- "--all-namespaces" "$TMP_DIR/kubectl.calls"
 }
+
+# --- init containers are containers ---
+#
+# An init container that prepares the app container is exactly the thing that
+# must not drift a release behind it, so Keelson treats both lists the same.
+# What differs is only where an update is written back.
+
+deployment_with_init_json() {
+    local image=$1 init_image=$2 policy=${3:-minor}
+    cat <<JSON
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {"keelson.pro/policy": "$policy"}
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "initContainers": [
+              {"name": "migrate", "image": "$init_image"}
+            ],
+            "containers": [
+              {"name": "main", "image": "$image"}
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+}
+
+@test "init containers: both lists are cached, each knowing where it lives" {
+    inventory_init
+    kubectl_returns "$(deployment_with_init_json ghcr.io/x/y:1.2.3 ghcr.io/x/m:1.4.0)"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "${#INVENTORY_CONTAINER_NAMES[@]}" -eq 2 ]
+    [ "${INVENTORY_CONTAINER_LISTS[0]}" = "containers" ]
+    [ "${INVENTORY_CONTAINER_NAMES[0]}" = "main" ]
+    [ "${INVENTORY_CONTAINER_LISTS[1]}" = "initContainers" ]
+    [ "${INVENTORY_CONTAINER_NAMES[1]}" = "migrate" ]
+}
+
+@test "init containers: a reschedule does not lose which list a container is in" {
+    # Dropping the list here would change the fingerprint, and a record that
+    # fingerprints differently after a plain reschedule resyncs forever.
+    inventory_init
+    kubectl_returns "$(deployment_with_init_json ghcr.io/x/y:1.2.3 ghcr.io/x/m:1.4.0)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 4242424242
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "4242424242" ]
+    [ "${INVENTORY_CONTAINER_LISTS[1]}" = "initContainers" ]
+}
+
+@test "init containers: a newer tag on an init container is a candidate" {
+    kubectl_returns "$(deployment_with_init_json ghcr.io/x/y:1.2.3 ghcr.io/x/m:1.4.0)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0","1.4.0","1.5.0"]}'
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"container":"migrate"'* ]]
+    [[ "$output" == *'"candidate":"1.5.0"'* ]]
+}
+
+@test "init containers: the update is written to initContainers" {
+    kubectl_returns "$(deployment_with_init_json ghcr.io/x/y:1.2.3 ghcr.io/x/m:1.4.0)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0","1.4.0","1.5.0"]}'
+SH
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMP_DIR/kubectl.calls"
+case "$1" in
+    patch|apply) exit 0 ;;
+esac
+cat <<'JSON'
+{"items":[{"metadata":{"namespace":"default","name":"app","annotations":{"keelson.pro/policy":"minor"}},"spec":{"template":{"spec":{"initContainers":[{"name":"migrate","image":"ghcr.io/x/m:1.4.0"}],"containers":[{"name":"main","image":"ghcr.io/x/y:1.2.3"}]}}}}]}
+JSON
+SH
+    scan_run 1 2>/dev/null
+    grep -q '"initContainers":\[{"name":"migrate","image":"ghcr.io/x/m:1.5.0"}\]' "$TMP_DIR/kubectl.calls"
+    grep -q '"containers":\[{"name":"main","image":"ghcr.io/x/y:1.5.0"}\]' "$TMP_DIR/kubectl.calls"
+}
+
+@test "init containers: per-container annotations address them by name" {
+    kubectl_returns "$(cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "minor",
+          "keelson.pro/policy.migrate": "never"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "initContainers": [{"name": "migrate", "image": "ghcr.io/x/m:1.4.0"}],
+            "containers": [{"name": "main", "image": "ghcr.io/x/y:1.2.3"}]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0","1.4.0","1.5.0"]}'
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"container":"migrate"'*'"reason":"policy-never"'* ]]
+    [[ "$output" == *'"container":"main"'*'"candidate":"1.5.0"'* ]]
+}

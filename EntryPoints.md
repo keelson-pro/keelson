@@ -229,10 +229,12 @@ before flipping a workload to controller management.
 **Invoked by:** the scan path inside `keelson` and `keelson-boot-scan` once
 a workload is found eligible. Also CLI-usable for manual overrides.
 
-**Args:** `<kind> <namespace> <name> <container> <new-image>` — all five are
-positional and required. `<kind>` must be one of Deployment, StatefulSet,
-DaemonSet, CronJob. ReplicaSet is not supported: patch the owning
-Deployment instead.
+**Args:** `<kind> <namespace> <name> <container> <new-image> [--init]` — the
+five positionals are required. `<kind>` must be one of Deployment,
+StatefulSet, DaemonSet, CronJob. ReplicaSet is not supported: patch the owning
+Deployment instead. `--init` says the container is an initContainer: names are
+unique across both lists, but the key to write the image back under is not, so
+it has to be stated rather than guessed.
 
 **Env required:** none beyond a working `kubectl` context. The script reads
 no Keelson env vars; the caller is responsible for policy decisions before

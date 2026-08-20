@@ -77,6 +77,18 @@ workload_containers_path() {
     printf '%s.containers' "$base"
 }
 
+# workload_init_containers_path <kind>
+# Echoes the yq path to the initContainers array under a single resource.
+#
+# Keelson treats init containers exactly like any other: they are part of the
+# workload, they carry image tags, and an init container left a release behind
+# the app container it prepares is the version skew this exists to prevent.
+workload_init_containers_path() {
+    local base
+    base=$(workload_pod_spec_path "$1") || return 1
+    printf '%s.initContainers' "$base"
+}
+
 # workload_image_pull_secrets_path <kind>
 # Echoes the yq path to the imagePullSecrets array under a single resource.
 workload_image_pull_secrets_path() {

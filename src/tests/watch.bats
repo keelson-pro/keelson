@@ -410,7 +410,7 @@ SH
 # re-reads the cluster and decides from that.
 
 cache_one() {
-    local images=${1:-'main=ghcr.io/x/y:1.0'} next_due=${2:-5000}
+    local images=${1:-'containers main=ghcr.io/x/y:1.0'} next_due=${2:-5000}
     inventory_put Deployment default app "$next_due" 300 "" default '[]' \
         'keelson.pro/policy=minor' "$images"
 }
@@ -425,7 +425,7 @@ cache_one() {
 @test "events: an event does not touch the cache itself" {
     # The event says nothing about what changed, so acting on it here could
     # only ever be a guess. The re-read is what writes.
-    cache_one 'main=ghcr.io/x/y:1.0' 5000
+    cache_one 'containers main=ghcr.io/x/y:1.0' 5000
     printf 'MODIFIED default app\n' \
         | watch_handle_events Deployment 2>/dev/null
     inventory_get Deployment default app

@@ -170,6 +170,21 @@ metadata:
 
 The container-suffixed key wins when present; otherwise Keelson falls back to the workload-wide key. The same precedence applies under `KEELSON_CONFIG_MODE=keel` with `keel.sh/policy.<container>`.
 
+### Init containers
+
+Init containers are updated exactly like any other container, and the annotations above apply to them unchanged. An init container that prepares the app container it runs alongside is precisely the thing that must not drift a release behind it, so there is no separate setting and no opt-in.
+
+Container names are unique across `containers` and `initContainers` within a pod spec, so a per-container override addresses an init container by name like any other:
+
+```yaml
+metadata:
+  annotations:
+    keelson.pro/policy: minor
+    keelson.pro/policy.migrate: never   # leave the "migrate" init container alone
+```
+
+The only place the distinction matters is where Keelson writes an update back, since the two lists are separate keys in the pod spec.
+
 
 ## Keel annotations Keelson does not honour
 

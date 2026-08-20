@@ -36,7 +36,13 @@
 #   annotation=<full-key>=<value> one per annotation, verbatim from the
 #                                 flattener so annotation_get sees exactly
 #                                 what it would have seen from the cluster
-#   container=<name>=<image>      one per container
+#   container=<list> <name>=<image>
+#                                 one per container, where <list> is
+#                                 "containers" or "initContainers". Which one
+#                                 it came from decides the patch path, so the
+#                                 record has to carry it: names are unique
+#                                 across both lists, but the key to write
+#                                 back under is not derivable from the name.
 #   fingerprint=<derived>
 #
 # Values must be single-line. JSON has to be compact (yq -I=0); a pretty
@@ -67,6 +73,7 @@ INVENTORY_FINGERPRINT=
 INVENTORY_COMPUTED_FINGERPRINT=
 INVENTORY_HASH=0
 INVENTORY_FIRST_DUE=0
+declare -ga INVENTORY_CONTAINER_LISTS=()
 declare -ga INVENTORY_CONTAINER_NAMES=()
 declare -ga INVENTORY_CONTAINER_IMAGES=()
 declare -ga INVENTORY_DUE=()
@@ -146,7 +153,7 @@ inventory_fingerprint() {
 #               <containers>
 #
 # <annotations> is the flattened newline-separated "<key>=<value>" block.
-# <containers> is newline-separated "<name>=<image>".
+# <containers> is newline-separated "<list> <name>=<image>".
 inventory_put() {
     local kind=$1 ns=$2 name=$3 next_due=$4 interval=$5 suspend=$6 \
           sa=$7 ips=$8 annotations=$9 containers=${10}
@@ -195,9 +202,10 @@ inventory_get() {
     INVENTORY_IMAGE_PULL_SECRETS=
     INVENTORY_ANNOTATIONS=
     INVENTORY_FINGERPRINT=
+    INVENTORY_CONTAINER_LISTS=()
     INVENTORY_CONTAINER_NAMES=()
     INVENTORY_CONTAINER_IMAGES=()
-    local key value
+    local key value rest
     while IFS='=' read -r key value; do
         case "$key" in
             kind)               INVENTORY_KIND=$value ;;
@@ -217,8 +225,12 @@ inventory_get() {
                 fi
                 ;;
             container)
-                INVENTORY_CONTAINER_NAMES+=("${value%%=*}")
-                INVENTORY_CONTAINER_IMAGES+=("${value#*=}")
+                # "<list> <name>=<image>": the list is up to the first space,
+                # and an image reference cannot contain one.
+                rest=${value#* }
+                INVENTORY_CONTAINER_LISTS+=("${value%% *}")
+                INVENTORY_CONTAINER_NAMES+=("${rest%%=*}")
+                INVENTORY_CONTAINER_IMAGES+=("${rest#*=}")
                 ;;
         esac
     done < "$INVENTORY_PATH"
@@ -240,9 +252,13 @@ inventory_evict() {
 inventory_set_next_due() {
     local kind=$1 ns=$2 name=$3 next_due=$4
     inventory_get "$kind" "$ns" "$name" || return 1
+    # Rebuilt exactly as inventory_put was given it, list prefix included:
+    # anything dropped here changes the fingerprint, and a record that
+    # fingerprints differently after a plain reschedule resyncs on every pass
+    # for the rest of its life.
     local containers= i
     for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do
-        containers="${containers}${INVENTORY_CONTAINER_NAMES[$i]}=${INVENTORY_CONTAINER_IMAGES[$i]}"$'\n'
+        containers="${containers}${INVENTORY_CONTAINER_LISTS[$i]} ${INVENTORY_CONTAINER_NAMES[$i]}=${INVENTORY_CONTAINER_IMAGES[$i]}"$'\n'
     done
     inventory_put "$kind" "$ns" "$name" "$next_due" "$INVENTORY_INTERVAL" \
         "$INVENTORY_SUSPEND" "$INVENTORY_SERVICE_ACCOUNT" \

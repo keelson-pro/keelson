@@ -245,8 +245,9 @@ scan_kind() {
 
 scan_workload() {
     local list_json=$1 kind=$2 i=$3
-    local ns name annotations containers_path ips_path sa_path \
-          containers_json ips_json mf_json suspend sa_name
+    local ns name annotations containers_path init_containers_path \
+          ips_path sa_path containers_json init_containers_json \
+          ips_json mf_json suspend sa_name
 
     ns=$(printf '%s' "$list_json" | yq -p=json ".items[$i].metadata.namespace")
     name=$(printf '%s' "$list_json" | yq -p=json ".items[$i].metadata.name")
@@ -261,10 +262,13 @@ scan_workload() {
     fi
 
     containers_path=$(workload_containers_path "$kind")
+    init_containers_path=$(workload_init_containers_path "$kind")
     ips_path=$(workload_image_pull_secrets_path "$kind")
     sa_path=$(workload_service_account_name_path "$kind")
     containers_json=$(printf '%s' "$list_json" \
         | yq -p=json -o=json ".items[$i]$containers_path // []")
+    init_containers_json=$(printf '%s' "$list_json" \
+        | yq -p=json -o=json ".items[$i]$init_containers_path // []")
     # -I=0 keeps this on one line: it goes into the inventory record, which
     # is read back a line at a time.
     ips_json=$(printf '%s' "$list_json" \
@@ -275,22 +279,29 @@ scan_workload() {
     sa_name=$(printf '%s' "$list_json" \
         | yq -p=json ".items[$i]$sa_path // \"default\"")
 
-    local n j cname cimage _workload_updated=0 \
+    local n j clist cjson cname cimage _workload_updated=0 \
           _workload_last_from="" _workload_last_to="" _workload_last_repo=""
 
     if [ "$_scan_poll_all" -eq 1 ]; then
-        n=$(printf '%s' "$containers_json" | yq -p=json 'length')
-        for ((j=0; j<n; j++)); do
-            cname=$(printf '%s' "$containers_json" | yq -p=json ".[$j].name")
-            cimage=$(printf '%s' "$containers_json" | yq -p=json ".[$j].image")
-            _scan_total=$((_scan_total + 1))
-            scan_container "$kind" "$ns" "$name" "$cname" "$cimage" \
-                "$annotations" "$ips_json" "$mf_json" "$sa_name"
+        for clist in containers initContainers; do
+            if [ "$clist" = containers ]; then
+                cjson=$containers_json
+            else
+                cjson=$init_containers_json
+            fi
+            n=$(printf '%s' "$cjson" | yq -p=json 'length')
+            for ((j=0; j<n; j++)); do
+                cname=$(printf '%s' "$cjson" | yq -p=json ".[$j].name")
+                cimage=$(printf '%s' "$cjson" | yq -p=json ".[$j].image")
+                _scan_total=$((_scan_total + 1))
+                scan_container "$kind" "$ns" "$name" "$clist" "$cname" "$cimage" \
+                    "$annotations" "$ips_json" "$mf_json" "$sa_name"
+            done
         done
     fi
 
     scan_cache_workload "$kind" "$ns" "$name" "$annotations" "$suspend" \
-        "$sa_name" "$ips_json" "$containers_json"
+        "$sa_name" "$ips_json" "$containers_json" "$init_containers_json"
 
     if [ "$kind" = "CronJob" ] && [ "$_scan_apply" -eq 1 ]; then
         scan_check_cronjob_trigger "$ns" "$name" "$annotations" \
@@ -300,7 +311,7 @@ scan_workload() {
 }
 
 # scan_cache_workload <kind> <ns> <name> <annotations> <suspend> <sa> <ips>
-#                     <containers-json>
+#                     <containers-json> <init-containers-json>
 #
 # Records everything a later poll needs, so a due workload can be handled
 # straight from cache with no read of the cluster. Cached whether or not any
@@ -308,14 +319,26 @@ scan_workload() {
 # an annotation added later is noticed.
 scan_cache_workload() {
     local kind=$1 ns=$2 name=$3 annotations=$4 suspend=$5 sa=$6 ips=$7 \
-          containers_json=$8
+          containers_json=$8 init_containers_json=${9:-'[]'}
     inventory_enabled || return 0
 
     SCAN_SEEN["$kind $ns $name"]=1
 
-    local containers
+    # Both lists in one block, each entry carrying the list it came from, so
+    # everything downstream keeps a single loop and still knows where to
+    # write an update back.
+    local containers init_containers
     containers=$(printf '%s' "$containers_json" \
-        | yq -p=json '.[] | .name + "=" + .image')
+        | yq -p=json '.[] | "containers " + .name + "=" + .image')
+    init_containers=$(printf '%s' "$init_containers_json" \
+        | yq -p=json '.[] | "initContainers " + .name + "=" + .image')
+    if [ -n "$init_containers" ]; then
+        if [ -n "$containers" ]; then
+            containers="${containers}"$'\n'"${init_containers}"
+        else
+            containers=$init_containers
+        fi
+    fi
 
     local interval=$_scan_interval sched
     sched=$(annotation_get "$annotations" poll-schedule)
@@ -388,9 +411,14 @@ scan_flatten_annotations() {
         | sed -E ':a; s/^([^=]*)\\\./\1./; ta; s/ = /=/'
 }
 
+# scan_container <kind> <ns> <name> <list> <container> <image> <annotations>
+#                <ips-json> [managed-fields-json] [service-account]
+#
+# <list> is "containers" or "initContainers": which array the container lives
+# in, carried through to the write so the patch lands in the right place.
 scan_container() {
-    local kind=$1 ns=$2 name=$3 cname=$4 cimage=$5 ann=$6 ips_json=$7 \
-          mf_json=${8:-} sa_name=${9:-}
+    local kind=$1 ns=$2 name=$3 clist=$4 cname=$5 cimage=$6 ann=$7 ips_json=$8 \
+          mf_json=${9:-} sa_name=${10:-}
 
     local result
     result=$(eligibility_check "$ann" "$cimage" "$cname") || true
@@ -485,7 +513,7 @@ scan_container() {
     local new_image repo
     repo=$(image_repo "$cimage")
     new_image="$repo:$winner"
-    if update_apply "$kind" "$ns" "$name" "$cname" "$new_image" "$current_tag" "$mf_json" "$ann"; then
+    if update_apply "$kind" "$ns" "$name" "$clist" "$cname" "$new_image" "$current_tag" "$mf_json" "$ann"; then
         _scan_updated=$((_scan_updated + 1))
         _workload_updated=1
         _workload_last_from=$current_tag
@@ -603,6 +631,7 @@ scan_poll_due() {
         for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do
             _scan_total=$((_scan_total + 1))
             scan_container "$kind" "$ns" "$name" \
+                "${INVENTORY_CONTAINER_LISTS[$i]}" \
                 "${INVENTORY_CONTAINER_NAMES[$i]}" "${INVENTORY_CONTAINER_IMAGES[$i]}" \
                 "$INVENTORY_ANNOTATIONS" "$INVENTORY_IMAGE_PULL_SECRETS" \
                 "$mf_json" "$INVENTORY_SERVICE_ACCOUNT"
