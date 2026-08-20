@@ -47,6 +47,10 @@ fi
 shellcheck --shell=bash --external-sources --source-path=SCRIPTDIR "${SHELL_SCRIPTS[@]}"
 
 printf '== bats (src/tests/) ==\n'
+# Each test clears its own directory on the way in, so a rerun is already
+# clean per test. Clearing the root as well drops what a renamed or deleted
+# test left behind, so the tree afterwards is this run and only this run.
+rm -rf "${REPO_ROOT}/${OUTPUT_SUB_PATH:-kaptain-out}/keelson-test"
 if ! command -v "$IMAGE_BUILD_COMMAND" >/dev/null 2>&1; then
     printf '%s not found on PATH - install it or override IMAGE_BUILD_COMMAND\n' "$IMAGE_BUILD_COMMAND" >&2
     exit 1

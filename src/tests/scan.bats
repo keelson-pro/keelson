@@ -4,8 +4,10 @@
 # provided via PATH-prepended shim scripts in $TMP_BIN. Real yq is used.
 # To keep cases focused we set KEELSON_WATCHED_KINDS to a single kind per test.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     TMP_BIN="$TMP_DIR/bin"
     mkdir -p "$TMP_BIN"
     PATH="$TMP_BIN:$PATH"
@@ -61,10 +63,6 @@ setup() {
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
     KEELSON_RECONCILE_INTERVAL=60
     export KEELSON_RECONCILE_INTERVAL
-}
-
-teardown() {
-    rm -rf "$TMP_DIR"
 }
 
 # Logs are emitted on stderr; merge to stdout so `run` captures them.

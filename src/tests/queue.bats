@@ -1,7 +1,9 @@
 #!/usr/bin/env bats
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash
@@ -12,10 +14,6 @@ setup() {
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
 
     queue_init
-}
-
-teardown() {
-    rm -rf "$TMP_DIR"
 }
 
 @test "queue_init creates the queue directory" {

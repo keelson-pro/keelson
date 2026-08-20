@@ -2,8 +2,10 @@
 
 # Tests for lib/inventory.bash: the local workload cache.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash
     source "$SCRIPT_DIR/lib/log.bash"
@@ -13,10 +15,6 @@ setup() {
     source "$SCRIPT_DIR/lib/inventory.bash"
     KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
     inventory_init
-}
-
-teardown() {
-    rm -rf "$TMP_DIR"
 }
 
 # A workload with one container and two annotations.

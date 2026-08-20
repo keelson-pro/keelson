@@ -3,8 +3,10 @@
 # Tests for lib/validate.bash. Binaries are checked against PATH; we shim
 # missing ones in/out via $TMP_BIN to drive the pass/fail paths.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     TMP_BIN="$TMP_DIR/bin"
     mkdir -p "$TMP_BIN"
     SAVED_PATH="$PATH"
@@ -34,7 +36,6 @@ setup() {
 
 teardown() {
     PATH="$SAVED_PATH"
-    rm -rf "$TMP_DIR"
 }
 
 emit() { "$@" 2>&1; }

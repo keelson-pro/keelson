@@ -2,8 +2,10 @@
 
 # Tests for lib/status.bash: the heartbeat and watcher-PID state files.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash
     source "$SCRIPT_DIR/lib/log.bash"
@@ -14,10 +16,6 @@ setup() {
     KEELSON_STATUS_DIR="$TMP_DIR/status"
     HEARTBEAT_FILE="$KEELSON_STATUS_DIR/heartbeat"
     WATCHERS_FILE="$KEELSON_STATUS_DIR/watchers"
-}
-
-teardown() {
-    rm -rf "$TMP_DIR"
 }
 
 emit() { "$@" 2>&1; }

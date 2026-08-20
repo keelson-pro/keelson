@@ -4,8 +4,10 @@
 # with shimmed sleep + date and a stubbed watch_run_kind that spawns a
 # short-lived background sleeper. Scan is also stubbed.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     TMP_BIN="$TMP_DIR/bin"
     mkdir -p "$TMP_BIN"
     PATH="$TMP_BIN:$PATH"
@@ -71,7 +73,6 @@ teardown() {
     LOOP_QUEUE_PID=0
     LOOP_REFRESH_PID=0
     LOOP_REFRESH_PENDING=()
-    rm -rf "$TMP_DIR"
 }
 
 emit() { "$@" 2>&1; }

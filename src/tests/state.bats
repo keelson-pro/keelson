@@ -4,8 +4,10 @@
 # The state ConfigMap carries the CronJob always-once trigger ledger and
 # each workload's next-due, the one part of the cache worth surviving a restart.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     TMP_BIN="$TMP_DIR/bin"
     mkdir -p "$TMP_BIN"
     PATH="$TMP_BIN:$PATH"
@@ -22,10 +24,6 @@ setup() {
     source "$SCRIPT_DIR/lib/log.bash"
     # shellcheck source=../scripts/lib/state.bash
     source "$SCRIPT_DIR/lib/state.bash"
-}
-
-teardown() {
-    rm -rf "$TMP_DIR"
 }
 
 emit() { "$@" 2>&1; }

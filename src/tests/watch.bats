@@ -2,8 +2,10 @@
 
 # Watcher tests. kubectl is shimmed via $TMP_BIN on PATH.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     TMP_BIN="$TMP_DIR/bin"
     mkdir -p "$TMP_BIN"
     PATH="$TMP_BIN:$PATH"
@@ -37,10 +39,6 @@ setup() {
     inventory_init
 
     queue_init
-}
-
-teardown() {
-    rm -rf "$TMP_DIR"
 }
 
 emit() { "$@" 2>&1; }

@@ -2,8 +2,10 @@
 
 # Tests for lib/update.bash. kubectl is shimmed via $TMP_BIN on PATH.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     TMP_BIN="$TMP_DIR/bin"
     mkdir -p "$TMP_BIN"
     PATH="$TMP_BIN:$PATH"
@@ -22,10 +24,6 @@ setup() {
     source "$SCRIPT_DIR/lib/managedfields.bash"
     # shellcheck source=../scripts/lib/update.bash
     source "$SCRIPT_DIR/lib/update.bash"
-}
-
-teardown() {
-    rm -rf "$TMP_DIR"
 }
 
 # Logs go to stderr; merge so `run` sees them.

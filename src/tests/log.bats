@@ -1,7 +1,9 @@
 #!/usr/bin/env bats
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # The default path is /keelson/work/log/keelson.log which is unwritable
     # outside a container; redirect under TMP_DIR before sourcing.
@@ -17,10 +19,6 @@ setup() {
           KEELSON_LOG_WARN_REPEAT_INTERVAL \
           KEELSON_LOG_ERROR_REPEAT_INTERVAL
     LOG_THROTTLE_LAST=()
-}
-
-teardown() {
-    rm -rf "$TMP_DIR"
 }
 
 # Logs are emitted on stderr; merge to stdout so `run` captures them.
