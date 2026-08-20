@@ -240,11 +240,14 @@ it has to be stated rather than guessed.
 no Keelson env vars; the caller is responsible for policy decisions before
 invoking it.
 
-**Flow:** build a strategic-merge patch document for the named container,
-inspect the workload's `managedFields` to pick the right field manager and
-apply mode (SSA vs strategic-merge), call `kubectl patch`, and on success
-optionally trigger a one-off Job when patching a suspended CronJob with
-`trigger-job-on-update=true`.
+**Flow:** build the patch document for the named container, inspect the
+workload's `managedFields` to pick the right field manager and apply mode
+(SSA vs strategic-merge), and call `kubectl`.
+
+It writes the image and stops there. The CronJob Job trigger is not part of
+this path: it belongs to the poll, which is the only thing holding the
+always-once ledger that stops a Job being created twice. Patching a suspended
+CronJob from here changes its image and creates no Job.
 
 
 ## How they fit together
