@@ -303,7 +303,15 @@ scan_workload() {
     scan_cache_workload "$kind" "$ns" "$name" "$annotations" "$suspend" \
         "$sa_name" "$ips_json" "$containers_json" "$init_containers_json"
 
-    if [ "$kind" = "CronJob" ] && [ "$_scan_apply" -eq 1 ]; then
+    # Only when this pass polled. The trigger's always-once rule fires on
+    # "no prior triggered-job recorded", and every cache-refresh path -- the
+    # reconcile scan, the full refresh, the queued re-read -- runs in its own
+    # child with its own copy of the ledger, so two of them overlapping would
+    # each read "never triggered" and each create a Job. The paths that poll
+    # are scan_poll_due, which evaluates the trigger itself, and a one-shot
+    # scan_run from the CLI, which has nothing to race.
+    if [ "$kind" = "CronJob" ] && [ "$_scan_apply" -eq 1 ] \
+            && [ "$_scan_poll_all" -eq 1 ]; then
         scan_check_cronjob_trigger "$ns" "$name" "$annotations" \
             "$suspend" "$_workload_updated" \
             "$_workload_last_from" "$_workload_last_to" "$_workload_last_repo"

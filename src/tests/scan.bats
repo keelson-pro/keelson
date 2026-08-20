@@ -1144,3 +1144,59 @@ SH
     [[ "$output" == *'"container":"migrate"'*'"reason":"policy-never"'* ]]
     [[ "$output" == *'"container":"main"'*'"candidate":"1.5.0"'* ]]
 }
+
+# --- the CronJob trigger belongs to the poll, not to a cache refresh ---
+#
+# The always-once rule fires on "no prior triggered-job recorded". Every
+# cache-refresh path runs in its own child with its own copy of the ledger,
+# so evaluating the trigger in more than one of them means two children can
+# both read "never triggered" and both create a Job.
+
+@test "cronjob trigger: a cache-only pass does not create a Job" {
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true true)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    inventory_init
+    # poll-all=0 is what the controller's reconcile scan, full refresh and
+    # queued re-read all use.
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 0 2>/dev/null
+    ! grep -q "create job" "$TMP_DIR/kubectl.log"
+}
+
+@test "cronjob trigger: a queued re-read does not create a Job" {
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true true)"
+    inventory_init
+    queue_init
+    queue_enqueue CronJob default cron
+    KEELSON_WATCHED_KINDS=CronJob scan_refresh_queued 1 2>/dev/null
+    ! grep -q "create job" "$TMP_DIR/kubectl.log"
+}
+
+@test "cronjob trigger: the polling pass still creates one" {
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true true)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 2>/dev/null
+    grep -q "create job" "$TMP_DIR/kubectl.log"
+}
+
+@test "cronjob trigger: the due-poll is what fires it in the controller" {
+    # The controller's reconcile scan, full refresh and queued re-read all
+    # run cache-only, so this is the only path left that can trigger a Job.
+    # If it stops doing so, the feature is silently dead.
+    inventory_init
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true true)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    KEELSON_WATCHED_KINDS=CronJob scan_run 0 0 2>/dev/null
+    : > "$TMP_DIR/kubectl.log"
+    KEELSON_WATCHED_KINDS=CronJob scan_poll_due 1 "$LATE" 2>/dev/null
+    grep -q "create job" "$TMP_DIR/kubectl.log"
+    grep -q -- "--from=cronjob/cron" "$TMP_DIR/kubectl.log"
+}
