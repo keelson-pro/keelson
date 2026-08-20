@@ -209,6 +209,75 @@ SH
     [[ "$output" == *"Forbidden"* ]]
 }
 
+# --- the failure hint, and where the rest of it goes ---
+#
+# kubectl answers a jsonpath failure with its error and then the whole
+# offending object in Go syntax, thousands of characters of it. Reading the
+# last line of stderr picked exactly the dump and dropped the reason.
+
+install_jsonpath_failure_shim() {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo 'error: error executing jsonpath "{.type} {.object.metadata.namespace} {.object.metadata.name}": name is not found. Printing more information for debugging the template:' >&2
+echo '	object given to jsonpath engine was:' >&2
+printf '\t\tmap[string]interface {}{"object":map[string]interface {}{"DUMPMARKER":"x"}}\n' >&2
+exit 1
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+}
+
+@test "watch_run_kind: the warn line hints at the error, without the object dump" {
+    install_jsonpath_failure_shim
+    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=info \
+        run emit watch_run_kind Deployment
+    [[ "$output" == *"error: error executing jsonpath"* ]]
+    [[ "$output" == *"Retrying in"* ]]
+    [[ "$output" != *"DUMPMARKER"* ]]
+}
+
+@test "watch_run_kind: the full kubectl output is there at debug" {
+    install_jsonpath_failure_shim
+    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=debug \
+        run emit watch_run_kind Deployment
+    [[ "$output" == *"DUMPMARKER"* ]]
+}
+
+@test "watch_error_hint: a short first line is passed through whole" {
+    printf 'connection refused\n' >"$TMP_DIR/err"
+    run watch_error_hint "$TMP_DIR/err"
+    [ "$output" = 'connection refused' ]
+}
+
+@test "watch_error_hint: a long first line is clipped with an ellipsis" {
+    local long
+    long=$(printf 'x%.0s' {1..300})
+    printf '%s\n' "$long" >"$TMP_DIR/err"
+    run watch_error_hint "$TMP_DIR/err"
+    [ "${#output}" -eq $(( LOG_HINT_MAX + 3 )) ]
+    [[ "$output" == *"..." ]]
+}
+
+@test "watch_error_hint: takes the first line, not the last" {
+    printf 'the reason\nthe dump\n' >"$TMP_DIR/err"
+    run watch_error_hint "$TMP_DIR/err"
+    [ "$output" = "the reason" ]
+}
+
+@test "watch_error_hint: leading blank lines are skipped" {
+    printf '\n\nthe reason\n' >"$TMP_DIR/err"
+    run watch_error_hint "$TMP_DIR/err"
+    [ "$output" = "the reason" ]
+}
+
+@test "watch_error_hint: a missing file yields nothing" {
+    run watch_error_hint "$TMP_DIR/absent"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 @test "watch_run_kind: marks itself healthy while a stream is open" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash

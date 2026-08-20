@@ -312,3 +312,52 @@ emit() { "$@" 2>&1; }
     grep -q "evt" "$KEELSON_LOG_FILE_PATH"
     ! grep -q "XXXX" "$KEELSON_LOG_FILE_PATH"
 }
+
+# --- flatten and hint: what a tool's output may cost a log line ---
+
+@test "flatten: newlines, tabs and carriage returns become single spaces" {
+    log_flatten "$(printf 'one\ntwo\tthree\r\nfour')"
+    [ "$LOG_FLAT" = "one two three four" ]
+}
+
+@test "flatten: runs of spaces are squeezed" {
+    log_flatten "a     b"
+    [ "$LOG_FLAT" = "a b" ]
+}
+
+@test "flatten: leaves an already-flat string alone" {
+    log_flatten "already flat"
+    [ "$LOG_FLAT" = "already flat" ]
+}
+
+@test "flatten: empty in, empty out" {
+    log_flatten ""
+    [ -z "$LOG_FLAT" ]
+}
+
+@test "hint: a short string is passed through whole, no ellipsis" {
+    log_hint "connection refused"
+    [ "$LOG_HINT" = "connection refused" ]
+}
+
+@test "hint: a long string is clipped to LOG_HINT_MAX plus an ellipsis" {
+    log_hint "$(printf 'x%.0s' {1..500})"
+    [ "${#LOG_HINT}" -eq $(( LOG_HINT_MAX + 3 )) ]
+    [[ "$LOG_HINT" == *"..." ]]
+}
+
+@test "hint: a multi-line blob is flattened before it is clipped" {
+    # Without flattening first, the clip could carry a raw newline into a
+    # JSON value, which log_json_escape does not cover.
+    log_hint "$(printf 'first\nsecond\tthird\n')"
+    [[ "$LOG_HINT" != *$'\n'* ]]
+    [[ "$LOG_HINT" != *$'\t'* ]]
+}
+
+@test "hint: JSON output stays one valid line for a multi-line blob" {
+    KEELSON_LOG_FORMAT=json
+    log_hint "$(printf 'a\nb\nc')"
+    run emit log_error evt detail="$LOG_HINT"
+    [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+    [[ "$output" == *'"detail":"a b c"'* ]]
+}

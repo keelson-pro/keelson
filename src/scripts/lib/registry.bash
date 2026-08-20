@@ -263,8 +263,8 @@ registry_creds_azure_wi() {
 
 # registry_list_tags <image-ref> [creds]
 # Echoes one tag per line. Returns non-zero on registry error and sets
-# REGISTRY_LAST_ERROR to a one-line excerpt of skopeo's stderr so the
-# caller can surface a useful hint instead of a generic failure.
+# REGISTRY_LAST_ERROR to the whole of skopeo's stderr, so the caller can log
+# all of it at debug and a log_hint of it on the error line.
 registry_list_tags() {
     local image=$1 creds=${2:-}
     local repo out tmperr
@@ -273,13 +273,13 @@ registry_list_tags() {
     REGISTRY_LAST_ERROR=""
     if [ -n "$creds" ]; then
         if ! out=$(skopeo list-tags --creds="$creds" "docker://${repo}" 2>"${tmperr:-/dev/null}"); then
-            [ -n "$tmperr" ] && REGISTRY_LAST_ERROR=$(head -c 200 "$tmperr" 2>/dev/null | tr '\n' ' ' | tr -s ' ')
+            [ -r "$tmperr" ] && REGISTRY_LAST_ERROR=$(<"$tmperr")
             [ -n "$tmperr" ] && rm -f "$tmperr"
             return 1
         fi
     else
         if ! out=$(skopeo list-tags "docker://${repo}" 2>"${tmperr:-/dev/null}"); then
-            [ -n "$tmperr" ] && REGISTRY_LAST_ERROR=$(head -c 200 "$tmperr" 2>/dev/null | tr '\n' ' ' | tr -s ' ')
+            [ -r "$tmperr" ] && REGISTRY_LAST_ERROR=$(<"$tmperr")
             [ -n "$tmperr" ] && rm -f "$tmperr"
             return 1
         fi

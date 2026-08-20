@@ -91,6 +91,45 @@ log_json_escape() {
     LOG_ESCAPED=$s
 }
 
+# How much of a tool's output may ride along in an info, warn or error line.
+# Small on purpose: the line has to stay readable in a terminal, and the whole
+# of it is one level down.
+LOG_HINT_MAX=40
+LOG_FLAT=
+LOG_HINT=
+
+# log_flatten <text>  -> LOG_FLAT
+# One line, single-spaced. An event is a line, and in JSON format a raw
+# newline or tab inside a value is invalid: log_json_escape covers quotes and
+# backslashes, not control characters.
+log_flatten() {
+    local s=$1
+    s=${s//$'\n'/ }
+    s=${s//$'\r'/ }
+    s=${s//$'\t'/ }
+    while [ "${s}" != "${s//  / }" ]; do
+        s=${s//  / }
+    done
+    LOG_FLAT=$s
+}
+
+# log_hint <text>  -> LOG_HINT
+# Flattened and clipped to LOG_HINT_MAX. Enough of a tool's output to
+# recognise what happened, never enough to bury the line carrying it.
+#
+# Every caller pairs this with a log_debug of the whole text, emitted
+# immediately before. kubectl answers a jsonpath failure with the entire
+# offending object in Go syntax, and a rejected server-side apply can run to
+# paragraphs; either one pasted into a warn costs you the rest of the log.
+log_hint() {
+    log_flatten "$1"
+    if [ "${#LOG_FLAT}" -gt "$LOG_HINT_MAX" ]; then
+        LOG_HINT="${LOG_FLAT:0:$LOG_HINT_MAX}..."
+    else
+        LOG_HINT=$LOG_FLAT
+    fi
+}
+
 # log_throttle_interval <level>
 # Echoes the configured repeat-interval (seconds) for <level>. 0 means never
 # throttle. Missing var also means 0 so older deploys don't break.

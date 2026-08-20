@@ -42,7 +42,7 @@ watch_run_kind() {
     local reset=${KEELSON_WATCHER_RECONNECT_RESET:?KEELSON_WATCHER_RECONNECT_RESET required}
     local max_iter=${KEELSON_WATCH_MAX_ITERATIONS:-0}
     local backoff=$initial
-    local iter=0 opened held rc fails=0 err errfile rcfile
+    local iter=0 opened held rc fails=0 err detail errfile rcfile
     errfile="${KEELSON_STATUS_DIR}/watcher-${kind}.stderr"
     rcfile="${KEELSON_STATUS_DIR}/watcher-${kind}.rc"
     mkdir -p "$KEELSON_STATUS_DIR" 2>/dev/null || true
@@ -72,9 +72,20 @@ watch_run_kind() {
         clock_read
         held=$(( (CLOCK_NOW_US - opened) / 1000000 ))
         if [ "$rc" -ne 0 ]; then
-            err=$(watch_last_error "$errfile")
+            err=$(watch_error_hint "$errfile")
             fails=$(( fails + 1 ))
             status_write_watcher_health "$kind" "$fails" "$err"
+            detail=
+            if [ -r "$errfile" ]; then
+                detail=$(<"$errfile")
+            fi
+            # Whole of kubectl's output, one level down, immediately above the
+            # warn so the warn stays the last thing on screen. The file channel
+            # writes it regardless of the stdout level, so it is on disk in the
+            # pod even when nobody asked for debug.
+            log_flatten "$detail"
+            log_debug watch-failed-detail kind="$kind" rc="$rc" \
+                msg="Watch for kind '$kind' failed (exit $rc), full output: ${LOG_FLAT:-no error output}"
             log_warn watch-failed kind="$kind" rc="$rc" fails="$fails" \
                 backoff="$backoff" \
                 msg="Watch for kind '$kind' failed (exit $rc, $fails in a row): ${err:-no error output}. Retrying in ${backoff}s."
@@ -94,16 +105,23 @@ watch_run_kind() {
     done
 }
 
-# watch_last_error <file>
-# Last non-blank line of kubectl's stderr, or empty. One line is enough to
-# tell RBAC from a bad kind from a refused connection.
-watch_last_error() {
-    local file=$1 line last=
+# watch_error_hint <file>
+# Opening of kubectl's stderr as a log_hint, or empty.
+#
+# The first line, not the last. Denied RBAC, an unknown kind and a refused
+# connection each say what they mean in their opening words. A jsonpath
+# failure does not: kubectl follows its error with the entire offending object
+# rendered in Go syntax, which ends up as the last line and buries the reason
+# it printed first.
+watch_error_hint() {
+    local file=$1 line
     [ -r "$file" ] || return 0
     while IFS= read -r line; do
-        [ -n "$line" ] && last=$line
+        [ -n "$line" ] || continue
+        log_hint "$line"
+        printf '%s' "$LOG_HINT"
+        return 0
     done < "$file"
-    printf '%s' "$last"
 }
 
 # watch_containers_jsonpath <kind>

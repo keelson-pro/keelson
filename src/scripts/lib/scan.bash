@@ -342,6 +342,12 @@ scan_container() {
     local tags_raw
     if ! tags_raw=$(registry_list_tags "$cimage" "$creds"); then
         local reason=${REGISTRY_LAST_ERROR:-}
+        log_flatten "$reason"
+        log_debug registry-list-tags-detail \
+            kind="$kind" ns="$ns" name="$name" container="$cname" \
+            msg="Listing tags for image '$cimage' failed, full output: ${LOG_FLAT:-no error output}"
+        log_hint "$reason"
+        reason=$LOG_HINT
         local reason_clause=""
         [ -n "$reason" ] && reason_clause=": $reason"
         log_error registry-list-tags-failed \

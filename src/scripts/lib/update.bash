@@ -230,7 +230,7 @@ update_apply_ssa() {
     local kind=$1 ns=$2 name=$3 container=$4 image=$5 manager=$6 from_tag=$7 \
           strategy=$8
     local to_tag=${image##*:} repo=${image%:*}
-    local manifest tmperr reason=""
+    local manifest tmperr detail="" reason=""
     if ! manifest=$(update_minimal_manifest "$kind" "$ns" "$name" "$container" "$image"); then
         log_error update-unsupported-kind kind="$kind" ns="$ns" name="$name" \
             msg="Cannot update $kind '$name' in '$ns': kind not supported."
@@ -247,13 +247,22 @@ update_apply_ssa() {
             msg="$kind '$name' in '$ns' updated from $from_tag to $to_tag for image '$repo'."
         return 0
     fi
-    if [ "$tmperr" != "/dev/null" ]; then
-        reason=$(head -c 200 "$tmperr" 2>/dev/null | tr '\n' ' ' | tr -s ' ')
-        reason=${reason#"${reason%%[![:space:]]*}"}
-        reason=${reason%"${reason##*[![:space:]]}"}
+    if [ -r "$tmperr" ] && [ "$tmperr" != "/dev/null" ]; then
+        detail=$(<"$tmperr")
         rm -f "$tmperr"
     fi
-    case "$reason" in
+    # The whole of kubectl's complaint at debug, a clip of it on the error
+    # line. A rejected apply lists every conflicting field path and runs to
+    # paragraphs; the error below has to stay one readable line.
+    log_flatten "$detail"
+    log_debug update-apply-failed-detail \
+        kind="$kind" ns="$ns" name="$name" container="$container" \
+        msg="Server-side apply of $kind '$name'/$container in '$ns' failed, full output: ${LOG_FLAT:-no error output}"
+    log_hint "$detail"
+    reason=$LOG_HINT
+    # Matched on the full text, not the clip: the word that decides this can
+    # sit past the clip.
+    case "$detail" in
         *conflict*|*Conflict*)
             log_error update-apply-conflict \
                 kind="$kind" ns="$ns" name="$name" container="$container" \
