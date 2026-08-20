@@ -443,3 +443,16 @@ emit() { "$@" 2>&1; }
     # Still draining the original three, not re-seeded from the watched set.
     [ "${#LOOP_REFRESH_PENDING[@]}" -eq 2 ]
 }
+
+@test "loop_run: an empty queue spawns no refresh child" {
+    # The child reads the ledger before it can find the queue empty, so
+    # spawning it for nothing costs an API call every tick.
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ ! -f "$TMP_DIR/queue.calls" ]
+}
+
+@test "loop_run: a queued identity spawns the refresh child" {
+    queue_enqueue Deployment default app
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ -f "$TMP_DIR/queue.calls" ]
+}

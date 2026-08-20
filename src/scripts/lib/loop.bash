@@ -248,11 +248,16 @@ loop_run() {
         # Every tick: re-read whatever the watchers queued. Gated so a slow
         # refresh never overlaps itself; the queue keeps accumulating and the
         # next one takes the lot.
+        #
+        # Nothing queued means nothing spawned. The child loads the ledger
+        # before it can discover the queue is empty, so spawning it anyway
+        # would cost a subshell and a ConfigMap read every second of an idle
+        # cluster's life.
         if [ "$LOOP_QUEUE_PID" -gt 0 ] && ! kill -0 "$LOOP_QUEUE_PID" 2>/dev/null; then
             wait "$LOOP_QUEUE_PID" 2>/dev/null || true
             LOOP_QUEUE_PID=0
         fi
-        if [ "$LOOP_QUEUE_PID" -eq 0 ]; then
+        if [ "$LOOP_QUEUE_PID" -eq 0 ] && queue_pending; then
             loop_start_queue_refresh "$apply"
         fi
 
