@@ -4,8 +4,10 @@
 # provided via PATH-prepended shim scripts in $TMP_BIN. Real yq is used.
 # To keep cases focused we set KEELSON_WATCHED_KINDS to a single kind per test.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     TMP_BIN="$TMP_DIR/bin"
     mkdir -p "$TMP_BIN"
     PATH="$TMP_BIN:$PATH"
@@ -52,16 +54,15 @@ setup() {
     source "$SCRIPT_DIR/lib/clock.bash"
     # shellcheck source=../scripts/lib/inventory.bash
     source "$SCRIPT_DIR/lib/inventory.bash"
+    # shellcheck source=../scripts/lib/queue.bash
+    source "$SCRIPT_DIR/lib/queue.bash"
     # shellcheck source=../scripts/lib/scan.bash
     source "$SCRIPT_DIR/lib/scan.bash"
 
     KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
+    KEELSON_QUEUE_DIR="$TMP_DIR/queue"
     KEELSON_RECONCILE_INTERVAL=60
     export KEELSON_RECONCILE_INTERVAL
-}
-
-teardown() {
-    rm -rf "$TMP_DIR"
 }
 
 # Logs are emitted on stderr; merge to stdout so `run` captures them.
@@ -902,4 +903,300 @@ SH
     scan_run 0 0 2>/dev/null
     [ -z "$(state_get_next_due Deployment default app)" ]
     [ -n "${STATE_DELETED[s--Deployment--default--app]:-}" ]
+}
+
+# --- the queued re-read: what a watch event actually turns into ---
+#
+# The event carries coordinates only, so the cluster is the only thing that
+# can say what changed. These cover the read itself and the one comparison
+# that decides whether a workload's schedule is brought forward.
+
+@test "queue refresh: an empty queue reads nothing" {
+    inventory_init
+    queue_init
+    kubectl_returns '{"items": []}'
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >>"$TMP_DIR/kubectl.calls"
+printf '{"items": []}'
+SH
+    scan_refresh_queued 0 2>/dev/null
+    [ ! -f "$TMP_DIR/kubectl.calls" ]
+}
+
+@test "queue refresh: a queued identity is read and cached" {
+    inventory_init
+    queue_init
+    kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' minor)"
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io/x/y:1.0" ]
+    [ "$(queue_size)" = "0" ]
+}
+
+@test "queue refresh: the read is scoped to the one workload" {
+    inventory_init
+    queue_init
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMP_DIR/kubectl.calls"
+printf '{"items": []}'
+SH
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    grep -q -- "--field-selector metadata.name=app" "$TMP_DIR/kubectl.calls"
+    grep -q -- "-n default" "$TMP_DIR/kubectl.calls"
+}
+
+@test "queue refresh: a changed annotation brings the poll forward" {
+    # The case the whole re-read exists for: nothing about the image moved,
+    # but the decision Keelson would make did.
+    inventory_init
+    queue_init
+    kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' minor)"
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    inventory_get Deployment default app
+    inventory_set_next_due Deployment default app 9999999999
+
+    kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' major)"
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    inventory_get Deployment default app
+    clock_read
+    [ "$INVENTORY_NEXT_DUE" -le "$(( CLOCK_NOW_US / 1000000 ))" ]
+}
+
+@test "queue refresh: an unchanged workload keeps its schedule" {
+    # Status churn is most of what a watch delivers and must cost nothing
+    # beyond the read itself.
+    inventory_init
+    queue_init
+    kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' minor)"
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    inventory_set_next_due Deployment default app 9999999999
+
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "9999999999" ]
+}
+
+@test "queue refresh: a workload that has gone is left for the delete event" {
+    inventory_init
+    queue_init
+    kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' minor)"
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+
+    kubectl_returns '{"items": []}'
+    queue_enqueue Deployment default app
+    scan_refresh_queued 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io/x/y:1.0" ]
+}
+
+@test "queue refresh: a burst lists the kind instead of reading one at a time" {
+    inventory_init
+    queue_init
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMP_DIR/kubectl.calls"
+printf '{"items": []}'
+SH
+    SCAN_QUEUE_LIST_THRESHOLD=3
+    queue_enqueue Deployment default a
+    queue_enqueue Deployment default b
+    queue_enqueue Deployment default c
+    scan_refresh_queued 0 2>/dev/null
+    [ "$(wc -l <"$TMP_DIR/kubectl.calls")" -eq 1 ]
+    ! grep -q -- "--field-selector" "$TMP_DIR/kubectl.calls"
+    grep -q -- "--all-namespaces" "$TMP_DIR/kubectl.calls"
+}
+
+# --- init containers are containers ---
+#
+# An init container that prepares the app container is exactly the thing that
+# must not drift a release behind it, so Keelson treats both lists the same.
+# What differs is only where an update is written back.
+
+deployment_with_init_json() {
+    local image=$1 init_image=$2 policy=${3:-minor}
+    cat <<JSON
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {"keelson.pro/policy": "$policy"}
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "initContainers": [
+              {"name": "migrate", "image": "$init_image"}
+            ],
+            "containers": [
+              {"name": "main", "image": "$image"}
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+}
+
+@test "init containers: both lists are cached, each knowing where it lives" {
+    inventory_init
+    kubectl_returns "$(deployment_with_init_json ghcr.io/x/y:1.2.3 ghcr.io/x/m:1.4.0)"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "${#INVENTORY_CONTAINER_NAMES[@]}" -eq 2 ]
+    [ "${INVENTORY_CONTAINER_LISTS[0]}" = "containers" ]
+    [ "${INVENTORY_CONTAINER_NAMES[0]}" = "main" ]
+    [ "${INVENTORY_CONTAINER_LISTS[1]}" = "initContainers" ]
+    [ "${INVENTORY_CONTAINER_NAMES[1]}" = "migrate" ]
+}
+
+@test "init containers: a reschedule does not lose which list a container is in" {
+    # Dropping the list here would change the fingerprint, and a record that
+    # fingerprints differently after a plain reschedule resyncs forever.
+    inventory_init
+    kubectl_returns "$(deployment_with_init_json ghcr.io/x/y:1.2.3 ghcr.io/x/m:1.4.0)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 4242424242
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "4242424242" ]
+    [ "${INVENTORY_CONTAINER_LISTS[1]}" = "initContainers" ]
+}
+
+@test "init containers: a newer tag on an init container is a candidate" {
+    kubectl_returns "$(deployment_with_init_json ghcr.io/x/y:1.2.3 ghcr.io/x/m:1.4.0)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0","1.4.0","1.5.0"]}'
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"container":"migrate"'* ]]
+    [[ "$output" == *'"candidate":"1.5.0"'* ]]
+}
+
+@test "init containers: the update is written to initContainers" {
+    kubectl_returns "$(deployment_with_init_json ghcr.io/x/y:1.2.3 ghcr.io/x/m:1.4.0)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0","1.4.0","1.5.0"]}'
+SH
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMP_DIR/kubectl.calls"
+case "$1" in
+    patch|apply) exit 0 ;;
+esac
+cat <<'JSON'
+{"items":[{"metadata":{"namespace":"default","name":"app","annotations":{"keelson.pro/policy":"minor"}},"spec":{"template":{"spec":{"initContainers":[{"name":"migrate","image":"ghcr.io/x/m:1.4.0"}],"containers":[{"name":"main","image":"ghcr.io/x/y:1.2.3"}]}}}}]}
+JSON
+SH
+    scan_run 1 2>/dev/null
+    grep -q '"initContainers":\[{"name":"migrate","image":"ghcr.io/x/m:1.5.0"}\]' "$TMP_DIR/kubectl.calls"
+    grep -q '"containers":\[{"name":"main","image":"ghcr.io/x/y:1.5.0"}\]' "$TMP_DIR/kubectl.calls"
+}
+
+@test "init containers: per-container annotations address them by name" {
+    kubectl_returns "$(cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "minor",
+          "keelson.pro/policy.migrate": "never"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "initContainers": [{"name": "migrate", "image": "ghcr.io/x/m:1.4.0"}],
+            "containers": [{"name": "main", "image": "ghcr.io/x/y:1.2.3"}]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0","1.4.0","1.5.0"]}'
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"container":"migrate"'*'"reason":"policy-never"'* ]]
+    [[ "$output" == *'"container":"main"'*'"candidate":"1.5.0"'* ]]
+}
+
+# --- the CronJob trigger belongs to the poll, not to a cache refresh ---
+#
+# The always-once rule fires on "no prior triggered-job recorded". Every
+# cache-refresh path runs in its own child with its own copy of the ledger,
+# so evaluating the trigger in more than one of them means two children can
+# both read "never triggered" and both create a Job.
+
+@test "cronjob trigger: a cache-only pass does not create a Job" {
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true true)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    inventory_init
+    # poll-all=0 is what the controller's reconcile scan, full refresh and
+    # queued re-read all use.
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 0 2>/dev/null
+    ! grep -q "create job" "$TMP_DIR/kubectl.log"
+}
+
+@test "cronjob trigger: a queued re-read does not create a Job" {
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true true)"
+    inventory_init
+    queue_init
+    queue_enqueue CronJob default cron
+    KEELSON_WATCHED_KINDS=CronJob scan_refresh_queued 1 2>/dev/null
+    ! grep -q "create job" "$TMP_DIR/kubectl.log"
+}
+
+@test "cronjob trigger: the polling pass still creates one" {
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true true)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 2>/dev/null
+    grep -q "create job" "$TMP_DIR/kubectl.log"
+}
+
+@test "cronjob trigger: the due-poll is what fires it in the controller" {
+    # The controller's reconcile scan, full refresh and queued re-read all
+    # run cache-only, so this is the only path left that can trigger a Job.
+    # If it stops doing so, the feature is silently dead.
+    inventory_init
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true true)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    KEELSON_WATCHED_KINDS=CronJob scan_run 0 0 2>/dev/null
+    : > "$TMP_DIR/kubectl.log"
+    KEELSON_WATCHED_KINDS=CronJob scan_poll_due 1 "$LATE" 2>/dev/null
+    grep -q "create job" "$TMP_DIR/kubectl.log"
+    grep -q -- "--from=cronjob/cron" "$TMP_DIR/kubectl.log"
 }

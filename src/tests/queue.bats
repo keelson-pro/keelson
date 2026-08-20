@@ -1,7 +1,9 @@
 #!/usr/bin/env bats
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash
@@ -12,10 +14,6 @@ setup() {
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
 
     queue_init
-}
-
-teardown() {
-    rm -rf "$TMP_DIR"
 }
 
 @test "queue_init creates the queue directory" {
@@ -78,4 +76,32 @@ teardown() {
 @test "queue_size on empty queue is 0" {
     run queue_size
     [ "$output" = "0" ]
+}
+
+# --- queue_pending ---
+
+@test "queue_pending: an empty queue is not pending" {
+    run queue_pending
+    [ "$status" -eq 1 ]
+}
+
+@test "queue_pending: one entry is pending" {
+    queue_enqueue Deployment default app
+    run queue_pending
+    [ "$status" -eq 0 ]
+}
+
+@test "queue_pending: draining makes it not pending again" {
+    queue_enqueue Deployment default app
+    queue_drain >/dev/null
+    run queue_pending
+    [ "$status" -eq 1 ]
+}
+
+@test "queue_pending: says nothing on stdout" {
+    # It is asked every tick; the caller uses the status, and echoing would
+    # make a command substitution the only way to read it.
+    queue_enqueue Deployment default app
+    run queue_pending
+    [ -z "$output" ]
 }

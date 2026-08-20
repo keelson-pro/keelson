@@ -140,44 +140,85 @@ two_apply_owners_mf() {
 JSON
 }
 
+# An Apply owner that claims an init container's image instead.
+argocd_init_container_mf() {
+    cat <<'JSON'
+[
+  {
+    "manager": "argocd-application-controller",
+    "operation": "Apply",
+    "apiVersion": "apps/v1",
+    "time": "2026-04-01T10:00:00Z",
+    "fieldsV1": {
+      "f:spec": {
+        "f:template": {
+          "f:spec": {
+            "f:initContainers": {
+              "k:{\"name\":\"migrate\"}": {
+                "f:image": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+]
+JSON
+}
+
+@test "apply_owner_of_image: an init container's owner lives under f:initContainers" {
+    run managedfields_apply_owner_of_image "$(argocd_init_container_mf)" initContainers migrate
+    [ "$status" -eq 0 ]
+    [ "$output" = "argocd-application-controller" ]
+}
+
+@test "apply_owner_of_image: looking in the wrong list finds no owner" {
+    # Getting this wrong is not a miss, it is a refusal: mimic requires an
+    # Apply owner and declines the update when it cannot find one.
+    run managedfields_apply_owner_of_image "$(argocd_init_container_mf)" containers migrate
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 @test "apply_owner_of_image: finds argocd Apply owner" {
-    run managedfields_apply_owner_of_image "$(argocd_deployment_mf)" main
+    run managedfields_apply_owner_of_image "$(argocd_deployment_mf)" containers main
     [ "$status" -eq 0 ]
     [ "$output" = "argocd-application-controller" ]
 }
 
 @test "apply_owner_of_image: Update-op owner is not returned (routes to UNOWNED)" {
-    run managedfields_apply_owner_of_image "$(kubectl_deployment_mf)" main
+    run managedfields_apply_owner_of_image "$(kubectl_deployment_mf)" containers main
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
 
 @test "apply_owner_of_image: returns the Apply owner that owns the container's image" {
-    run managedfields_apply_owner_of_image "$(multi_manager_mf)" web
+    run managedfields_apply_owner_of_image "$(multi_manager_mf)" containers web
     [ "$status" -eq 0 ]
     [ "$output" = "flux" ]
 }
 
 @test "apply_owner_of_image: multiple Apply owners -> most recent wins" {
-    run managedfields_apply_owner_of_image "$(two_apply_owners_mf)" main
+    run managedfields_apply_owner_of_image "$(two_apply_owners_mf)" containers main
     [ "$status" -eq 0 ]
     [ "$output" = "new-controller" ]
 }
 
 @test "apply_owner_of_image: container name mismatch returns nothing" {
-    run managedfields_apply_owner_of_image "$(argocd_deployment_mf)" sidecar
+    run managedfields_apply_owner_of_image "$(argocd_deployment_mf)" containers sidecar
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
 
 @test "apply_owner_of_image: empty managedFields returns nothing" {
-    run managedfields_apply_owner_of_image "[]" main
+    run managedfields_apply_owner_of_image "[]" containers main
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
 
 @test "apply_owner_of_image: empty input returns nothing" {
-    run managedfields_apply_owner_of_image "" main
+    run managedfields_apply_owner_of_image "" containers main
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
@@ -211,7 +252,7 @@ JSON
 ]
 JSON
 )
-    run managedfields_apply_owner_of_image "$mf" worker
+    run managedfields_apply_owner_of_image "$mf" containers worker
     [ "$status" -eq 0 ]
     [ "$output" = "flux" ]
 }

@@ -2,8 +2,10 @@
 
 # Tests for lib/update.bash. kubectl is shimmed via $TMP_BIN on PATH.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     TMP_BIN="$TMP_DIR/bin"
     mkdir -p "$TMP_BIN"
     PATH="$TMP_BIN:$PATH"
@@ -22,10 +24,6 @@ setup() {
     source "$SCRIPT_DIR/lib/managedfields.bash"
     # shellcheck source=../scripts/lib/update.bash
     source "$SCRIPT_DIR/lib/update.bash"
-}
-
-teardown() {
-    rm -rf "$TMP_DIR"
 }
 
 # Logs go to stderr; merge so `run` sees them.
@@ -48,26 +46,45 @@ mf_update_kubectl() {
 # --- update_patch_json ---
 
 @test "patch_json: Deployment shape" {
-    run update_patch_json Deployment main ghcr.io/x/y:1.2.4
+    run update_patch_json Deployment containers main ghcr.io/x/y:1.2.4
     [ "$status" -eq 0 ]
     [ "$output" = '{"spec":{"template":{"spec":{"containers":[{"name":"main","image":"ghcr.io/x/y:1.2.4"}]}}}}' ]
 }
 
 @test "patch_json: StatefulSet uses same template path" {
-    run update_patch_json StatefulSet web ghcr.io/x/y:2.0.0
+    run update_patch_json StatefulSet containers web ghcr.io/x/y:2.0.0
     [ "$status" -eq 0 ]
     [[ "$output" == *'"template":{"spec":{"containers":[{"name":"web"'* ]]
 }
 
 @test "patch_json: CronJob nests under jobTemplate" {
-    run update_patch_json CronJob worker ghcr.io/x/y:1.2.4
+    run update_patch_json CronJob containers worker ghcr.io/x/y:1.2.4
     [ "$status" -eq 0 ]
     [ "$output" = '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"containers":[{"name":"worker","image":"ghcr.io/x/y:1.2.4"}]}}}}}}' ]
 }
 
 @test "patch_json: unknown kind returns non-zero" {
-    run update_patch_json Pod main ghcr.io/x/y:1.0.0
+    run update_patch_json Pod containers main ghcr.io/x/y:1.0.0
     [ "$status" -ne 0 ]
+}
+
+@test "patch_json: an init container patches initContainers, not containers" {
+    run update_patch_json Deployment initContainers migrate ghcr.io/x/y:1.2.4
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"spec":{"template":{"spec":{"initContainers":[{"name":"migrate","image":"ghcr.io/x/y:1.2.4"}]}}}}' ]
+}
+
+@test "patch_json: CronJob init container nests under jobTemplate too" {
+    run update_patch_json CronJob initContainers migrate ghcr.io/x/y:1.2.4
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"initContainers":[{"name":"migrate","image":"ghcr.io/x/y:1.2.4"}]}}}}}}' ]
+}
+
+@test "minimal_manifest: an init container claims initContainers" {
+    run update_minimal_manifest Deployment default app initContainers migrate ghcr.io/x/y:1.2.4
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"initContainers:"* ]]
+    [[ "$output" != *$'\n'"      containers:"* ]]
 }
 
 # --- update_apply: default strategy dispatch ---
@@ -78,7 +95,7 @@ mf_update_kubectl() {
 echo "$@" >>"$TMP_DIR/kubectl.log"
 exit 0
 SH
-    run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3
+    run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 0 ]
     [[ "$output" == *"Deployment 'app' in 'default' updated from 1.2.3 to 1.2.4 for image 'ghcr.io/x/y'"* ]]
 }
@@ -88,7 +105,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3
+    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 0 ]
     [[ "$output" == *'"event":"update-applied"'* ]]
     [[ "$output" == *'"strategy":"patch"'* ]]
@@ -105,7 +122,7 @@ case "$1" in
     *) echo "$@" >>"$TMP_DIR/kubectl.log"; exit 0 ;;
 esac
 SH
-    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3
+    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 0 ]
     [[ "$output" == *'"manager":"keelson"'* ]]
     [[ "$output" == *'"operation":"Update"'* ]]
@@ -122,7 +139,7 @@ case "$1" in
 esac
 SH
     printf '{"metadata":{"managedFields":%s}}' "$(mf_update_kubectl)" >"$TMP_DIR/mf.json"
-    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3
+    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 0 ]
     [[ "$output" == *'"manager":"keelson"'* ]]
     [[ "$output" == *'"strategy":"patch"'* ]]
@@ -144,7 +161,7 @@ case "$1" in
 esac
 SH
     printf '{"metadata":{"managedFields":%s}}' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
-    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3
+    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 0 ]
     [[ "$output" == *'"manager":"argocd-application-controller"'* ]]
     [[ "$output" == *'"operation":"Apply"'* ]]
@@ -164,7 +181,7 @@ case "$1" in
     *) echo "$@" >>"$TMP_DIR/kubectl.log"; exit 0 ;;
 esac
 SH
-    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3 "$(mf_apply_argocd)"
+    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3 "$(mf_apply_argocd)"
     [ "$status" -eq 0 ]
     [[ "$output" == *'"manager":"argocd-application-controller"'* ]]
     [[ "$output" == *'"strategy":"mimic"'* ]]
@@ -183,7 +200,7 @@ esac
 SH
     printf '{"metadata":{"managedFields":%s}}' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
     KEELSON_FIELD_MANAGER_STRATEGY_OWNED=patch \
-    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3
+    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 0 ]
     [[ "$output" == *'"manager":"keelson"'* ]]
     [[ "$output" == *'"strategy":"patch"'* ]]
@@ -199,7 +216,7 @@ case "$1" in
 esac
 SH
     KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED=claim \
-    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3
+    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 0 ]
     [[ "$output" == *'"manager":"keelson"'* ]]
     [[ "$output" == *'"operation":"Apply"'* ]]
@@ -220,7 +237,7 @@ esac
 SH
     printf '{"metadata":{"managedFields":%s}}' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
     local ann='keelson.pro/field-manager-strategy=claim'
-    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3 "" "$ann"
+    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3 "" "$ann"
     [ "$status" -eq 0 ]
     [[ "$output" == *'"manager":"keelson"'* ]]
     [[ "$output" == *'"strategy":"claim"'* ]]
@@ -237,7 +254,7 @@ case "$1" in
 esac
 SH
     local ann='keelson.pro/field-manager-strategy=mimic'
-    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3 "" "$ann"
+    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3 "" "$ann"
     [ "$status" -eq 1 ]
     [[ "$output" == *'"event":"update-refused-mimic-unowned"'* ]]
     [[ "$output" == *"requires an Apply-op field owner"* ]]
@@ -253,7 +270,7 @@ case "$1" in
 esac
 SH
     local ann='keelson.pro/field-manager-strategy=mimick'
-    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3 "" "$ann"
+    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3 "" "$ann"
     [ "$status" -eq 1 ]
     [[ "$output" == *'"event":"update-invalid-strategy-annotation"'* ]]
     [[ "$output" == *'"value":"mimick"'* ]]
@@ -269,7 +286,7 @@ esac
 SH
     printf '{"metadata":{"managedFields":%s}}' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
     local ann=$'keelson.pro/field-manager-strategy=mimic\nkeelson.pro/field-manager-strategy.main=patch'
-    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3 "" "$ann"
+    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3 "" "$ann"
     [ "$status" -eq 0 ]
     [[ "$output" == *'"strategy":"patch"'* ]]
     [[ "$output" == *'"manager":"keelson"'* ]]
@@ -289,7 +306,7 @@ case "$1" in
 esac
 SH
     printf '{"metadata":{"managedFields":%s}}' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
-    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3
+    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 1 ]
     [[ "$output" == *'"event":"update-apply-conflict"'* ]]
     [[ "$output" == *'"manager":"argocd-application-controller"'* ]]
@@ -310,7 +327,7 @@ case "$1" in
 esac
 SH
     printf '{"metadata":{"managedFields":%s}}' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
-    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3
+    KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 1 ]
     [[ "$output" == *'"event":"update-failed"'* ]]
     [[ "$output" != *'"event":"update-apply-conflict"'* ]]
@@ -323,7 +340,7 @@ SH
 echo "$@" >>"$TMP_DIR/kubectl.log"
 exit 0
 SH
-    run update_apply CronJob default cron worker ghcr.io/x/y:1.2.4 1.2.3
+    run update_apply CronJob default cron containers worker ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 0 ]
     [[ "$(cat "$TMP_DIR/kubectl.log")" == *"jobTemplate"* ]]
 }
@@ -333,7 +350,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-    run emit update_apply CronJob batch nightly worker ghcr.io/acme/n:1.4.3 1.4.2
+    run emit update_apply CronJob batch nightly containers worker ghcr.io/acme/n:1.4.3 1.4.2
     [ "$status" -eq 0 ]
     [[ "$output" == *"CronJob 'nightly' in 'batch' updated from 1.4.2 to 1.4.3 for image 'ghcr.io/acme/n'"* ]]
 }
@@ -343,13 +360,13 @@ SH
 #!/usr/bin/env bash
 exit 1
 SH
-    run emit update_apply Deployment default app main ghcr.io/x/y:1.2.4 1.2.3
+    run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 1 ]
     [[ "$output" == *"Could not patch Deployment 'app'/main in 'default'"* ]]
 }
 
 @test "update_apply: unsupported kind logs update-unsupported-kind and returns 1" {
-    run emit update_apply Pod default app main ghcr.io/x/y:1.2.4 1.2.3
+    run emit update_apply Pod default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 1 ]
     [[ "$output" == *"Cannot update Pod 'app' in 'default': kind not supported."* ]]
 }

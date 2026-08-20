@@ -47,6 +47,24 @@ queue_drain() {
     shopt -u nullglob
 }
 
+# queue_pending
+# True when the queue holds at least one entry.
+#
+# A status rather than a count, because the tick asks this every second and
+# only compares the answer against zero. Echoing a number would cost a command
+# substitution, and the whole point of asking is to avoid spending anything
+# when there is nothing to do.
+queue_pending() {
+    local f found=1
+    shopt -s nullglob
+    for f in "$KEELSON_QUEUE_DIR"/*; do
+        found=0
+        break
+    done
+    shopt -u nullglob
+    return "$found"
+}
+
 # queue_size
 # Echoes the number of pending queue entries.
 queue_size() {

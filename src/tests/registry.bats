@@ -4,8 +4,10 @@
 # docker-credential-ecr-login) is provided via PATH-prepended shim scripts in
 # $TMP_BIN. Real yq/base64 from the test image are used as-is.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     TMP_BIN="$TMP_DIR/bin"
     mkdir -p "$TMP_BIN"
     PATH="$TMP_BIN:$PATH"
@@ -25,10 +27,6 @@ setup() {
 
     # Override the hard-coded production path after sourcing.
     KEELSON_REGISTRIES_FILE="$TMP_DIR/registries.yaml"
-}
-
-teardown() {
-    rm -rf "$TMP_DIR"
 }
 
 # install_shim <name> -- reads body from stdin.

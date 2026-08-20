@@ -54,6 +54,23 @@ setup() {
     [ "$output" = ".spec.jobTemplate.spec.template.spec.containers" ]
 }
 
+@test "init_containers_path: Deployment" {
+    run workload_init_containers_path Deployment
+    [ "$status" -eq 0 ]
+    [ "$output" = ".spec.template.spec.initContainers" ]
+}
+
+@test "init_containers_path: CronJob" {
+    run workload_init_containers_path CronJob
+    [ "$status" -eq 0 ]
+    [ "$output" = ".spec.jobTemplate.spec.template.spec.initContainers" ]
+}
+
+@test "init_containers_path: unknown kind returns non-zero" {
+    run workload_init_containers_path Pod
+    [ "$status" -ne 0 ]
+}
+
 @test "image_pull_secrets_path: Deployment" {
     run workload_image_pull_secrets_path Deployment
     [ "$status" -eq 0 ]

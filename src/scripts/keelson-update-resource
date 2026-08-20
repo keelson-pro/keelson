@@ -13,10 +13,14 @@ source "${SCRIPT_DIR}/lib/update.bash"
 
 usage() {
     cat <<'USAGE'
-Usage: keelson-update-resource <kind> <namespace> <name> <container> <new-image>
+Usage: keelson-update-resource <kind> <namespace> <name> <container> <new-image> [--init]
 
 Strategic-merge patch the named container's image on the named workload.
 Supports Deployment, StatefulSet, DaemonSet, CronJob.
+
+  --init   the container is an initContainer. Names are unique across both
+           lists, but the key to write the image back under is not, so this
+           has to be said rather than guessed.
 USAGE
 }
 
@@ -29,7 +33,10 @@ main() {
         return 64
     fi
 
-    update_apply "$1" "$2" "$3" "$4" "$5"
+    local clist=containers
+    [ "${6:-}" = "--init" ] && clist=initContainers
+
+    update_apply "$1" "$2" "$3" "$clist" "$4" "$5"
 }
 
 main "$@"

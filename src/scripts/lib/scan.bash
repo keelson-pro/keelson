@@ -143,6 +143,86 @@ scan_refresh_kind() {
     return 0
 }
 
+# scan_refresh_queued
+# Re-reads every identity the watchers queued and rewrites its cache record.
+#
+# This is what makes a watch event mean anything. The event carries only
+# coordinates, so the cluster is the only place that can say what changed, and
+# scan_workload already knows how to read it: annotations, containers, service
+# account, pull secrets, suspend. The fingerprint it writes decides the rest.
+# A workload whose decision inputs moved comes back due now, so the next tick
+# polls it; one that only wrote its status fingerprints identically and keeps
+# its schedule.
+#
+# Reads are per workload up to SCAN_QUEUE_LIST_THRESHOLD identities and one
+# list per kind beyond it. A reconnect replays the entire cluster as ADDED, so
+# the large case is routine rather than exceptional, and past a couple of
+# dozen a single list is both fewer round trips and less total data than the
+# gets it replaces.
+#
+# No registry calls and no eviction: a delete is handled by the watcher when
+# it sees one, and anything missed there is the reconcile scan's job.
+SCAN_QUEUE_LIST_THRESHOLD=25
+scan_refresh_queued() {
+    local _scan_apply=${1:-0}
+    local _scan_poll_all=0
+    inventory_enabled || return 0
+
+    local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
+          _scan_no_change=0 _scan_skip=0 _scan_error=0
+    local -A SCAN_SEEN=()
+    local -A SCAN_LISTED=()
+    local _scan_now _scan_interval=${KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT:-60}
+    clock_read
+    _scan_now=$(( CLOCK_NOW_US / 1000000 ))
+
+    local line kind ns name count=0
+    local -a queued=()
+    local -A kinds=()
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        queued+=("$line")
+        kinds["${line%% *}"]=1
+        count=$(( count + 1 ))
+    done < <(queue_drain)
+    [ "$count" -eq 0 ] && return 0
+
+    if [ "$count" -ge "$SCAN_QUEUE_LIST_THRESHOLD" ]; then
+        log_debug queue-refresh-listing kinds="${!kinds[*]}" queued="$count" \
+            msg="Re-reading $count queued workloads by listing ${#kinds[@]} kinds rather than one get each."
+        for kind in "${!kinds[@]}"; do
+            scan_kind "$kind"
+        done
+        return 0
+    fi
+
+    for line in "${queued[@]}"; do
+        read -r kind ns name <<<"$line"
+        scan_refresh_workload "$kind" "$ns" "$name"
+    done
+    log_debug queue-refreshed queued="$count" \
+        msg="Re-read $count queued workloads from the cluster."
+    return 0
+}
+
+# scan_refresh_workload <kind> <ns> <name>
+# Re-reads one workload and rewrites its cache record. Runs inside a caller
+# that has already set up the _scan_* locals scan_workload reads.
+#
+# A workload that has gone returns an empty list rather than an error, and is
+# left alone: the DELETED event that follows is what evicts it.
+scan_refresh_workload() {
+    local kind=$1 ns=$2 name=$3 obj_json count
+    if ! obj_json=$(workload_get_one "$kind" "$ns" "$name" 2>/dev/null); then
+        log_debug queue-refresh-failed kind="$kind" ns="$ns" name="$name" \
+            msg="Could not re-read $kind '$name' in '$ns'; leaving its cache record as it was."
+        return 0
+    fi
+    count=$(printf '%s' "$obj_json" | yq -p=json '.items | length // 0')
+    [ "$count" = "1" ] || return 0
+    scan_workload "$obj_json" "$kind" 0
+}
+
 scan_kind() {
     local kind=$1 list_json count i
     if ! list_json=$(workload_list_kind "$kind" 2>/dev/null); then
@@ -165,8 +245,9 @@ scan_kind() {
 
 scan_workload() {
     local list_json=$1 kind=$2 i=$3
-    local ns name annotations containers_path ips_path sa_path \
-          containers_json ips_json mf_json suspend sa_name
+    local ns name annotations containers_path init_containers_path \
+          ips_path sa_path containers_json init_containers_json \
+          ips_json mf_json suspend sa_name
 
     ns=$(printf '%s' "$list_json" | yq -p=json ".items[$i].metadata.namespace")
     name=$(printf '%s' "$list_json" | yq -p=json ".items[$i].metadata.name")
@@ -181,10 +262,13 @@ scan_workload() {
     fi
 
     containers_path=$(workload_containers_path "$kind")
+    init_containers_path=$(workload_init_containers_path "$kind")
     ips_path=$(workload_image_pull_secrets_path "$kind")
     sa_path=$(workload_service_account_name_path "$kind")
     containers_json=$(printf '%s' "$list_json" \
         | yq -p=json -o=json ".items[$i]$containers_path // []")
+    init_containers_json=$(printf '%s' "$list_json" \
+        | yq -p=json -o=json ".items[$i]$init_containers_path // []")
     # -I=0 keeps this on one line: it goes into the inventory record, which
     # is read back a line at a time.
     ips_json=$(printf '%s' "$list_json" \
@@ -195,24 +279,39 @@ scan_workload() {
     sa_name=$(printf '%s' "$list_json" \
         | yq -p=json ".items[$i]$sa_path // \"default\"")
 
-    local n j cname cimage _workload_updated=0 \
+    local n j clist cjson cname cimage _workload_updated=0 \
           _workload_last_from="" _workload_last_to="" _workload_last_repo=""
 
     if [ "$_scan_poll_all" -eq 1 ]; then
-        n=$(printf '%s' "$containers_json" | yq -p=json 'length')
-        for ((j=0; j<n; j++)); do
-            cname=$(printf '%s' "$containers_json" | yq -p=json ".[$j].name")
-            cimage=$(printf '%s' "$containers_json" | yq -p=json ".[$j].image")
-            _scan_total=$((_scan_total + 1))
-            scan_container "$kind" "$ns" "$name" "$cname" "$cimage" \
-                "$annotations" "$ips_json" "$mf_json" "$sa_name"
+        for clist in containers initContainers; do
+            if [ "$clist" = containers ]; then
+                cjson=$containers_json
+            else
+                cjson=$init_containers_json
+            fi
+            n=$(printf '%s' "$cjson" | yq -p=json 'length')
+            for ((j=0; j<n; j++)); do
+                cname=$(printf '%s' "$cjson" | yq -p=json ".[$j].name")
+                cimage=$(printf '%s' "$cjson" | yq -p=json ".[$j].image")
+                _scan_total=$((_scan_total + 1))
+                scan_container "$kind" "$ns" "$name" "$clist" "$cname" "$cimage" \
+                    "$annotations" "$ips_json" "$mf_json" "$sa_name"
+            done
         done
     fi
 
     scan_cache_workload "$kind" "$ns" "$name" "$annotations" "$suspend" \
-        "$sa_name" "$ips_json" "$containers_json"
+        "$sa_name" "$ips_json" "$containers_json" "$init_containers_json"
 
-    if [ "$kind" = "CronJob" ] && [ "$_scan_apply" -eq 1 ]; then
+    # Only when this pass polled. The trigger's always-once rule fires on
+    # "no prior triggered-job recorded", and every cache-refresh path -- the
+    # reconcile scan, the full refresh, the queued re-read -- runs in its own
+    # child with its own copy of the ledger, so two of them overlapping would
+    # each read "never triggered" and each create a Job. The paths that poll
+    # are scan_poll_due, which evaluates the trigger itself, and a one-shot
+    # scan_run from the CLI, which has nothing to race.
+    if [ "$kind" = "CronJob" ] && [ "$_scan_apply" -eq 1 ] \
+            && [ "$_scan_poll_all" -eq 1 ]; then
         scan_check_cronjob_trigger "$ns" "$name" "$annotations" \
             "$suspend" "$_workload_updated" \
             "$_workload_last_from" "$_workload_last_to" "$_workload_last_repo"
@@ -220,7 +319,7 @@ scan_workload() {
 }
 
 # scan_cache_workload <kind> <ns> <name> <annotations> <suspend> <sa> <ips>
-#                     <containers-json>
+#                     <containers-json> <init-containers-json>
 #
 # Records everything a later poll needs, so a due workload can be handled
 # straight from cache with no read of the cluster. Cached whether or not any
@@ -228,14 +327,26 @@ scan_workload() {
 # an annotation added later is noticed.
 scan_cache_workload() {
     local kind=$1 ns=$2 name=$3 annotations=$4 suspend=$5 sa=$6 ips=$7 \
-          containers_json=$8
+          containers_json=$8 init_containers_json=${9:-'[]'}
     inventory_enabled || return 0
 
     SCAN_SEEN["$kind $ns $name"]=1
 
-    local containers
+    # Both lists in one block, each entry carrying the list it came from, so
+    # everything downstream keeps a single loop and still knows where to
+    # write an update back.
+    local containers init_containers
     containers=$(printf '%s' "$containers_json" \
-        | yq -p=json '.[] | .name + "=" + .image')
+        | yq -p=json '.[] | "containers " + .name + "=" + .image')
+    init_containers=$(printf '%s' "$init_containers_json" \
+        | yq -p=json '.[] | "initContainers " + .name + "=" + .image')
+    if [ -n "$init_containers" ]; then
+        if [ -n "$containers" ]; then
+            containers="${containers}"$'\n'"${init_containers}"
+        else
+            containers=$init_containers
+        fi
+    fi
 
     local interval=$_scan_interval sched
     sched=$(annotation_get "$annotations" poll-schedule)
@@ -269,15 +380,15 @@ scan_cache_workload() {
     if inventory_get "$kind" "$ns" "$name"; then
         next_due=$INVENTORY_NEXT_DUE
         if [ "$INVENTORY_FINGERPRINT" != "$computed_fingerprint" ]; then
-            # This pass is the only thing that sees the whole cluster, so it
-            # is the safety net for anything the watch stream missed: a gap
-            # while a watcher was down, and every annotation change, which
-            # the stream cannot carry at all. Making it due now is what stops
-            # a workload on a long schedule sitting out of sync until its
-            # next scheduled poll.
+            # The one comparison that decides whether anything Keelson cares
+            # about moved, wherever the read came from: a queued re-read after
+            # a watch event, or this pass sweeping the whole cluster for what
+            # the watchers missed while one was down. Making it due now is
+            # what stops a workload on a long schedule sitting out of sync
+            # until its next scheduled poll.
             next_due=$_scan_now
             log_info_always scan-resync kind="$kind" ns="$ns" name="$name" \
-                msg="$kind '$name' in '$ns' changed while Keelson was not watching; polling it now rather than waiting for its schedule."
+                msg="$kind '$name' in '$ns' changed; polling it now rather than waiting for its schedule."
         fi
     else
         # A restart empties the cache but not the ledger, so a workload
@@ -308,9 +419,14 @@ scan_flatten_annotations() {
         | sed -E ':a; s/^([^=]*)\\\./\1./; ta; s/ = /=/'
 }
 
+# scan_container <kind> <ns> <name> <list> <container> <image> <annotations>
+#                <ips-json> [managed-fields-json] [service-account]
+#
+# <list> is "containers" or "initContainers": which array the container lives
+# in, carried through to the write so the patch lands in the right place.
 scan_container() {
-    local kind=$1 ns=$2 name=$3 cname=$4 cimage=$5 ann=$6 ips_json=$7 \
-          mf_json=${8:-} sa_name=${9:-}
+    local kind=$1 ns=$2 name=$3 clist=$4 cname=$5 cimage=$6 ann=$7 ips_json=$8 \
+          mf_json=${9:-} sa_name=${10:-}
 
     local result
     result=$(eligibility_check "$ann" "$cimage" "$cname") || true
@@ -342,6 +458,12 @@ scan_container() {
     local tags_raw
     if ! tags_raw=$(registry_list_tags "$cimage" "$creds"); then
         local reason=${REGISTRY_LAST_ERROR:-}
+        log_flatten "$reason"
+        log_debug registry-list-tags-detail \
+            kind="$kind" ns="$ns" name="$name" container="$cname" \
+            msg="Listing tags for image '$cimage' failed, full output: ${LOG_FLAT:-no error output}"
+        log_hint "$reason"
+        reason=$LOG_HINT
         local reason_clause=""
         [ -n "$reason" ] && reason_clause=": $reason"
         log_error registry-list-tags-failed \
@@ -399,7 +521,7 @@ scan_container() {
     local new_image repo
     repo=$(image_repo "$cimage")
     new_image="$repo:$winner"
-    if update_apply "$kind" "$ns" "$name" "$cname" "$new_image" "$current_tag" "$mf_json" "$ann"; then
+    if update_apply "$kind" "$ns" "$name" "$clist" "$cname" "$new_image" "$current_tag" "$mf_json" "$ann"; then
         _scan_updated=$((_scan_updated + 1))
         _workload_updated=1
         _workload_last_from=$current_tag
@@ -517,6 +639,7 @@ scan_poll_due() {
         for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do
             _scan_total=$((_scan_total + 1))
             scan_container "$kind" "$ns" "$name" \
+                "${INVENTORY_CONTAINER_LISTS[$i]}" \
                 "${INVENTORY_CONTAINER_NAMES[$i]}" "${INVENTORY_CONTAINER_IMAGES[$i]}" \
                 "$INVENTORY_ANNOTATIONS" "$INVENTORY_IMAGE_PULL_SECRETS" \
                 "$mf_json" "$INVENTORY_SERVICE_ACCOUNT"

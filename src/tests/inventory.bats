@@ -2,8 +2,10 @@
 
 # Tests for lib/inventory.bash: the local workload cache.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash
     source "$SCRIPT_DIR/lib/log.bash"
@@ -15,17 +17,13 @@ setup() {
     inventory_init
 }
 
-teardown() {
-    rm -rf "$TMP_DIR"
-}
-
 # A workload with one container and two annotations.
 put_simple() {
     local next_due=${1:-1700} interval=${2:-60}
     inventory_put Deployment default web "$next_due" "$interval" "" \
         default '[]' \
         "$(printf 'keelson.pro/policy=minor\nkeelson.pro/match-tag=^1\\.')" \
-        'main=ghcr.io/x/y:1.2.3'
+        'containers main=ghcr.io/x/y:1.2.3'
 }
 
 # --- put / get ---
@@ -43,7 +41,7 @@ put_simple() {
 @test "put then get round-trips the containers" {
     inventory_put Deployment default web 1700 60 "" default '[]' \
         'keelson.pro/policy=minor' \
-        "$(printf 'main=ghcr.io/x/y:1.2.3\nsidecar=ghcr.io/x/z:2.0')"
+        "$(printf 'containers main=ghcr.io/x/y:1.2.3\ncontainers sidecar=ghcr.io/x/z:2.0')"
     inventory_get Deployment default web
     [ "${#INVENTORY_CONTAINER_NAMES[@]}" -eq 2 ]
     [ "${INVENTORY_CONTAINER_NAMES[0]}" = "main" ]
@@ -64,7 +62,7 @@ put_simple() {
 @test "put then get round-trips credentials and suspend" {
     inventory_put CronJob ops backup 1700 60 true \
         builder '[{"name":"regcred"}]' 'keelson.pro/policy=patch' \
-        'main=ghcr.io/x/y:1.0'
+        'containers main=ghcr.io/x/y:1.0'
     inventory_get CronJob ops backup
     [ "$INVENTORY_SUSPEND" = "true" ]
     [ "$INVENTORY_SERVICE_ACCOUNT" = "builder" ]
@@ -73,7 +71,7 @@ put_simple() {
 
 @test "an image reference keeps everything after the first =" {
     inventory_put Deployment default web 1700 60 "" default '[]' \
-        'keelson.pro/match-tag=^v1\.2=3$' 'main=ghcr.io:5000/x/y:1.0'
+        'keelson.pro/match-tag=^v1\.2=3$' 'containers main=ghcr.io:5000/x/y:1.0'
     inventory_get Deployment default web
     [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io:5000/x/y:1.0" ]
     [ "$INVENTORY_ANNOTATIONS" = 'keelson.pro/match-tag=^v1\.2=3$' ]
@@ -93,8 +91,8 @@ put_simple() {
 }
 
 @test "identities in different namespaces are distinct entries" {
-    inventory_put Deployment ns1 web 1700 60 "" default '[]' '' 'main=a:1'
-    inventory_put Deployment ns2 web 1700 60 "" default '[]' '' 'main=b:1'
+    inventory_put Deployment ns1 web 1700 60 "" default '[]' '' 'containers main=a:1'
+    inventory_put Deployment ns2 web 1700 60 "" default '[]' '' 'containers main=b:1'
     inventory_get Deployment ns1 web
     [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "a:1" ]
     inventory_get Deployment ns2 web
@@ -102,7 +100,7 @@ put_simple() {
 }
 
 @test "a workload with no annotations round-trips empty" {
-    inventory_put Deployment default web 1700 60 "" default '[]' '' 'main=a:1'
+    inventory_put Deployment default web 1700 60 "" default '[]' '' 'containers main=a:1'
     inventory_get Deployment default web
     [ -z "$INVENTORY_ANNOTATIONS" ]
     [ "${#INVENTORY_CONTAINER_NAMES[@]}" -eq 1 ]
@@ -111,46 +109,46 @@ put_simple() {
 # --- fingerprint ---
 
 @test "fingerprint covers the image" {
-    inventory_put Deployment default web 1700 60 "" default '[]' '' 'main=a:1'
+    inventory_put Deployment default web 1700 60 "" default '[]' '' 'containers main=a:1'
     inventory_get Deployment default web
     local first=$INVENTORY_FINGERPRINT
-    inventory_put Deployment default web 1700 60 "" default '[]' '' 'main=a:2'
+    inventory_put Deployment default web 1700 60 "" default '[]' '' 'containers main=a:2'
     inventory_get Deployment default web
     [ "$INVENTORY_FINGERPRINT" != "$first" ]
 }
 
 @test "fingerprint covers the annotations" {
-    inventory_put Deployment default web 1700 60 "" default '[]' 'p=minor' 'main=a:1'
+    inventory_put Deployment default web 1700 60 "" default '[]' 'p=minor' 'containers main=a:1'
     inventory_get Deployment default web
     local first=$INVENTORY_FINGERPRINT
-    inventory_put Deployment default web 1700 60 "" default '[]' 'p=patch' 'main=a:1'
+    inventory_put Deployment default web 1700 60 "" default '[]' 'p=patch' 'containers main=a:1'
     inventory_get Deployment default web
     [ "$INVENTORY_FINGERPRINT" != "$first" ]
 }
 
 @test "fingerprint covers the interval, so a cadence change forces a poll" {
-    inventory_put Deployment default web 1700 60 "" default '[]' '' 'main=a:1'
+    inventory_put Deployment default web 1700 60 "" default '[]' '' 'containers main=a:1'
     inventory_get Deployment default web
     local first=$INVENTORY_FINGERPRINT
-    inventory_put Deployment default web 1700 30 "" default '[]' '' 'main=a:1'
+    inventory_put Deployment default web 1700 30 "" default '[]' '' 'containers main=a:1'
     inventory_get Deployment default web
     [ "$INVENTORY_FINGERPRINT" != "$first" ]
 }
 
 @test "fingerprint covers the credentials" {
-    inventory_put Deployment default web 1700 60 "" default '[]' '' 'main=a:1'
+    inventory_put Deployment default web 1700 60 "" default '[]' '' 'containers main=a:1'
     inventory_get Deployment default web
     local first=$INVENTORY_FINGERPRINT
-    inventory_put Deployment default web 1700 60 "" default '[{"name":"rc"}]' '' 'main=a:1'
+    inventory_put Deployment default web 1700 60 "" default '[{"name":"rc"}]' '' 'containers main=a:1'
     inventory_get Deployment default web
     [ "$INVENTORY_FINGERPRINT" != "$first" ]
 }
 
 @test "fingerprint ignores next-due, which moves on every poll" {
-    inventory_put Deployment default web 1700 60 "" default '[]' '' 'main=a:1'
+    inventory_put Deployment default web 1700 60 "" default '[]' '' 'containers main=a:1'
     inventory_get Deployment default web
     local first=$INVENTORY_FINGERPRINT
-    inventory_put Deployment default web 9999 60 "" default '[]' '' 'main=a:1'
+    inventory_put Deployment default web 9999 60 "" default '[]' '' 'containers main=a:1'
     inventory_get Deployment default web
     [ "$INVENTORY_FINGERPRINT" = "$first" ]
 }
@@ -215,7 +213,7 @@ put_simple() {
 
 @test "evict leaves other entries alone" {
     put_simple
-    inventory_put Deployment default api 1700 60 "" default '[]' '' 'main=b:1'
+    inventory_put Deployment default api 1700 60 "" default '[]' '' 'containers main=b:1'
     inventory_evict Deployment default web
     inventory_get Deployment default api
     [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "b:1" ]
@@ -238,8 +236,8 @@ put_simple() {
 
 @test "due: only the overdue entries come back" {
     put_simple 1000 60
-    inventory_put Deployment default api 5000 60 "" default '[]' '' 'main=b:1'
-    inventory_put CronJob ops backup 1000 60 "" default '[]' '' 'main=c:1'
+    inventory_put Deployment default api 5000 60 "" default '[]' '' 'containers main=b:1'
+    inventory_put CronJob ops backup 1000 60 "" default '[]' '' 'containers main=c:1'
     inventory_due 2000
     [ "${#INVENTORY_DUE[@]}" -eq 2 ]
     printf '%s\n' "${INVENTORY_DUE[@]}" | grep -q '^Deployment default web$'
@@ -289,7 +287,7 @@ put_simple() {
 
 @test "list: emits every identity" {
     put_simple
-    inventory_put CronJob ops backup 1000 60 "" default '[]' '' 'main=b:1'
+    inventory_put CronJob ops backup 1000 60 "" default '[]' '' 'containers main=b:1'
     inventory_list
     [ "${#INVENTORY_ALL[@]}" -eq 2 ]
 }
@@ -318,9 +316,9 @@ put_simple() {
 # --- full refresh support ---
 
 @test "evict_kind: drops every entry of one kind and no others" {
-    inventory_put Deployment default web 1000 60 "" default '[]' '' 'main=a:1'
-    inventory_put Deployment other api 1000 60 "" default '[]' '' 'main=b:1'
-    inventory_put CronJob ops backup 1000 60 "" default '[]' '' 'main=c:1'
+    inventory_put Deployment default web 1000 60 "" default '[]' '' 'containers main=a:1'
+    inventory_put Deployment other api 1000 60 "" default '[]' '' 'containers main=b:1'
+    inventory_put CronJob ops backup 1000 60 "" default '[]' '' 'containers main=c:1'
     inventory_evict_kind Deployment
     run inventory_get Deployment default web
     [ "$status" -eq 1 ]
@@ -331,7 +329,7 @@ put_simple() {
 }
 
 @test "evict_kind: an unknown kind is a no-op" {
-    inventory_put Deployment default web 1000 60 "" default '[]' '' 'main=a:1'
+    inventory_put Deployment default web 1000 60 "" default '[]' '' 'containers main=a:1'
     run inventory_evict_kind StatefulSet
     [ "$status" -eq 0 ]
     run inventory_get Deployment default web
@@ -341,8 +339,8 @@ put_simple() {
 @test "evict_unwatched: drops kinds no longer watched" {
     # A reconcile only evicts within the kinds it listed, so dropping a kind
     # from the watched set would otherwise leave its entries polled forever.
-    inventory_put Deployment default web 1000 60 "" default '[]' '' 'main=a:1'
-    inventory_put CronJob ops backup 1000 60 "" default '[]' '' 'main=c:1'
+    inventory_put Deployment default web 1000 60 "" default '[]' '' 'containers main=a:1'
+    inventory_put CronJob ops backup 1000 60 "" default '[]' '' 'containers main=c:1'
     inventory_evict_unwatched "Deployment StatefulSet"
     run inventory_get Deployment default web
     [ "$status" -eq 0 ]
@@ -351,8 +349,8 @@ put_simple() {
 }
 
 @test "evict_unwatched: keeps everything when all kinds are watched" {
-    inventory_put Deployment default web 1000 60 "" default '[]' '' 'main=a:1'
-    inventory_put CronJob ops backup 1000 60 "" default '[]' '' 'main=c:1'
+    inventory_put Deployment default web 1000 60 "" default '[]' '' 'containers main=a:1'
+    inventory_put CronJob ops backup 1000 60 "" default '[]' '' 'containers main=c:1'
     inventory_evict_unwatched "Deployment CronJob"
     inventory_list
     [ "${#INVENTORY_ALL[@]}" -eq 2 ]

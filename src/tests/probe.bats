@@ -2,8 +2,10 @@
 
 # Integration tests for the keelson-probe entry script.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     PROBE="$SCRIPT_DIR/keelson-probe"
     export KEELSON_STATUS_DIR="$TMP_DIR/status"
@@ -14,10 +16,6 @@ setup() {
     source "$SCRIPT_DIR/lib/clock.bash"
     HEARTBEAT_FILE="$KEELSON_STATUS_DIR/heartbeat"
     WATCHERS_FILE="$KEELSON_STATUS_DIR/watchers"
-}
-
-teardown() {
-    rm -rf "$TMP_DIR"
 }
 
 write_heartbeat() {

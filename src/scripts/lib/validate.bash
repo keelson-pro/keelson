@@ -124,15 +124,23 @@ validate_decimal_point() {
 validate_yq_v4() {
     local out
     if ! out=$(yq --version 2>&1); then
-        log_error validate-yq-version-failed detail="$out" \
-            msg="Validation failed: could not run 'yq --version' ($out)."
+        log_flatten "$out"
+        log_debug validate-yq-version-detail \
+            msg="Running 'yq --version' failed, full output: ${LOG_FLAT:-no output}"
+        log_hint "$out"
+        log_error validate-yq-version-failed detail="$LOG_HINT" \
+            msg="Validation failed: could not run 'yq --version' ($LOG_HINT)."
         return 1
     fi
     case "$out" in
         *version\ v4.*|*version\ 4.*) return 0 ;;
     esac
-    log_error validate-yq-not-v4 detail="$out" \
-        msg="Validation failed: yq must be v4 (got: $out)."
+    log_flatten "$out"
+    log_debug validate-yq-not-v4-detail \
+        msg="'yq --version' is not v4, full output: ${LOG_FLAT:-no output}"
+    log_hint "$out"
+    log_error validate-yq-not-v4 detail="$LOG_HINT" \
+        msg="Validation failed: yq must be v4 (got: $LOG_HINT)."
     return 1
 }
 

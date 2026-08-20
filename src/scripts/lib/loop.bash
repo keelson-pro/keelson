@@ -19,6 +19,7 @@
 #   LOOP_WATCHER_STARTED[<kind>]   unix-seconds the current watcher started
 #   LOOP_WATCHER_ELIGIBLE[<kind>]  earliest unix-seconds we may respawn this kind
 #   LOOP_SCAN_PID                  current scan child PID (0 if none)
+#   LOOP_QUEUE_PID                 current queue-refresh child PID (0 if none)
 #
 # Depends on (must be sourced first):
 #   lib/log.bash, lib/clock.bash, lib/queue.bash, lib/state.bash, lib/scan.bash,
@@ -30,21 +31,9 @@ declare -gA LOOP_WATCHER_STARTED=()
 declare -gA LOOP_WATCHER_ELIGIBLE=()
 LOOP_SCAN_PID=0
 LOOP_POLL_PID=0
+LOOP_QUEUE_PID=0
 LOOP_REFRESH_PID=0
 declare -ga LOOP_REFRESH_PENDING=()
-
-# loop_drain_queue
-# Drains watcher-enqueued work items, logs each.
-loop_drain_queue() {
-    local count=0 line
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        log_debug queue-item "$line"
-        count=$(( count + 1 ))
-    done < <(queue_drain)
-    [ "$count" -gt 0 ] && log_debug queue-drained count="$count"
-    return 0
-}
 
 # loop_publish_watchers
 # Publishes the current PID map for keelson-probe's readiness check.
@@ -125,6 +114,26 @@ loop_start_scan() {
     LOOP_SCAN_PID=$!
 }
 
+# loop_start_queue_refresh <apply>
+# Spawns the child that drains the watcher queue and re-reads what is in it.
+#
+# Backgrounded and gated on LOOP_QUEUE_PID for the same reason as the scan and
+# the poll: it talks to the API server, and the tick must not wait on it. The
+# queue is a directory, so anything the watchers enqueue while a refresh is
+# running is simply picked up by the next one, and the records the child
+# writes are files that outlive it.
+loop_start_queue_refresh() {
+    local apply=$1
+    (
+        state_load || log_warn state-reload-failed \
+            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
+            msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
+        scan_refresh_queued "$apply"
+        [ "$apply" -eq 1 ] && { state_flush || true; }
+    ) &
+    LOOP_QUEUE_PID=$!
+}
+
 # loop_start_poll <apply> <now>
 # Spawns the due-poll child: registry lookups for whatever the cache says is
 # due right now.
@@ -188,14 +197,15 @@ loop_kill_children() {
     done
     [ "$LOOP_SCAN_PID" -gt 0 ] && kill "$LOOP_SCAN_PID" 2>/dev/null || true
     [ "$LOOP_POLL_PID" -gt 0 ] && kill "$LOOP_POLL_PID" 2>/dev/null || true
+    [ "$LOOP_QUEUE_PID" -gt 0 ] && kill "$LOOP_QUEUE_PID" 2>/dev/null || true
     [ "$LOOP_REFRESH_PID" -gt 0 ] && kill "$LOOP_REFRESH_PID" 2>/dev/null || true
     return 0
 }
 
 # loop_run
 # Tick once per KEELSON_TICK_INTERVAL: publish the heartbeat, supervise
-# watchers, drain queue, poll whatever the cache says is due, kick a
-# backgrounded reconcile scan when due. The watcher map
+# watchers, re-read whatever the watchers queued, poll whatever the cache says
+# is due, kick a backgrounded reconcile scan when due. The watcher map
 # is published by the supervisor itself, not from here. Long scans overlap
 # ticks but never each other (gated on LOOP_SCAN_PID).
 #
@@ -234,7 +244,22 @@ loop_run() {
         status_write_heartbeat "$cycle_start_us"
 
         loop_supervise_watchers "$now" "$backoff_max" "$healthy_reset"
-        loop_drain_queue
+
+        # Every tick: re-read whatever the watchers queued. Gated so a slow
+        # refresh never overlaps itself; the queue keeps accumulating and the
+        # next one takes the lot.
+        #
+        # Nothing queued means nothing spawned. The child loads the ledger
+        # before it can discover the queue is empty, so spawning it anyway
+        # would cost a subshell and a ConfigMap read every second of an idle
+        # cluster's life.
+        if [ "$LOOP_QUEUE_PID" -gt 0 ] && ! kill -0 "$LOOP_QUEUE_PID" 2>/dev/null; then
+            wait "$LOOP_QUEUE_PID" 2>/dev/null || true
+            LOOP_QUEUE_PID=0
+        fi
+        if [ "$LOOP_QUEUE_PID" -eq 0 ] && queue_pending; then
+            loop_start_queue_refresh "$apply"
+        fi
 
         # Every tick: what needs polling now? The cache answers without
         # touching the cluster, so this costs nothing when nothing is due.

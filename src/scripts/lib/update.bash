@@ -44,19 +44,20 @@
 # Depends on (must be sourced first):
 #   lib/log.bash, lib/managedfields.bash, lib/annotations.bash
 
-# update_patch_json <kind> <container> <new-image>
+# update_patch_json <kind> <list> <container> <new-image>
 # Echoes a strategic-merge patch document that updates the named container's
-# image. Returns non-zero for unsupported kinds.
+# image. <list> is "containers" or "initContainers". Returns non-zero for
+# unsupported kinds.
 update_patch_json() {
-    local kind=$1 container=$2 image=$3
+    local kind=$1 clist=$2 container=$3 image=$4
     case "$kind" in
         CronJob)
-            printf '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"containers":[{"name":"%s","image":"%s"}]}}}}}}' \
-                "$container" "$image"
+            printf '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"%s":[{"name":"%s","image":"%s"}]}}}}}}' \
+                "$clist" "$container" "$image"
             ;;
         Deployment|StatefulSet|DaemonSet)
-            printf '{"spec":{"template":{"spec":{"containers":[{"name":"%s","image":"%s"}]}}}}' \
-                "$container" "$image"
+            printf '{"spec":{"template":{"spec":{"%s":[{"name":"%s","image":"%s"}]}}}}' \
+                "$clist" "$container" "$image"
             ;;
         *)
             return 1
@@ -74,11 +75,12 @@ update_apiversion() {
     esac
 }
 
-# update_minimal_manifest <kind> <ns> <name> <container> <image>
+# update_minimal_manifest <kind> <ns> <name> <list> <container> <image>
 # Echoes a minimal YAML manifest suitable for SSA. Only the fields Keelson
-# claims ownership over (container name + image) appear.
+# claims ownership over (container name + image) appear. <list> is
+# "containers" or "initContainers".
 update_minimal_manifest() {
-    local kind=$1 ns=$2 name=$3 container=$4 image=$5
+    local kind=$1 ns=$2 name=$3 clist=$4 container=$5 image=$6
     local av
     av=$(update_apiversion "$kind") || return 1
     case "$kind" in
@@ -94,7 +96,7 @@ spec:
     spec:
       template:
         spec:
-          containers:
+          $clist:
           - name: $container
             image: $image
 EOF
@@ -109,7 +111,7 @@ metadata:
 spec:
   template:
     spec:
-      containers:
+      $clist:
       - name: $container
         image: $image
 EOF
@@ -150,19 +152,19 @@ update_resolve_strategy() {
     fi
 }
 
-# update_apply <kind> <namespace> <name> <container> <new-image> <from-tag> [managed-fields-json] [annotation-lines]
+# update_apply <kind> <namespace> <name> <list> <container> <new-image> <from-tag> [managed-fields-json] [annotation-lines]
 # Resolves the effective field-manager strategy and dispatches. Logs
 # update-applied / update-failed / update-apply-conflict /
 # update-refused-mimic-unowned / update-invalid-strategy-annotation and
 # returns 0 on success, 1 otherwise.
 update_apply() {
-    local kind=$1 ns=$2 name=$3 container=$4 image=$5 from_tag=$6
-    local mf_json=${7:-} ann=${8:-}
+    local kind=$1 ns=$2 name=$3 clist=$4 container=$5 image=$6 from_tag=$7
+    local mf_json=${8:-} ann=${9:-}
     if [ -z "$mf_json" ]; then
         mf_json=$(update_fetch_managed_fields "$kind" "$ns" "$name")
     fi
     local apply_owner owner_present=0
-    apply_owner=$(managedfields_apply_owner_of_image "$mf_json" "$container")
+    apply_owner=$(managedfields_apply_owner_of_image "$mf_json" "$clist" "$container")
     [ -n "$apply_owner" ] && owner_present=1
 
     local strategy rc
@@ -185,26 +187,26 @@ update_apply() {
                     msg="Refusing to update $kind '$name'/$container in '$ns' to image '$image': strategy 'mimic' requires an Apply-op field owner but none was detected."
                 return 1
             fi
-            update_apply_ssa "$kind" "$ns" "$name" "$container" "$image" \
+            update_apply_ssa "$kind" "$ns" "$name" "$clist" "$container" "$image" \
                 "$apply_owner" "$from_tag" mimic
             ;;
         patch)
-            update_apply_patch "$kind" "$ns" "$name" "$container" "$image" \
+            update_apply_patch "$kind" "$ns" "$name" "$clist" "$container" "$image" \
                 keelson "$from_tag" patch
             ;;
         claim)
-            update_apply_ssa "$kind" "$ns" "$name" "$container" "$image" \
+            update_apply_ssa "$kind" "$ns" "$name" "$clist" "$container" "$image" \
                 keelson "$from_tag" claim
             ;;
     esac
 }
 
 update_apply_patch() {
-    local kind=$1 ns=$2 name=$3 container=$4 image=$5 manager=$6 from_tag=$7 \
-          strategy=$8
+    local kind=$1 ns=$2 name=$3 clist=$4 container=$5 image=$6 manager=$7 \
+          from_tag=$8 strategy=$9
     local to_tag=${image##*:} repo=${image%:*}
     local patch
-    if ! patch=$(update_patch_json "$kind" "$container" "$image"); then
+    if ! patch=$(update_patch_json "$kind" "$clist" "$container" "$image"); then
         log_error update-unsupported-kind kind="$kind" ns="$ns" name="$name" \
             msg="Cannot update $kind '$name' in '$ns': kind not supported."
         return 1
@@ -227,11 +229,11 @@ update_apply_patch() {
 }
 
 update_apply_ssa() {
-    local kind=$1 ns=$2 name=$3 container=$4 image=$5 manager=$6 from_tag=$7 \
-          strategy=$8
+    local kind=$1 ns=$2 name=$3 clist=$4 container=$5 image=$6 manager=$7 \
+          from_tag=$8 strategy=$9
     local to_tag=${image##*:} repo=${image%:*}
-    local manifest tmperr reason=""
-    if ! manifest=$(update_minimal_manifest "$kind" "$ns" "$name" "$container" "$image"); then
+    local manifest tmperr detail="" reason=""
+    if ! manifest=$(update_minimal_manifest "$kind" "$ns" "$name" "$clist" "$container" "$image"); then
         log_error update-unsupported-kind kind="$kind" ns="$ns" name="$name" \
             msg="Cannot update $kind '$name' in '$ns': kind not supported."
         return 1
@@ -247,13 +249,22 @@ update_apply_ssa() {
             msg="$kind '$name' in '$ns' updated from $from_tag to $to_tag for image '$repo'."
         return 0
     fi
-    if [ "$tmperr" != "/dev/null" ]; then
-        reason=$(head -c 200 "$tmperr" 2>/dev/null | tr '\n' ' ' | tr -s ' ')
-        reason=${reason#"${reason%%[![:space:]]*}"}
-        reason=${reason%"${reason##*[![:space:]]}"}
+    if [ -r "$tmperr" ] && [ "$tmperr" != "/dev/null" ]; then
+        detail=$(<"$tmperr")
         rm -f "$tmperr"
     fi
-    case "$reason" in
+    # The whole of kubectl's complaint at debug, a clip of it on the error
+    # line. A rejected apply lists every conflicting field path and runs to
+    # paragraphs; the error below has to stay one readable line.
+    log_flatten "$detail"
+    log_debug update-apply-failed-detail \
+        kind="$kind" ns="$ns" name="$name" container="$container" \
+        msg="Server-side apply of $kind '$name'/$container in '$ns' failed, full output: ${LOG_FLAT:-no error output}"
+    log_hint "$detail"
+    reason=$LOG_HINT
+    # Matched on the full text, not the clip: the word that decides this can
+    # sit past the clip.
+    case "$detail" in
         *conflict*|*Conflict*)
             log_error update-apply-conflict \
                 kind="$kind" ns="$ns" name="$name" container="$container" \

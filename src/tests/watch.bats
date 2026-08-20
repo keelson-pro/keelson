@@ -2,8 +2,10 @@
 
 # Watcher tests. kubectl is shimmed via $TMP_BIN on PATH.
 
+load helper
+
 setup() {
-    TMP_DIR=$(mktemp -d)
+    tmp_dir_init
     TMP_BIN="$TMP_DIR/bin"
     mkdir -p "$TMP_BIN"
     PATH="$TMP_BIN:$PATH"
@@ -39,10 +41,6 @@ setup() {
     queue_init
 }
 
-teardown() {
-    rm -rf "$TMP_DIR"
-}
-
 emit() { "$@" 2>&1; }
 
 install_shim() {
@@ -54,7 +52,7 @@ install_shim() {
 # --- watch_handle_events: pure stdin → queue ---
 
 @test "watch_handle_events: enqueues one line per event" {
-    printf 'MODIFIED default app main=a:1,\nMODIFIED ns2 other main=b:1,\n' \
+    printf 'MODIFIED default app\nMODIFIED ns2 other\n' \
         | watch_handle_events Deployment 2>/dev/null
     run queue_size
     [ "$output" = "2" ]
@@ -63,14 +61,14 @@ install_shim() {
 }
 
 @test "watch_handle_events: blank lines are ignored" {
-    printf '\nMODIFIED default app main=a:1,\n\n' \
+    printf '\nMODIFIED default app\n\n' \
         | watch_handle_events Deployment 2>/dev/null
     run queue_size
     [ "$output" = "1" ]
 }
 
 @test "watch_handle_events: duplicate events dedupe to one queue entry" {
-    printf 'MODIFIED default app main=a:1,\nMODIFIED default app main=a:1,\n' \
+    printf 'MODIFIED default app\nMODIFIED default app\n' \
         | watch_handle_events Deployment 2>/dev/null
     run queue_size
     [ "$output" = "1" ]
@@ -123,7 +121,7 @@ SH
 @test "watch_run_kind: streams events then reconnects on disconnect" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
-printf 'MODIFIED default app main=a:1,\n'
+printf 'MODIFIED default app\n'
 exit 0
 SH
     # Avoid real-time delays.
@@ -209,10 +207,79 @@ SH
     [[ "$output" == *"Forbidden"* ]]
 }
 
+# --- the failure hint, and where the rest of it goes ---
+#
+# kubectl answers a jsonpath failure with its error and then the whole
+# offending object in Go syntax, thousands of characters of it. Reading the
+# last line of stderr picked exactly the dump and dropped the reason.
+
+install_jsonpath_failure_shim() {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo 'error: error executing jsonpath "{.type} {.object.metadata.namespace} {.object.metadata.name}": name is not found. Printing more information for debugging the template:' >&2
+echo '	object given to jsonpath engine was:' >&2
+printf '\t\tmap[string]interface {}{"object":map[string]interface {}{"DUMPMARKER":"x"}}\n' >&2
+exit 1
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+}
+
+@test "watch_run_kind: the warn line hints at the error, without the object dump" {
+    install_jsonpath_failure_shim
+    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=info \
+        run emit watch_run_kind Deployment
+    [[ "$output" == *"error: error executing jsonpath"* ]]
+    [[ "$output" == *"Retrying in"* ]]
+    [[ "$output" != *"DUMPMARKER"* ]]
+}
+
+@test "watch_run_kind: the full kubectl output is there at debug" {
+    install_jsonpath_failure_shim
+    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=debug \
+        run emit watch_run_kind Deployment
+    [[ "$output" == *"DUMPMARKER"* ]]
+}
+
+@test "watch_error_hint: a short first line is passed through whole" {
+    printf 'connection refused\n' >"$TMP_DIR/err"
+    run watch_error_hint "$TMP_DIR/err"
+    [ "$output" = 'connection refused' ]
+}
+
+@test "watch_error_hint: a long first line is clipped with an ellipsis" {
+    local long
+    long=$(printf 'x%.0s' {1..300})
+    printf '%s\n' "$long" >"$TMP_DIR/err"
+    run watch_error_hint "$TMP_DIR/err"
+    [ "${#output}" -eq $(( LOG_HINT_MAX + 3 )) ]
+    [[ "$output" == *"..." ]]
+}
+
+@test "watch_error_hint: takes the first line, not the last" {
+    printf 'the reason\nthe dump\n' >"$TMP_DIR/err"
+    run watch_error_hint "$TMP_DIR/err"
+    [ "$output" = "the reason" ]
+}
+
+@test "watch_error_hint: leading blank lines are skipped" {
+    printf '\n\nthe reason\n' >"$TMP_DIR/err"
+    run watch_error_hint "$TMP_DIR/err"
+    [ "$output" = "the reason" ]
+}
+
+@test "watch_error_hint: a missing file yields nothing" {
+    run watch_error_hint "$TMP_DIR/absent"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 @test "watch_run_kind: marks itself healthy while a stream is open" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
-printf 'MODIFIED default app main=a:1,\n'
+printf 'MODIFIED default app\n'
 exit 0
 SH
     install_shim sleep <<'SH'
@@ -334,90 +401,72 @@ SH
     [[ "$output" == *"held"* ]]
 }
 
-# --- events keep the cache current ---
+# --- events become work, not conclusions ---
 #
-# A watch fires on every write to the object, and most of those are status
-# churn. The handler's job is to tell a real image change from that noise
-# cheaply, and to evict on delete.
+# A watch fires on every write to the object and cannot say which write it
+# was. The handler evicts on a delete and queues everything else; the tick
+# re-reads the cluster and decides from that.
 
 cache_one() {
-    local images=${1:-'main=ghcr.io/x/y:1.0'} next_due=${2:-5000}
+    local images=${1:-'containers main=ghcr.io/x/y:1.0'} next_due=${2:-5000}
     inventory_put Deployment default app "$next_due" 300 "" default '[]' \
         'keelson.pro/policy=minor' "$images"
 }
 
-@test "events: a changed image updates the cache and makes it due now" {
-    cache_one 'main=ghcr.io/x/y:1.0' 5000
-    printf 'MODIFIED default app main=ghcr.io/x/y:2.0,\n' \
+@test "events: an event queues the identity for re-reading" {
+    cache_one
+    printf 'MODIFIED default app\n' \
         | watch_handle_events Deployment 2>/dev/null
-    inventory_get Deployment default app
-    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io/x/y:2.0" ]
-    clock_read
-    [ "$INVENTORY_NEXT_DUE" -le "$(( CLOCK_NOW_US / 1000000 ))" ]
+    [ -f "$KEELSON_QUEUE_DIR/Deployment--default--app" ]
 }
 
-@test "events: an unchanged image leaves the schedule alone" {
-    # Status churn is most of what a watch delivers; it must cost nothing.
-    cache_one 'main=ghcr.io/x/y:1.0' 5000
-    printf 'MODIFIED default app main=ghcr.io/x/y:1.0,\n' \
+@test "events: an event does not touch the cache itself" {
+    # The event says nothing about what changed, so acting on it here could
+    # only ever be a guess. The re-read is what writes.
+    cache_one 'containers main=ghcr.io/x/y:1.0' 5000
+    printf 'MODIFIED default app\n' \
         | watch_handle_events Deployment 2>/dev/null
     inventory_get Deployment default app
     [ "$INVENTORY_NEXT_DUE" = "5000" ]
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io/x/y:1.0" ]
 }
 
-@test "events: the record is rewritten, so the next event is not a change too" {
-    cache_one 'main=ghcr.io/x/y:1.0' 5000
-    printf 'MODIFIED default app main=ghcr.io/x/y:2.0,\n' \
+@test "events: churn on one identity collapses to a single queue entry" {
+    cache_one
+    printf 'MODIFIED default app\nMODIFIED default app\nMODIFIED default app\n' \
         | watch_handle_events Deployment 2>/dev/null
-    inventory_get Deployment default app
-    local after=$INVENTORY_NEXT_DUE
-    inventory_set_next_due Deployment default app 9000
-    printf 'MODIFIED default app main=ghcr.io/x/y:2.0,\n' \
-        | watch_handle_events Deployment 2>/dev/null
-    inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "9000" ]
-    [ -n "$after" ]
+    run queue_size
+    [ "$output" = "1" ]
 }
 
-@test "events: a multi-container change is applied in full" {
-    cache_one "$(printf 'main=a:1\nside=b:1')" 5000
-    printf 'MODIFIED default app main=a:2,side=b:1,\n' \
+@test "events: an uncached workload is queued too" {
+    # First sight of a workload is exactly the case the re-read exists for.
+    printf 'ADDED default fresh\n' \
         | watch_handle_events Deployment 2>/dev/null
-    inventory_get Deployment default app
-    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "a:2" ]
-    [ "${INVENTORY_CONTAINER_IMAGES[1]}" = "b:1" ]
+    [ -f "$KEELSON_QUEUE_DIR/Deployment--default--fresh" ]
 }
 
 @test "events: a delete evicts the entry" {
     cache_one
-    printf 'DELETED default app main=ghcr.io/x/y:1.0,\n' \
+    printf 'DELETED default app\n' \
         | watch_handle_events Deployment 2>/dev/null
     run inventory_get Deployment default app
     [ "$status" -eq 1 ]
 }
 
+@test "events: a delete is not queued, there is nothing left to read" {
+    cache_one
+    printf 'DELETED default app\n' \
+        | watch_handle_events Deployment 2>/dev/null
+    run queue_size
+    [ "$output" = "0" ]
+}
+
 @test "events: a delete for something never cached is not an error" {
-    run bash -c 'printf "DELETED default ghost main=a:1,\n" | true'
-    printf 'DELETED default ghost main=a:1,\n' \
+    printf 'DELETED default ghost\n' \
         | watch_handle_events Deployment 2>/dev/null
     run inventory_get Deployment default ghost
     [ "$status" -eq 1 ]
-}
-
-@test "events: an uncached workload is left for the reconcile scan" {
-    # An event carries no annotations, so there is nothing to build a full
-    # record from.
-    printf 'ADDED default fresh main=a:1,\n' \
-        | watch_handle_events Deployment 2>/dev/null
-    run inventory_get Deployment default fresh
-    [ "$status" -eq 1 ]
-}
-
-@test "events: the identity is still enqueued for the trail" {
-    cache_one
-    printf 'MODIFIED default app main=ghcr.io/x/y:2.0,\n' \
-        | watch_handle_events Deployment 2>/dev/null
-    [ -f "$KEELSON_QUEUE_DIR/Deployment--default--app" ]
 }
 
 @test "events: a blank line is ignored" {
@@ -438,7 +487,7 @@ SH
     grep -q -- "--output-watch-events=true" "$TMP_DIR/kubectl.args"
 }
 
-@test "stream: template carries type, identity and images" {
+@test "stream: template carries the type and the identity" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 echo "$@" >>"$TMP_DIR/kubectl.args"
@@ -446,16 +495,30 @@ exit 0
 SH
     watch_kubectl_stream Deployment >/dev/null
     grep -q -- "{.type}" "$TMP_DIR/kubectl.args"
+    grep -q -- "{.object.metadata.namespace}" "$TMP_DIR/kubectl.args"
     grep -q -- "{.object.metadata.name}" "$TMP_DIR/kubectl.args"
-    grep -q -- "spec.template.spec.containers" "$TMP_DIR/kubectl.args"
 }
 
-@test "stream: CronJob containers come from under jobTemplate" {
+@test "stream: the template carries nothing else" {
+    # Anything beyond the coordinates would be a second, weaker source of
+    # truth about a workload, competing with the re-read.
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "$@" >>"$TMP_DIR/kubectl.args"
+exit 0
+SH
+    watch_kubectl_stream Deployment >/dev/null
+    ! grep -q -- "containers" "$TMP_DIR/kubectl.args"
+    ! grep -q -- "annotations" "$TMP_DIR/kubectl.args"
+}
+
+@test "stream: CronJob needs no path of its own any more" {
+    # The kind's nesting only ever mattered for reaching its containers.
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 echo "$@" >>"$TMP_DIR/kubectl.args"
 exit 0
 SH
     watch_kubectl_stream CronJob >/dev/null
-    grep -q -- "jobTemplate.spec.template.spec.containers" "$TMP_DIR/kubectl.args"
+    ! grep -q -- "jobTemplate" "$TMP_DIR/kubectl.args"
 }
