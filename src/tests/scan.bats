@@ -1200,3 +1200,157 @@ SH
     grep -q "create job" "$TMP_DIR/kubectl.log"
     grep -q -- "--from=cronjob/cron" "$TMP_DIR/kubectl.log"
 }
+
+# --- who counts as Keelson managed ---
+#
+# policy is the switch. A workload with only poll-schedule or match-tag has
+# configured nothing that acts, and counting it would hide that from whoever
+# made the mistake.
+
+@test "managed: a workload-wide policy counts" {
+    run scan_is_keelson_managed 'keelson.pro/policy=minor'
+    [ "$status" -eq 0 ]
+}
+
+@test "managed: a per-container policy counts" {
+    run scan_is_keelson_managed 'keelson.pro/policy.web=major'
+    [ "$status" -eq 0 ]
+}
+
+@test "managed: other Keelson annotations alone do not count" {
+    run scan_is_keelson_managed "$(printf 'keelson.pro/poll-schedule=5m\nkeelson.pro/match-tag=^1\\.')"
+    [ "$status" -eq 1 ]
+}
+
+@test "managed: no annotations at all does not count" {
+    run scan_is_keelson_managed ''
+    [ "$status" -eq 1 ]
+}
+
+@test "managed: a keel policy does not count under config-mode keelson" {
+    KEELSON_CONFIG_MODE=keelson run scan_is_keelson_managed 'keel.sh/policy=minor'
+    [ "$status" -eq 1 ]
+}
+
+@test "managed: a keel policy counts under config-mode keel" {
+    KEELSON_CONFIG_MODE=keel run scan_is_keelson_managed 'keel.sh/policy=minor'
+    [ "$status" -eq 0 ]
+}
+
+@test "managed: either prefix counts under config-mode both" {
+    KEELSON_CONFIG_MODE=both run scan_is_keelson_managed 'keel.sh/policy=minor'
+    [ "$status" -eq 0 ]
+}
+
+@test "refresh: the rebuilt line carries the managed ratio" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    run emit scan_refresh_kind 0 Deployment
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"workloads":"1"'* ]]
+    [[ "$output" == *'"managed":"1"'* ]]
+    [[ "$output" == *"Rebuilt the cache for Deployment: 1 of 1 are Keelson managed."* ]]
+}
+
+@test "refresh: an unannotated workload is cached but not counted" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3)"
+    run emit scan_refresh_kind 0 Deployment
+    [[ "$output" == *"Rebuilt the cache for Deployment: 0 of 1 are Keelson managed."* ]]
+}
+
+# --- the boot listing of what Keelson will act on ---
+
+@test "managed list: says nothing and fails while the cache is empty" {
+    inventory_init
+    run scan_log_managed_workloads
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+}
+
+@test "managed list: the header carries the ratio" {
+    inventory_init
+    inventory_put Deployment default web 1700 60 "" default '[]' \
+        'keelson.pro/policy=minor' 'containers main=a:1'
+    inventory_put Deployment default other 1700 60 "" default '[]' \
+        '' 'containers main=b:1'
+    run emit scan_log_managed_workloads
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Keelson is managing 1 of 2 cached workloads:"* ]]
+}
+
+@test "managed list: groups by namespace, kind then name inside" {
+    inventory_init
+    inventory_put Deployment run-platform web 1700 60 "" default '[]' \
+        'keelson.pro/policy=minor' 'containers main=a:1'
+    inventory_put CronJob run-platform nightly 1700 60 "" default '[]' \
+        'keelson.pro/policy=minor' 'containers main=a:1'
+    inventory_put DaemonSet kube-system shipper 1700 60 "" default '[]' \
+        'keelson.pro/policy=minor' 'containers main=a:1'
+    run emit scan_log_managed_workloads
+    local plain
+    plain=$(printf '%s\n' "$output" | grep -o '"msg":"[^"]*"' | sed 's/"msg":"//; s/"$//')
+    [ "$(printf '%s\n' "$plain" | sed -n '2p')" = "  kube-system" ]
+    [ "$(printf '%s\n' "$plain" | sed -n '3p')" = "    DaemonSet   shipper" ]
+    [ "$(printf '%s\n' "$plain" | sed -n '4p')" = "  run-platform" ]
+    [ "$(printf '%s\n' "$plain" | sed -n '5p')" = "    CronJob     nightly" ]
+    [ "$(printf '%s\n' "$plain" | sed -n '6p')" = "    Deployment  web" ]
+}
+
+@test "managed list: a namespace header appears once for its workloads" {
+    inventory_init
+    inventory_put Deployment ns1 a 1700 60 "" default '[]' \
+        'keelson.pro/policy=minor' 'containers main=a:1'
+    inventory_put Deployment ns1 b 1700 60 "" default '[]' \
+        'keelson.pro/policy=minor' 'containers main=a:1'
+    run emit scan_log_managed_workloads
+    [ "$(printf '%s\n' "$output" | grep -c '"event":"managed-namespace"')" = "1" ]
+    [ "$(printf '%s\n' "$output" | grep -c '"event":"managed-workload"')" = "2" ]
+}
+
+@test "managed list: nothing annotated still reports the ratio" {
+    inventory_init
+    inventory_put Deployment default web 1700 60 "" default '[]' \
+        '' 'containers main=a:1'
+    run emit scan_log_managed_workloads
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Keelson is managing 0 of 1 cached workloads:"* ]]
+    [[ "$output" != *'"event":"managed-workload"'* ]]
+}
+
+# --- our own update must not read back as someone else's change ---
+
+@test "own update: the applied image is recorded against the cache" {
+    inventory_init
+    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    scan_run 1 2>/dev/null
+    inventory_get Deployment default app
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io/x/y:1.3.0" ]
+}
+
+@test "own update: the re-read that follows it does not resync" {
+    # Keelson's patch fires a watch event like anyone else's. Without the
+    # record being updated, the re-read reports a change and asks the registry
+    # a question it has just answered.
+    inventory_init
+    queue_init
+    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    scan_run 1 2>/dev/null
+    inventory_set_next_due Deployment default app 9999999999
+
+    # The cluster now serves what we just applied, as it would to the re-read.
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.3.0 minor)"
+    queue_enqueue Deployment default app
+    run emit scan_refresh_queued 1
+    [[ "$output" != *"scan-resync"* ]]
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "9999999999" ]
+}

@@ -283,6 +283,14 @@ scan_workload() {
     local n j clist cjson cname cimage _workload_updated=0 \
           _workload_last_from="" _workload_last_to="" _workload_last_repo=""
 
+    # Cached before anything is polled, because an update records the image it
+    # applied against this record and caching afterwards would write the
+    # pre-update one back over it.
+    # A workload whose record could not be written is one workload lost until
+    # the next pass, not a reason to abandon the other thirty in this one.
+    scan_cache_workload "$kind" "$ns" "$name" "$annotations" "$suspend" \
+        "$sa_name" "$ips_json" "$containers_json" "$init_containers_json" || true
+
     if [ "$_scan_poll_all" -eq 1 ]; then
         for clist in containers initContainers; do
             if [ "$clist" = containers ]; then
@@ -300,11 +308,6 @@ scan_workload() {
             done
         done
     fi
-
-    # A workload whose record could not be written is one workload lost until
-    # the next pass, not a reason to abandon the other thirty in this one.
-    scan_cache_workload "$kind" "$ns" "$name" "$annotations" "$suspend" \
-        "$sa_name" "$ips_json" "$containers_json" "$init_containers_json" || true
 
     # Only when this pass polled. The trigger's always-once rule fires on
     # "no prior triggered-job recorded", and every cache-refresh path -- the

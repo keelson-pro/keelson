@@ -407,3 +407,31 @@ SH
     state_reconcile_ledger
     [ "$(state_get_next_due Deployment default web)" = "111" ]
 }
+
+# --- own namespace ---
+
+@test "own_namespace: reads a SA file written without a trailing newline" {
+    # The kubelet writes it that way, so read returns 1 at EOF having set the
+    # variable anyway; treating that as a failure breaks boot in a real pod.
+    printf '%s' 'team-a' > "$TMP_DIR/ns"
+    unset KEELSON_STATE_NAMESPACE
+    KEELSON_SA_NAMESPACE_FILE="$TMP_DIR/ns"
+    state_own_namespace
+    [ "$STATE_NAMESPACE" = "team-a" ]
+}
+
+@test "own_namespace: KEELSON_STATE_NAMESPACE wins over the file" {
+    printf '%s' 'from-file' > "$TMP_DIR/ns"
+    KEELSON_SA_NAMESPACE_FILE="$TMP_DIR/ns" KEELSON_STATE_NAMESPACE=explicit \
+        state_own_namespace
+    [ "$STATE_NAMESPACE" = "explicit" ]
+}
+
+@test "own_namespace: an unreadable file returns 1 and reports where it looked" {
+    unset KEELSON_STATE_NAMESPACE
+    KEELSON_SA_NAMESPACE_FILE="$TMP_DIR/absent"
+    local rc=0
+    state_own_namespace || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$STATE_NAMESPACE_FILE" = "$TMP_DIR/absent" ]
+}
