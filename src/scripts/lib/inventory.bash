@@ -164,7 +164,12 @@ inventory_put() {
     fp=$INVENTORY_COMPUTED_FINGERPRINT
 
     inventory_path "$kind" "$ns" "$name"
-    local tmp="${INVENTORY_PATH}.tmp"
+    # BASHPID, not $$: the tick's refresh, queue-refresh, scan and poll children
+    # are all subshells, where $$ is still the parent's, so one shared temp name
+    # means two of them writing the same workload race and the loser's mv fails
+    # with "cannot stat". A child killed mid-write leaves its temp behind, which
+    # the list globs skip and the next full refresh of that kind removes.
+    local tmp="${INVENTORY_PATH}.${BASHPID}.tmp"
     {
         printf 'kind=%s\n' "$kind"
         printf 'namespace=%s\n' "$ns"
