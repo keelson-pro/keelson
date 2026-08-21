@@ -36,6 +36,7 @@ declare -gA STATE_KEYS=()
 declare -gA STATE_DIRTY=()
 declare -gA STATE_DELETED=()
 STATE_NAMESPACE=""
+STATE_NAMESPACE_FILE=""
 STATE_CONFIGMAP_NAME=""
 
 # state_trigger_key <kind> <ns> <name>
@@ -124,21 +125,29 @@ state_reconcile_ledger() {
     return 0
 }
 
+# state_own_namespace
+# Sets STATE_NAMESPACE to the namespace Keelson runs in, and
+# STATE_NAMESPACE_FILE to where it looked. Returns 1 when it cannot tell.
+state_own_namespace() {
+    STATE_NAMESPACE_FILE="${KEELSON_SA_NAMESPACE_FILE:-/var/run/secrets/kubernetes.io/serviceaccount/namespace}"
+    if [ -n "${KEELSON_STATE_NAMESPACE:-}" ]; then
+        STATE_NAMESPACE="$KEELSON_STATE_NAMESPACE"
+        return 0
+    fi
+    [ -r "$STATE_NAMESPACE_FILE" ] || return 1
+    # The kubelet writes that file with no trailing newline, so read hits EOF
+    # and returns 1 having set the variable anyway.
+    read -r STATE_NAMESPACE < "$STATE_NAMESPACE_FILE" || [ -n "$STATE_NAMESPACE" ]
+}
+
 # state_init
 # Discover own namespace, ensure ConfigMap exists, load it into the cache.
 state_init() {
     STATE_CONFIGMAP_NAME="${KEELSON_STATE_CONFIGMAP:?KEELSON_STATE_CONFIGMAP required}"
-    if [ -n "${KEELSON_STATE_NAMESPACE:-}" ]; then
-        STATE_NAMESPACE="$KEELSON_STATE_NAMESPACE"
-    else
-        local ns_file="${KEELSON_SA_NAMESPACE_FILE:-/var/run/secrets/kubernetes.io/serviceaccount/namespace}"
-        if [ -r "$ns_file" ]; then
-            STATE_NAMESPACE=$(cat "$ns_file")
-        else
-            log_error state-namespace-unknown ns-file="$ns_file" \
-                msg="State init failed: could not read Keelson's own namespace from '$ns_file' and KEELSON_STATE_NAMESPACE is not set."
-            return 1
-        fi
+    if ! state_own_namespace; then
+        log_error state-namespace-unknown ns-file="$STATE_NAMESPACE_FILE" \
+            msg="State init failed: could not read Keelson's own namespace from '$STATE_NAMESPACE_FILE' and KEELSON_STATE_NAMESPACE is not set."
+        return 1
     fi
     STATE_FIELDS=()
     STATE_KEYS=()
