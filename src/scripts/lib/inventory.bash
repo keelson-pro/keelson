@@ -186,8 +186,20 @@ inventory_put() {
             [ -n "$line" ] && printf 'container=%s\n' "$line"
         done <<< "$containers"
         printf 'fingerprint=%s\n' "$fp"
-    } > "$tmp"
-    mv -f "$tmp" "$INVENTORY_PATH"
+    } > "$tmp" 2>/dev/null || {
+        log_error inventory-write-failed kind="$kind" ns="$ns" name="$name" \
+            path="$tmp" \
+            msg="Could not write the cache record for $kind '$name' in '$ns' to '$tmp'."
+        rm -f "$tmp"
+        return 1
+    }
+    mv -f "$tmp" "$INVENTORY_PATH" 2>/dev/null || {
+        log_error inventory-write-failed kind="$kind" ns="$ns" name="$name" \
+            path="$INVENTORY_PATH" \
+            msg="Could not put the cache record for $kind '$name' in '$ns' in place at '$INVENTORY_PATH'."
+        rm -f "$tmp"
+        return 1
+    }
 }
 
 # inventory_get <kind> <ns> <name>
@@ -280,6 +292,7 @@ inventory_set_next_due() {
 # asks the registry a question it has already answered.
 inventory_set_container_image() {
     local kind=$1 ns=$2 name=$3 clist=$4 container=$5 image=$6
+    inventory_enabled || return 0
     inventory_get "$kind" "$ns" "$name" || return 1
     local containers= i found=1
     for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do

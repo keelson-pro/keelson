@@ -301,8 +301,10 @@ scan_workload() {
         done
     fi
 
+    # A workload whose record could not be written is one workload lost until
+    # the next pass, not a reason to abandon the other thirty in this one.
     scan_cache_workload "$kind" "$ns" "$name" "$annotations" "$suspend" \
-        "$sa_name" "$ips_json" "$containers_json" "$init_containers_json"
+        "$sa_name" "$ips_json" "$containers_json" "$init_containers_json" || true
 
     # Only when this pass polled. The trigger's always-once rule fires on
     # "no prior triggered-job recorded", and every cache-refresh path -- the
@@ -591,7 +593,10 @@ scan_container() {
     repo=$(image_repo "$cimage")
     new_image="$repo:$winner"
     if update_apply "$kind" "$ns" "$name" "$clist" "$cname" "$new_image" "$current_tag" "$mf_json" "$ann"; then
-        inventory_set_container_image "$kind" "$ns" "$name" "$clist" "$cname" "$new_image" || true
+        inventory_set_container_image "$kind" "$ns" "$name" "$clist" "$cname" "$new_image" \
+            || log_warn inventory-image-not-recorded \
+                kind="$kind" ns="$ns" name="$name" container="$cname" \
+                msg="Could not record the applied image for $kind '$name'/$cname in '$ns' against its cache record; the re-read after this update will resync it instead."
         _scan_updated=$((_scan_updated + 1))
         _workload_updated=1
         _workload_last_from=$current_tag
@@ -721,7 +726,9 @@ scan_poll_due() {
                 "$_workload_last_from" "$_workload_last_to" "$_workload_last_repo"
         fi
 
-        inventory_mark_polled "$kind" "$ns" "$name" "$now"
+        inventory_mark_polled "$kind" "$ns" "$name" "$now" \
+            || log_warn inventory-not-rescheduled kind="$kind" ns="$ns" name="$name" \
+                msg="Could not push $kind '$name' in '$ns' out to its next poll; it left the cache between being read as due and being polled."
         inventory_get "$kind" "$ns" "$name" \
             && state_set_next_due "$kind" "$ns" "$name" "$INVENTORY_NEXT_DUE"
     done
