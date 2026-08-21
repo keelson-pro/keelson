@@ -130,12 +130,12 @@ SH
 exit 0
 SH
     KEELSON_WATCH_MAX_ITERATIONS=2 KEELSON_WATCHER_RECONNECT_INITIAL=1 \
+    KEELSON_LOG_LEVEL=debug \
         run emit watch_run_kind Deployment
     [ "$status" -eq 0 ]
     # Two iterations -> two "Watching kind" log lines.
     [ "$(printf '%s\n' "$output" | grep -c "Watching kind 'Deployment'")" = "2" ]
-    [[ "$output" == *"Watch for kind 'Deployment' held"* ]]
-    [[ "$output" == *"then disconnected"* ]]
+    [[ "$output" == *"Watch for kind 'Deployment' lasted"* ]]
     # Each iteration enqueued the same identity; dedupe leaves one file.
     [ -f "$KEELSON_QUEUE_DIR/Deployment--default--app" ]
 }
@@ -171,7 +171,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-    KEELSON_WATCH_MAX_ITERATIONS=3 run emit watch_run_kind CronJob
+    KEELSON_WATCH_MAX_ITERATIONS=3 KEELSON_LOG_LEVEL=debug run emit watch_run_kind CronJob
     [ "$status" -eq 0 ]
     # All three iterations ran: set -e did not kill the loop on the first.
     [ "$(printf '%s\n' "$output" | grep -c "Watching kind 'CronJob'")" = "3" ]
@@ -386,7 +386,7 @@ SH
     [ "$(tr '\n' ' ' <"$TMP_DIR/sleeps")" = "1 2 1 1 " ]
 }
 
-@test "watch_run_kind: reports how long the stream held" {
+@test "watch_run_kind: reports how long the stream lasted" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -398,7 +398,7 @@ SH
     KEELSON_WATCH_MAX_ITERATIONS=1 \
     KEELSON_WATCHER_RECONNECT_RESET=30 \
         run emit watch_run_kind Deployment
-    [[ "$output" == *"held"* ]]
+    [[ "$output" == *"lasted 0s before disconnecting"* ]]
 }
 
 # --- events become work, not conclusions ---
