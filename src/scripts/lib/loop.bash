@@ -21,6 +21,7 @@
 #   LOOP_SCAN_PID                  current scan child PID (0 if none)
 #   LOOP_QUEUE_PID                 current queue-refresh child PID (0 if none)
 #   LOOP_MANAGED_LOGGED            1 once the managed-workload list has been logged
+#   LOOP_FIRST_SCAN_DONE           1 once the first reconcile scan child has finished
 #
 # Depends on (must be sourced first):
 #   lib/log.bash, lib/clock.bash, lib/queue.bash, lib/state.bash, lib/scan.bash,
@@ -33,6 +34,7 @@ declare -gA LOOP_WATCHER_ELIGIBLE=()
 LOOP_SCAN_PID=0
 LOOP_POLL_PID=0
 LOOP_MANAGED_LOGGED=0
+LOOP_FIRST_SCAN_DONE=0
 LOOP_QUEUE_PID=0
 LOOP_REFRESH_PID=0
 declare -ga LOOP_REFRESH_PENDING=()
@@ -247,13 +249,15 @@ loop_run() {
 
         loop_supervise_watchers "$now" "$backoff_max" "$healthy_reset"
 
-        # Once, as soon as a scan has filled the cache. The flag lives here
-        # because the scan runs in a subshell and anything it set would die
-        # with it.
+        # Once, after the first scan has finished. A cache that is merely
+        # non-empty is one still being filled, and reading it then reports
+        # whichever handful of workloads happened to be written by that point.
+        # The flag lives here because the scan runs in a subshell and anything
+        # it set would die with it.
         if [ "$LOOP_MANAGED_LOGGED" -eq 0 ]; then
             if [ "${KEELSON_LOG_MANAGED_WORKLOADS:-true}" != "true" ]; then
                 LOOP_MANAGED_LOGGED=1
-            elif scan_log_managed_workloads; then
+            elif [ "$LOOP_FIRST_SCAN_DONE" -eq 1 ] && scan_log_managed_workloads; then
                 LOOP_MANAGED_LOGGED=1
             fi
         fi
@@ -287,6 +291,7 @@ loop_run() {
         if [ "$LOOP_SCAN_PID" -gt 0 ] && ! kill -0 "$LOOP_SCAN_PID" 2>/dev/null; then
             wait "$LOOP_SCAN_PID" 2>/dev/null || true
             LOOP_SCAN_PID=0
+            LOOP_FIRST_SCAN_DONE=1
         fi
         if [ "$LOOP_SCAN_PID" -eq 0 ] && [ $(( now - last_scan_start )) -ge "$poll" ]; then
             loop_start_scan "$apply"
