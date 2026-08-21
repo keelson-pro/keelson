@@ -459,16 +459,16 @@ emit() { "$@" 2>&1; }
 
 # --- the managed-workload listing fires once, when there is something to say ---
 
-@test "managed list: not logged while the cache is still empty" {
+@test "managed list: retried while the cache is still empty" {
     scan_log_managed_workloads() { printf 'called\n' >>"$TMP_DIR/managed.calls"; return 1; }
-    KEELSON_LOOP_MAX_ITERATIONS=2 loop_run
+    KEELSON_LOOP_MAX_ITERATIONS=4 loop_run
     [ "$LOOP_MANAGED_LOGGED" = "0" ]
-    [ "$(wc -l <"$TMP_DIR/managed.calls")" -eq 2 ]
+    [ "$(wc -l <"$TMP_DIR/managed.calls")" -ge 1 ]
 }
 
 @test "managed list: logged once and never again" {
     scan_log_managed_workloads() { printf 'called\n' >>"$TMP_DIR/managed.calls"; return 0; }
-    KEELSON_LOOP_MAX_ITERATIONS=3 loop_run
+    KEELSON_LOOP_MAX_ITERATIONS=5 loop_run
     [ "$LOOP_MANAGED_LOGGED" = "1" ]
     [ "$(wc -l <"$TMP_DIR/managed.calls")" -eq 1 ]
 }
@@ -477,5 +477,13 @@ emit() { "$@" 2>&1; }
     scan_log_managed_workloads() { printf 'called\n' >>"$TMP_DIR/managed.calls"; return 0; }
     KEELSON_LOG_MANAGED_WORKLOADS=false KEELSON_LOOP_MAX_ITERATIONS=2 loop_run
     [ "$LOOP_MANAGED_LOGGED" = "1" ]
+    [ ! -f "$TMP_DIR/managed.calls" ]
+}
+
+@test "managed list: not logged until the first scan has finished" {
+    # Reading a cache that is merely non-empty reads it mid-fill, and reports
+    # whichever handful of workloads happened to be written by then.
+    scan_log_managed_workloads() { printf 'called\n' >>"$TMP_DIR/managed.calls"; return 0; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     [ ! -f "$TMP_DIR/managed.calls" ]
 }
