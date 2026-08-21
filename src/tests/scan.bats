@@ -1354,3 +1354,59 @@ SH
     inventory_get Deployment default app
     [ "$INVENTORY_NEXT_DUE" = "9999999999" ]
 }
+
+# --- annotations Keelson does not read must not drive its decisions ---
+
+deployment_with_foreign_annotation() {
+    local image=$1 policy=$2 revision=$3
+    cat <<JSON
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "$policy",
+          "deployment.kubernetes.io/revision": "$revision"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [{"name": "main", "image": "$image"}]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+}
+
+@test "resync: someone else's annotation changing is not a decision change" {
+    # Patching a Deployment makes its own controller bump
+    # deployment.kubernetes.io/revision, so Keelson's own update read back as
+    # a change and asked the registry a question it had just answered.
+    inventory_init
+    kubectl_returns "$(deployment_with_foreign_annotation ghcr.io/x/y:1.2.3 minor 1)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 9999999999
+
+    kubectl_returns "$(deployment_with_foreign_annotation ghcr.io/x/y:1.2.3 minor 2)"
+    run emit scan_run 0 0
+    [[ "$output" != *"scan-resync"* ]]
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "9999999999" ]
+}
+
+@test "resync: a Keelson annotation changing still is one" {
+    inventory_init
+    kubectl_returns "$(deployment_with_foreign_annotation ghcr.io/x/y:1.2.3 minor 1)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 9999999999
+
+    kubectl_returns "$(deployment_with_foreign_annotation ghcr.io/x/y:1.2.3 major 1)"
+    run emit scan_run 0 0
+    [[ "$output" == *"scan-resync"* ]]
+}

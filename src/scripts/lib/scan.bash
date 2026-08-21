@@ -486,11 +486,19 @@ scan_is_keelson_managed() {
 # stable for downstream annotation_get. yq's props output escapes dots in
 # keys with backslashes; we strip only those (iteratively, anchored to the
 # key portion) and leave value-side backslashes intact (regexes need them).
+#
+# Only Keelson's own prefixes survive, which is all annotation_get ever asks
+# for. The rest belong to other people and move constantly: patching a
+# Deployment makes its controller bump deployment.kubernetes.io/revision, and
+# a rollout restart writes kubectl.kubernetes.io/restartedAt. Carried into the
+# record they end up in the fingerprint, where each one reads as "a decision
+# input moved" and forces a poll that can only return what the schedule would.
 scan_flatten_annotations() {
     local list_json=$1 i=$2
     printf '%s' "$list_json" \
         | yq -p=json -o=props ".items[$i].metadata.annotations // {}" 2>/dev/null \
-        | sed -E ':a; s/^([^=]*)\\\./\1./; ta; s/ = /=/'
+        | sed -E ':a; s/^([^=]*)\\\./\1./; ta; s/ = /=/' \
+        | grep -E '^(keelson\.pro|keel\.sh)/' || true
 }
 
 # scan_container <kind> <ns> <name> <list> <container> <image> <annotations>
