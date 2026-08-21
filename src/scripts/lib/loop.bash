@@ -20,6 +20,7 @@
 #   LOOP_WATCHER_ELIGIBLE[<kind>]  earliest unix-seconds we may respawn this kind
 #   LOOP_SCAN_PID                  current scan child PID (0 if none)
 #   LOOP_QUEUE_PID                 current queue-refresh child PID (0 if none)
+#   LOOP_MANAGED_LOGGED            1 once the managed-workload list has been logged
 #
 # Depends on (must be sourced first):
 #   lib/log.bash, lib/clock.bash, lib/queue.bash, lib/state.bash, lib/scan.bash,
@@ -31,6 +32,7 @@ declare -gA LOOP_WATCHER_STARTED=()
 declare -gA LOOP_WATCHER_ELIGIBLE=()
 LOOP_SCAN_PID=0
 LOOP_POLL_PID=0
+LOOP_MANAGED_LOGGED=0
 LOOP_QUEUE_PID=0
 LOOP_REFRESH_PID=0
 declare -ga LOOP_REFRESH_PENDING=()
@@ -244,6 +246,17 @@ loop_run() {
         status_write_heartbeat "$cycle_start_us"
 
         loop_supervise_watchers "$now" "$backoff_max" "$healthy_reset"
+
+        # Once, as soon as a scan has filled the cache. The flag lives here
+        # because the scan runs in a subshell and anything it set would die
+        # with it.
+        if [ "$LOOP_MANAGED_LOGGED" -eq 0 ]; then
+            if [ "${KEELSON_LOG_MANAGED_WORKLOADS:-true}" != "true" ]; then
+                LOOP_MANAGED_LOGGED=1
+            elif scan_log_managed_workloads; then
+                LOOP_MANAGED_LOGGED=1
+            fi
+        fi
 
         # Every tick: re-read whatever the watchers queued. Gated so a slow
         # refresh never overlaps itself; the queue keeps accumulating and the

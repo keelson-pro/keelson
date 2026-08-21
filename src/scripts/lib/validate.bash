@@ -197,6 +197,7 @@ validate_config() {
     validate_decimal_point || errors=$((errors+1))
 
     for var in KEELSON_SCOPE KEELSON_CONFIG_MODE KEELSON_LOG_LEVEL KEELSON_LOG_FORMAT \
+               KEELSON_LOG_MANAGED_WORKLOADS \
                KEELSON_RESPECT_SA_PULL_SECRETS KEELSON_STATE_CONFIGMAP \
                KEELSON_FIELD_MANAGER_STRATEGY_OWNED KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED; do
         validate_env_set "$var" || errors=$((errors+1))
@@ -206,6 +207,7 @@ validate_config() {
     validate_env_enum KEELSON_CONFIG_MODE "keelson keel both" || errors=$((errors+1))
     validate_env_enum KEELSON_LOG_LEVEL "debug info warn error" || errors=$((errors+1))
     validate_env_enum KEELSON_LOG_FORMAT "plain json" || errors=$((errors+1))
+    validate_env_enum KEELSON_LOG_MANAGED_WORKLOADS "true false" || errors=$((errors+1))
     validate_env_enum KEELSON_RESPECT_SA_PULL_SECRETS "true false" || errors=$((errors+1))
     validate_env_enum KEELSON_FIELD_MANAGER_STRATEGY_OWNED "mimic patch" || errors=$((errors+1))
     validate_env_enum KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED "patch claim" || errors=$((errors+1))

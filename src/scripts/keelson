@@ -92,6 +92,7 @@ log_boot_config() {
     config_line log-file-path "${KEELSON_LOG_FILE_PATH:-}"
     config_line log-file-max-bytes "$KEELSON_LOG_FILE_MAX_BYTES"
     config_line log-file-keep "$KEELSON_LOG_FILE_KEEP"
+    config_line log-managed-workloads "$KEELSON_LOG_MANAGED_WORKLOADS"
     config_line log-repeat-interval-debug "$KEELSON_LOG_DEBUG_REPEAT_INTERVAL"
     config_line log-repeat-interval-info "$KEELSON_LOG_INFO_REPEAT_INTERVAL"
     config_line log-repeat-interval-warn "$KEELSON_LOG_WARN_REPEAT_INTERVAL"

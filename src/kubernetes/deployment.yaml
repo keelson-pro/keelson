@@ -67,6 +67,8 @@ spec:
               value: "${Keelson/LogFormat}"
             - name: KEELSON_LOG_LEVEL
               value: "${Keelson/LogLevel}"
+            - name: KEELSON_LOG_MANAGED_WORKLOADS
+              value: "${Keelson/LogManagedWorkloads}"
             - name: KEELSON_SCOPE
               value: "${Keelson/Scope}"
             - name: KEELSON_CONFIG_MODE

@@ -412,6 +412,41 @@ scan_cache_workload() {
         "$sa" "$ips" "$annotations" "$containers"
 }
 
+# scan_log_managed_workloads
+# Lists the workloads Keelson will act on, grouped by namespace, from the
+# cache rather than the cluster. Returns 1 while the cache is still empty, so
+# the caller can try again once a scan has filled it.
+scan_log_managed_workloads() {
+    inventory_enabled || return 0
+    inventory_list
+    local total=${#INVENTORY_ALL[@]}
+    [ "$total" -gt 0 ] || return 1
+
+    local entry kind ns name pad last_ns=
+    local -a rows=()
+    for entry in "${INVENTORY_ALL[@]}"; do
+        read -r kind ns name <<<"$entry"
+        inventory_get "$kind" "$ns" "$name" || continue
+        scan_is_keelson_managed "$INVENTORY_ANNOTATIONS" || continue
+        rows+=("$ns $kind $name")
+    done
+
+    log_info_always managed-workloads managed="${#rows[@]}" cached="$total" \
+        msg="Keelson is managing ${#rows[@]} of $total cached workloads:"
+    [ "${#rows[@]}" -gt 0 ] || return 0
+
+    while read -r ns kind name; do
+        if [ "$ns" != "$last_ns" ]; then
+            log_info_always managed-namespace ns="$ns" msg="  $ns"
+            last_ns=$ns
+        fi
+        printf -v pad '%-11s' "$kind"
+        log_info_always managed-workload kind="$kind" ns="$ns" name="$name" \
+            msg="    $pad $name"
+    done < <(printf '%s\n' "${rows[@]}" | sort)
+    return 0
+}
+
 # scan_is_keelson_managed <annotations>
 # True when the workload carries a policy annotation Keelson will act on,
 # workload-wide or per-container, under the prefix the config mode honours.
