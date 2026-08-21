@@ -591,6 +591,7 @@ scan_container() {
     repo=$(image_repo "$cimage")
     new_image="$repo:$winner"
     if update_apply "$kind" "$ns" "$name" "$clist" "$cname" "$new_image" "$current_tag" "$mf_json" "$ann"; then
+        inventory_set_container_image "$kind" "$ns" "$name" "$clist" "$cname" "$new_image" || true
         _scan_updated=$((_scan_updated + 1))
         _workload_updated=1
         _workload_last_from=$current_tag

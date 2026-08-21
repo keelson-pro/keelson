@@ -265,6 +265,32 @@ inventory_set_next_due() {
         "$INVENTORY_IMAGE_PULL_SECRETS" "$INVENTORY_ANNOTATIONS" "$containers"
 }
 
+# inventory_set_container_image <kind> <ns> <name> <list> <container> <image>
+# Records an image Keelson has just applied, leaving next-due alone. Returns
+# 1 if the workload or the container is unknown.
+#
+# Our own patch fires a watch event like anyone else's, and the re-read that
+# follows compares the cluster against this record. Without writing the new
+# image here that comparison reports a change, brings the poll forward and
+# asks the registry a question it has already answered.
+inventory_set_container_image() {
+    local kind=$1 ns=$2 name=$3 clist=$4 container=$5 image=$6
+    inventory_get "$kind" "$ns" "$name" || return 1
+    local containers= i found=1
+    for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do
+        if [ "${INVENTORY_CONTAINER_LISTS[$i]}" = "$clist" ] \
+                && [ "${INVENTORY_CONTAINER_NAMES[$i]}" = "$container" ]; then
+            INVENTORY_CONTAINER_IMAGES[$i]=$image
+            found=0
+        fi
+        containers="${containers}${INVENTORY_CONTAINER_LISTS[$i]} ${INVENTORY_CONTAINER_NAMES[$i]}=${INVENTORY_CONTAINER_IMAGES[$i]}"$'\n'
+    done
+    [ "$found" -eq 0 ] || return 1
+    inventory_put "$kind" "$ns" "$name" "$INVENTORY_NEXT_DUE" "$INVENTORY_INTERVAL" \
+        "$INVENTORY_SUSPEND" "$INVENTORY_SERVICE_ACCOUNT" \
+        "$INVENTORY_IMAGE_PULL_SECRETS" "$INVENTORY_ANNOTATIONS" "$containers"
+}
+
 # inventory_mark_polled <kind> <ns> <name> <now>
 # Pushes next-due out by the entry's own interval. Returns 1 if unknown.
 inventory_mark_polled() {
