@@ -35,7 +35,7 @@ scan_run() {
     registry_init
 
     local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
-          _scan_no_change=0 _scan_skip=0 _scan_error=0
+          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
 
     # Inventory bookkeeping for this pass. SCAN_SEEN is what the cluster
     # still has; SCAN_LISTED is the kinds we actually managed to list, which
@@ -114,7 +114,7 @@ scan_refresh_kind() {
     inventory_enabled || return 0
 
     local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
-          _scan_no_change=0 _scan_skip=0 _scan_error=0
+          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
     local -A SCAN_SEEN=()
     local -A SCAN_LISTED=()
     local _scan_now _scan_interval=${KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT:-60}
@@ -139,7 +139,8 @@ scan_refresh_kind() {
     done
 
     log_info_always inventory-refreshed kind="$kind" workloads="$count" \
-        msg="Rebuilt the cache for $count $kind workloads from the cluster."
+        managed="$_scan_managed" \
+        msg="Rebuilt the cache for $kind: $_scan_managed of $count are Keelson managed."
     return 0
 }
 
@@ -169,7 +170,7 @@ scan_refresh_queued() {
     inventory_enabled || return 0
 
     local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
-          _scan_no_change=0 _scan_skip=0 _scan_error=0
+          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
     local -A SCAN_SEEN=()
     local -A SCAN_LISTED=()
     local _scan_now _scan_interval=${KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT:-60}
@@ -331,6 +332,9 @@ scan_cache_workload() {
     inventory_enabled || return 0
 
     SCAN_SEEN["$kind $ns $name"]=1
+    if scan_is_keelson_managed "$annotations"; then
+        _scan_managed=$(( _scan_managed + 1 ))
+    fi
 
     # Both lists in one block, each entry carrying the list it came from, so
     # everything downstream keeps a single loop and still knows where to
@@ -406,6 +410,36 @@ scan_cache_workload() {
 
     inventory_put "$kind" "$ns" "$name" "$next_due" "$interval" "$suspend" \
         "$sa" "$ips" "$annotations" "$containers"
+}
+
+# scan_is_keelson_managed <annotations>
+# True when the workload carries a policy annotation Keelson will act on,
+# workload-wide or per-container, under the prefix the config mode honours.
+#
+# policy is the switch: a workload with only poll-schedule or match-tag has
+# configured nothing that acts, and counting it would hide exactly that
+# mistake from whoever made it.
+scan_is_keelson_managed() {
+    local ann=$1 line key
+    local mode=${KEELSON_CONFIG_MODE:-keelson}
+    while IFS= read -r line; do
+        key=${line%%=*}
+        case "$mode" in
+            keelson)
+                case "$key" in keelson.pro/policy|keelson.pro/policy.*) return 0 ;; esac
+                ;;
+            keel)
+                case "$key" in keel.sh/policy|keel.sh/policy.*) return 0 ;; esac
+                ;;
+            *)
+                case "$key" in
+                    keelson.pro/policy|keelson.pro/policy.*|keel.sh/policy|keel.sh/policy.*)
+                        return 0 ;;
+                esac
+                ;;
+        esac
+    done <<< "$ann"
+    return 1
 }
 
 # Flatten one workload's annotations object to lines of "<key>=<value>",
@@ -623,7 +657,7 @@ scan_poll_due() {
     [ "${#INVENTORY_DUE[@]}" -eq 0 ] && return 0
 
     local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
-          _scan_no_change=0 _scan_skip=0 _scan_error=0
+          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
     registry_init
 
     local entry kind ns name i mf_json
