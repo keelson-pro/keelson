@@ -65,6 +65,7 @@ set_required_env() {
     export KEELSON_CONFIG_MODE=keelson
     export KEELSON_LOG_LEVEL=info
     export KEELSON_LOG_FORMAT=plain
+    export KEELSON_LOG_MANAGED_WORKLOADS=true
     export KEELSON_RESPECT_SA_PULL_SECRETS=false
     export KEELSON_STATE_CONFIGMAP=keelson-state
     export KEELSON_WATCHED_KINDS="Deployment CronJob"

@@ -164,7 +164,12 @@ inventory_put() {
     fp=$INVENTORY_COMPUTED_FINGERPRINT
 
     inventory_path "$kind" "$ns" "$name"
-    local tmp="${INVENTORY_PATH}.tmp"
+    # BASHPID, not $$: the tick's refresh, queue-refresh, scan and poll children
+    # are all subshells, where $$ is still the parent's, so one shared temp name
+    # means two of them writing the same workload race and the loser's mv fails
+    # with "cannot stat". A child killed mid-write leaves its temp behind, which
+    # the list globs skip and the next full refresh of that kind removes.
+    local tmp="${INVENTORY_PATH}.${BASHPID}.tmp"
     {
         printf 'kind=%s\n' "$kind"
         printf 'namespace=%s\n' "$ns"
@@ -181,8 +186,20 @@ inventory_put() {
             [ -n "$line" ] && printf 'container=%s\n' "$line"
         done <<< "$containers"
         printf 'fingerprint=%s\n' "$fp"
-    } > "$tmp"
-    mv -f "$tmp" "$INVENTORY_PATH"
+    } > "$tmp" 2>/dev/null || {
+        log_error inventory-write-failed kind="$kind" ns="$ns" name="$name" \
+            path="$tmp" \
+            msg="Could not write the cache record for $kind '$name' in '$ns' to '$tmp'."
+        rm -f "$tmp"
+        return 1
+    }
+    mv -f "$tmp" "$INVENTORY_PATH" 2>/dev/null || {
+        log_error inventory-write-failed kind="$kind" ns="$ns" name="$name" \
+            path="$INVENTORY_PATH" \
+            msg="Could not put the cache record for $kind '$name' in '$ns' in place at '$INVENTORY_PATH'."
+        rm -f "$tmp"
+        return 1
+    }
 }
 
 # inventory_get <kind> <ns> <name>
@@ -261,6 +278,33 @@ inventory_set_next_due() {
         containers="${containers}${INVENTORY_CONTAINER_LISTS[$i]} ${INVENTORY_CONTAINER_NAMES[$i]}=${INVENTORY_CONTAINER_IMAGES[$i]}"$'\n'
     done
     inventory_put "$kind" "$ns" "$name" "$next_due" "$INVENTORY_INTERVAL" \
+        "$INVENTORY_SUSPEND" "$INVENTORY_SERVICE_ACCOUNT" \
+        "$INVENTORY_IMAGE_PULL_SECRETS" "$INVENTORY_ANNOTATIONS" "$containers"
+}
+
+# inventory_set_container_image <kind> <ns> <name> <list> <container> <image>
+# Records an image Keelson has just applied, leaving next-due alone. Returns
+# 1 if the workload or the container is unknown.
+#
+# Our own patch fires a watch event like anyone else's, and the re-read that
+# follows compares the cluster against this record. Without writing the new
+# image here that comparison reports a change, brings the poll forward and
+# asks the registry a question it has already answered.
+inventory_set_container_image() {
+    local kind=$1 ns=$2 name=$3 clist=$4 container=$5 image=$6
+    inventory_enabled || return 0
+    inventory_get "$kind" "$ns" "$name" || return 1
+    local containers= i found=1
+    for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do
+        if [ "${INVENTORY_CONTAINER_LISTS[$i]}" = "$clist" ] \
+                && [ "${INVENTORY_CONTAINER_NAMES[$i]}" = "$container" ]; then
+            INVENTORY_CONTAINER_IMAGES[$i]=$image
+            found=0
+        fi
+        containers="${containers}${INVENTORY_CONTAINER_LISTS[$i]} ${INVENTORY_CONTAINER_NAMES[$i]}=${INVENTORY_CONTAINER_IMAGES[$i]}"$'\n'
+    done
+    [ "$found" -eq 0 ] || return 1
+    inventory_put "$kind" "$ns" "$name" "$INVENTORY_NEXT_DUE" "$INVENTORY_INTERVAL" \
         "$INVENTORY_SUSPEND" "$INVENTORY_SERVICE_ACCOUNT" \
         "$INVENTORY_IMAGE_PULL_SECRETS" "$INVENTORY_ANNOTATIONS" "$containers"
 }

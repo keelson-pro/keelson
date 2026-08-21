@@ -27,6 +27,11 @@
 #   lib/log.bash, lib/clock.bash, lib/queue.bash, lib/status.bash,
 #   lib/inventory.bash
 
+# A stream lasting this long before ending is the API server's own idle
+# timeout, not a fault: those land in the 1800-3600s band all day and all
+# night. Shorter than this is worth a warn.
+WATCH_ROUTINE_STREAM_SECONDS=1800
+
 # watch_run_kind <kind>
 # Long-running reconnect loop. Each iteration runs one kubectl --watch
 # until it exits, then sleeps with exponential backoff before retrying.
@@ -55,7 +60,7 @@ watch_run_kind() {
     mkdir -p "$KEELSON_STATUS_DIR" 2>/dev/null || true
     status_write_watcher_health "$kind" 0 ""
     while [ "$max_iter" -eq 0 ] || [ "$iter" -lt "$max_iter" ]; do
-        log_info watch-start kind="$kind" \
+        log_debug watch-start kind="$kind" \
             msg="Watching kind '$kind' for changes."
         clock_read
         opened=$CLOCK_NOW_US
@@ -102,8 +107,10 @@ watch_run_kind() {
                 fails=0
                 status_write_watcher_health "$kind" 0 ""
             fi
-            log_warn watch-disconnected kind="$kind" backoff="$backoff" held="$held" \
-                msg="Watch for kind '$kind' held ${held}s then disconnected; reconnecting in ${backoff}s."
+            local level=log_warn
+            [ "$held" -ge "$WATCH_ROUTINE_STREAM_SECONDS" ] && level=log_debug
+            "$level" watch-disconnected kind="$kind" backoff="$backoff" held="$held" \
+                msg="Watch for kind '$kind' lasted ${held}s before disconnecting."
         fi
         sleep "$backoff"
         backoff=$(( backoff * 2 ))

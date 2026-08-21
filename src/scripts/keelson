@@ -54,6 +54,51 @@ Configuration is via env (see KEELSON_* in Configuration.md).
 USAGE
 }
 
+config_line() {
+    local pad
+    printf -v pad '%-30s' "$1"
+    log_info_always config setting="$1" value="$2" msg="  $pad = $2"
+}
+
+# Every setting Keelson read, once, at boot. A pod behaving differently from
+# its neighbour is usually configured differently from it, and this is the
+# cheapest way to see that without reaching for the Deployment.
+log_boot_config() {
+    log_info_always config-header msg="Keelson configuration from environment:"
+    config_line scope "$KEELSON_SCOPE"
+    if [ "$KEELSON_SCOPE" = "namespace" ]; then
+        config_line namespace "${KEELSON_NAMESPACE:-}"
+    fi
+    config_line config-mode "$KEELSON_CONFIG_MODE"
+    config_line watched-kinds "$KEELSON_WATCHED_KINDS"
+    config_line dry-run "${KEELSON_DRY_RUN:-0}"
+    config_line respect-sa-pull-secrets "$KEELSON_RESPECT_SA_PULL_SECRETS"
+    config_line field-manager-strategy-owned "$KEELSON_FIELD_MANAGER_STRATEGY_OWNED"
+    config_line field-manager-strategy-unowned "$KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED"
+    config_line state-configmap "$KEELSON_STATE_CONFIGMAP"
+    config_line registries-file "${KEELSON_REGISTRIES_FILE:-}"
+    config_line tick-interval "$KEELSON_TICK_INTERVAL"
+    config_line reconcile-interval "$KEELSON_RECONCILE_INTERVAL"
+    config_line registry-poll-interval-default "$KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT"
+    config_line full-refresh-interval "$KEELSON_FULL_REFRESH_INTERVAL"
+    config_line heartbeat-max-age "$KEELSON_HEARTBEAT_MAX_AGE"
+    config_line watcher-respawn-backoff-max "$KEELSON_WATCHER_RESPAWN_BACKOFF_MAX"
+    config_line watcher-respawn-healthy-reset "$KEELSON_WATCHER_RESPAWN_HEALTHY_RESET"
+    config_line watcher-reconnect-initial "$KEELSON_WATCHER_RECONNECT_INITIAL"
+    config_line watcher-reconnect-max "$KEELSON_WATCHER_RECONNECT_MAX"
+    config_line watcher-reconnect-reset "$KEELSON_WATCHER_RECONNECT_RESET"
+    config_line log-level "$KEELSON_LOG_LEVEL"
+    config_line log-format "$KEELSON_LOG_FORMAT"
+    config_line log-file-path "${KEELSON_LOG_FILE_PATH:-}"
+    config_line log-file-max-bytes "$KEELSON_LOG_FILE_MAX_BYTES"
+    config_line log-file-keep "$KEELSON_LOG_FILE_KEEP"
+    config_line log-managed-workloads "$KEELSON_LOG_MANAGED_WORKLOADS"
+    config_line log-repeat-interval-debug "$KEELSON_LOG_DEBUG_REPEAT_INTERVAL"
+    config_line log-repeat-interval-info "$KEELSON_LOG_INFO_REPEAT_INTERVAL"
+    config_line log-repeat-interval-warn "$KEELSON_LOG_WARN_REPEAT_INTERVAL"
+    config_line log-repeat-interval-error "$KEELSON_LOG_ERROR_REPEAT_INTERVAL"
+}
+
 shutdown() {
     local sig=${1:-unknown}
     log_info_always shutdown signal="$sig" \
@@ -69,14 +114,12 @@ main() {
 
     validate_config
 
+    state_own_namespace || true
     log_info_always boot \
         version="${KEELSON_VERSION:-0.0.0-DEV-VERSION}" \
-        scope="$KEELSON_SCOPE" \
-        config-mode="$KEELSON_CONFIG_MODE" \
-        poll-interval="$KEELSON_RECONCILE_INTERVAL" \
-        tick-interval="$KEELSON_TICK_INTERVAL" \
-        dry-run="${KEELSON_DRY_RUN:-0}" \
-        msg="Keelson ${KEELSON_VERSION:-0.0.0-DEV-VERSION} booting in '$KEELSON_SCOPE' scope (config-mode='$KEELSON_CONFIG_MODE', poll-interval=${KEELSON_RECONCILE_INTERVAL}s, tick-interval=${KEELSON_TICK_INTERVAL}s, dry-run=${KEELSON_DRY_RUN:-0})."
+        ns="${STATE_NAMESPACE:-unknown}" \
+        msg="Keelson ${KEELSON_VERSION:-0.0.0-DEV-VERSION} booting in ns '${STATE_NAMESPACE:-unknown}'."
+    log_boot_config
 
     trap 'shutdown SIGTERM' TERM
     trap 'shutdown SIGINT' INT

@@ -35,7 +35,7 @@ scan_run() {
     registry_init
 
     local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
-          _scan_no_change=0 _scan_skip=0 _scan_error=0
+          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
 
     # Inventory bookkeeping for this pass. SCAN_SEEN is what the cluster
     # still has; SCAN_LISTED is the kinds we actually managed to list, which
@@ -114,7 +114,7 @@ scan_refresh_kind() {
     inventory_enabled || return 0
 
     local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
-          _scan_no_change=0 _scan_skip=0 _scan_error=0
+          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
     local -A SCAN_SEEN=()
     local -A SCAN_LISTED=()
     local _scan_now _scan_interval=${KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT:-60}
@@ -139,7 +139,8 @@ scan_refresh_kind() {
     done
 
     log_info_always inventory-refreshed kind="$kind" workloads="$count" \
-        msg="Rebuilt the cache for $count $kind workloads from the cluster."
+        managed="$_scan_managed" \
+        msg="Rebuilt the cache for $kind: $_scan_managed of $count are Keelson managed."
     return 0
 }
 
@@ -169,7 +170,7 @@ scan_refresh_queued() {
     inventory_enabled || return 0
 
     local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
-          _scan_no_change=0 _scan_skip=0 _scan_error=0
+          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
     local -A SCAN_SEEN=()
     local -A SCAN_LISTED=()
     local _scan_now _scan_interval=${KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT:-60}
@@ -282,6 +283,14 @@ scan_workload() {
     local n j clist cjson cname cimage _workload_updated=0 \
           _workload_last_from="" _workload_last_to="" _workload_last_repo=""
 
+    # Cached before anything is polled, because an update records the image it
+    # applied against this record and caching afterwards would write the
+    # pre-update one back over it.
+    # A workload whose record could not be written is one workload lost until
+    # the next pass, not a reason to abandon the other thirty in this one.
+    scan_cache_workload "$kind" "$ns" "$name" "$annotations" "$suspend" \
+        "$sa_name" "$ips_json" "$containers_json" "$init_containers_json" || true
+
     if [ "$_scan_poll_all" -eq 1 ]; then
         for clist in containers initContainers; do
             if [ "$clist" = containers ]; then
@@ -299,9 +308,6 @@ scan_workload() {
             done
         done
     fi
-
-    scan_cache_workload "$kind" "$ns" "$name" "$annotations" "$suspend" \
-        "$sa_name" "$ips_json" "$containers_json" "$init_containers_json"
 
     # Only when this pass polled. The trigger's always-once rule fires on
     # "no prior triggered-job recorded", and every cache-refresh path -- the
@@ -331,6 +337,9 @@ scan_cache_workload() {
     inventory_enabled || return 0
 
     SCAN_SEEN["$kind $ns $name"]=1
+    if scan_is_keelson_managed "$annotations"; then
+        _scan_managed=$(( _scan_managed + 1 ))
+    fi
 
     # Both lists in one block, each entry carrying the list it came from, so
     # everything downstream keeps a single loop and still knows where to
@@ -406,6 +415,71 @@ scan_cache_workload() {
 
     inventory_put "$kind" "$ns" "$name" "$next_due" "$interval" "$suspend" \
         "$sa" "$ips" "$annotations" "$containers"
+}
+
+# scan_log_managed_workloads
+# Lists the workloads Keelson will act on, grouped by namespace, from the
+# cache rather than the cluster. Returns 1 while the cache is still empty, so
+# the caller can try again once a scan has filled it.
+scan_log_managed_workloads() {
+    inventory_enabled || return 0
+    inventory_list
+    local total=${#INVENTORY_ALL[@]}
+    [ "$total" -gt 0 ] || return 1
+
+    local entry kind ns name pad last_ns=
+    local -a rows=()
+    for entry in "${INVENTORY_ALL[@]}"; do
+        read -r kind ns name <<<"$entry"
+        inventory_get "$kind" "$ns" "$name" || continue
+        scan_is_keelson_managed "$INVENTORY_ANNOTATIONS" || continue
+        rows+=("$ns $kind $name")
+    done
+
+    log_info_always managed-workloads managed="${#rows[@]}" cached="$total" \
+        msg="Keelson is managing ${#rows[@]} of $total cached workloads:"
+    [ "${#rows[@]}" -gt 0 ] || return 0
+
+    while read -r ns kind name; do
+        if [ "$ns" != "$last_ns" ]; then
+            log_info_always managed-namespace ns="$ns" msg="  $ns"
+            last_ns=$ns
+        fi
+        printf -v pad '%-11s' "$kind"
+        log_info_always managed-workload kind="$kind" ns="$ns" name="$name" \
+            msg="    $pad $name"
+    done < <(printf '%s\n' "${rows[@]}" | sort)
+    return 0
+}
+
+# scan_is_keelson_managed <annotations>
+# True when the workload carries a policy annotation Keelson will act on,
+# workload-wide or per-container, under the prefix the config mode honours.
+#
+# policy is the switch: a workload with only poll-schedule or match-tag has
+# configured nothing that acts, and counting it would hide exactly that
+# mistake from whoever made it.
+scan_is_keelson_managed() {
+    local ann=$1 line key
+    local mode=${KEELSON_CONFIG_MODE:-keelson}
+    while IFS= read -r line; do
+        key=${line%%=*}
+        case "$mode" in
+            keelson)
+                case "$key" in keelson.pro/policy|keelson.pro/policy.*) return 0 ;; esac
+                ;;
+            keel)
+                case "$key" in keel.sh/policy|keel.sh/policy.*) return 0 ;; esac
+                ;;
+            *)
+                case "$key" in
+                    keelson.pro/policy|keelson.pro/policy.*|keel.sh/policy|keel.sh/policy.*)
+                        return 0 ;;
+                esac
+                ;;
+        esac
+    done <<< "$ann"
+    return 1
 }
 
 # Flatten one workload's annotations object to lines of "<key>=<value>",
@@ -522,6 +596,10 @@ scan_container() {
     repo=$(image_repo "$cimage")
     new_image="$repo:$winner"
     if update_apply "$kind" "$ns" "$name" "$clist" "$cname" "$new_image" "$current_tag" "$mf_json" "$ann"; then
+        inventory_set_container_image "$kind" "$ns" "$name" "$clist" "$cname" "$new_image" \
+            || log_warn inventory-image-not-recorded \
+                kind="$kind" ns="$ns" name="$name" container="$cname" \
+                msg="Could not record the applied image for $kind '$name'/$cname in '$ns' against its cache record; the re-read after this update will resync it instead."
         _scan_updated=$((_scan_updated + 1))
         _workload_updated=1
         _workload_last_from=$current_tag
@@ -623,7 +701,7 @@ scan_poll_due() {
     [ "${#INVENTORY_DUE[@]}" -eq 0 ] && return 0
 
     local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
-          _scan_no_change=0 _scan_skip=0 _scan_error=0
+          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
     registry_init
 
     local entry kind ns name i mf_json
@@ -651,7 +729,9 @@ scan_poll_due() {
                 "$_workload_last_from" "$_workload_last_to" "$_workload_last_repo"
         fi
 
-        inventory_mark_polled "$kind" "$ns" "$name" "$now"
+        inventory_mark_polled "$kind" "$ns" "$name" "$now" \
+            || log_warn inventory-not-rescheduled kind="$kind" ns="$ns" name="$name" \
+                msg="Could not push $kind '$name' in '$ns' out to its next poll; it left the cache between being read as due and being polled."
         inventory_get "$kind" "$ns" "$name" \
             && state_set_next_due "$kind" "$ns" "$name" "$INVENTORY_NEXT_DUE"
     done

@@ -456,3 +456,26 @@ emit() { "$@" 2>&1; }
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     [ -f "$TMP_DIR/queue.calls" ]
 }
+
+# --- the managed-workload listing fires once, when there is something to say ---
+
+@test "managed list: not logged while the cache is still empty" {
+    scan_log_managed_workloads() { printf 'called\n' >>"$TMP_DIR/managed.calls"; return 1; }
+    KEELSON_LOOP_MAX_ITERATIONS=2 loop_run
+    [ "$LOOP_MANAGED_LOGGED" = "0" ]
+    [ "$(wc -l <"$TMP_DIR/managed.calls")" -eq 2 ]
+}
+
+@test "managed list: logged once and never again" {
+    scan_log_managed_workloads() { printf 'called\n' >>"$TMP_DIR/managed.calls"; return 0; }
+    KEELSON_LOOP_MAX_ITERATIONS=3 loop_run
+    [ "$LOOP_MANAGED_LOGGED" = "1" ]
+    [ "$(wc -l <"$TMP_DIR/managed.calls")" -eq 1 ]
+}
+
+@test "managed list: disabled means the cache is never even read" {
+    scan_log_managed_workloads() { printf 'called\n' >>"$TMP_DIR/managed.calls"; return 0; }
+    KEELSON_LOG_MANAGED_WORKLOADS=false KEELSON_LOOP_MAX_ITERATIONS=2 loop_run
+    [ "$LOOP_MANAGED_LOGGED" = "1" ]
+    [ ! -f "$TMP_DIR/managed.calls" ]
+}

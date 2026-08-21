@@ -130,12 +130,12 @@ SH
 exit 0
 SH
     KEELSON_WATCH_MAX_ITERATIONS=2 KEELSON_WATCHER_RECONNECT_INITIAL=1 \
+    KEELSON_LOG_LEVEL=debug \
         run emit watch_run_kind Deployment
     [ "$status" -eq 0 ]
     # Two iterations -> two "Watching kind" log lines.
     [ "$(printf '%s\n' "$output" | grep -c "Watching kind 'Deployment'")" = "2" ]
-    [[ "$output" == *"Watch for kind 'Deployment' held"* ]]
-    [[ "$output" == *"then disconnected"* ]]
+    [[ "$output" == *"Watch for kind 'Deployment' lasted"* ]]
     # Each iteration enqueued the same identity; dedupe leaves one file.
     [ -f "$KEELSON_QUEUE_DIR/Deployment--default--app" ]
 }
@@ -171,7 +171,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-    KEELSON_WATCH_MAX_ITERATIONS=3 run emit watch_run_kind CronJob
+    KEELSON_WATCH_MAX_ITERATIONS=3 KEELSON_LOG_LEVEL=debug run emit watch_run_kind CronJob
     [ "$status" -eq 0 ]
     # All three iterations ran: set -e did not kill the loop on the first.
     [ "$(printf '%s\n' "$output" | grep -c "Watching kind 'CronJob'")" = "3" ]
@@ -386,7 +386,7 @@ SH
     [ "$(tr '\n' ' ' <"$TMP_DIR/sleeps")" = "1 2 1 1 " ]
 }
 
-@test "watch_run_kind: reports how long the stream held" {
+@test "watch_run_kind: reports how long the stream lasted" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -398,7 +398,7 @@ SH
     KEELSON_WATCH_MAX_ITERATIONS=1 \
     KEELSON_WATCHER_RECONNECT_RESET=30 \
         run emit watch_run_kind Deployment
-    [[ "$output" == *"held"* ]]
+    [[ "$output" == *"lasted 0s before disconnecting"* ]]
 }
 
 # --- events become work, not conclusions ---
@@ -521,4 +521,55 @@ exit 0
 SH
     watch_kubectl_stream CronJob >/dev/null
     ! grep -q -- "jobTemplate" "$TMP_DIR/kubectl.args"
+}
+
+# --- what a healthy watcher is allowed to say ---
+#
+# A stream ending after half an hour is the API server's idle timeout, which
+# happened all night on a working cluster. Only a short one is a signal.
+
+@test "watch_run_kind: reopening a stream is not an info-level event" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=info \
+        run emit watch_run_kind Deployment
+    [[ "$output" != *"Watching kind"* ]]
+}
+
+@test "watch_run_kind: a routine-length stream ending is not a warn" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    # The stream lasts no time at all here, so move the threshold instead.
+    WATCH_ROUTINE_STREAM_SECONDS=0
+    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=info \
+        run emit watch_run_kind Deployment
+    [[ "$output" != *"lasted"* ]]
+}
+
+@test "watch_run_kind: a short stream ending is a warn" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    WATCH_ROUTINE_STREAM_SECONDS=1800
+    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=info \
+        run emit watch_run_kind Deployment
+    [[ "$output" == *"WARN"* ]]
+    [[ "$output" == *"lasted 0s before disconnecting"* ]]
 }

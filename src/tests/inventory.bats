@@ -17,6 +17,9 @@ setup() {
     inventory_init
 }
 
+# Logs are emitted on stderr; merge to stdout so `run` captures them.
+emit() { "$@" 2>&1; }
+
 # A workload with one container and two annotations.
 put_simple() {
     local next_due=${1:-1700} interval=${2:-60}
@@ -354,4 +357,80 @@ put_simple() {
     inventory_evict_unwatched "Deployment CronJob"
     inventory_list
     [ "${#INVENTORY_ALL[@]}" -eq 2 ]
+}
+
+# --- concurrent writers ---
+
+@test "put: a failed write logs and returns 1 rather than killing the pass" {
+    KEELSON_INVENTORY_DIR="$TMP_DIR/inventory/absent/deeper"
+    run emit inventory_put Deployment default web 1700 60 "" default '[]' '' \
+        'containers main=a:1'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Could not write the cache record"* ]]
+}
+
+@test "put: a failed write leaves no scratch file behind" {
+    chmod 500 "$KEELSON_INVENTORY_DIR"
+    inventory_put Deployment default web 1700 60 "" default '[]' '' \
+        'containers main=a:1' 2>/dev/null || true
+    chmod 700 "$KEELSON_INVENTORY_DIR"
+    [ -z "$(find "$KEELSON_INVENTORY_DIR" -name '*.tmp' -print -quit)" ]
+}
+
+@test "put: a successful write leaves no scratch file behind" {
+    put_simple
+    [ -z "$(find "$KEELSON_INVENTORY_DIR" -name '*.tmp' -print -quit)" ]
+}
+
+# --- recording an image Keelson just applied ---
+
+@test "set_container_image: replaces the image and keeps the schedule" {
+    inventory_put Deployment default web 4242 60 "" default '[]' '' \
+        "$(printf 'containers main=a:1\ninitContainers migrate=m:1')"
+    inventory_set_container_image Deployment default web containers main a:2
+    inventory_get Deployment default web
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "a:2" ]
+    [ "${INVENTORY_CONTAINER_IMAGES[1]}" = "m:1" ]
+    [ "$INVENTORY_NEXT_DUE" = "4242" ]
+}
+
+@test "set_container_image: an init container is matched on its own list" {
+    inventory_put Deployment default web 4242 60 "" default '[]' '' \
+        "$(printf 'containers main=a:1\ninitContainers migrate=m:1')"
+    inventory_set_container_image Deployment default web initContainers migrate m:2
+    inventory_get Deployment default web
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "a:1" ]
+    [ "${INVENTORY_CONTAINER_IMAGES[1]}" = "m:2" ]
+}
+
+@test "set_container_image: the wrong list matches nothing and returns 1" {
+    inventory_put Deployment default web 4242 60 "" default '[]' '' \
+        'containers main=a:1'
+    run inventory_set_container_image Deployment default web initContainers main a:2
+    [ "$status" -eq 1 ]
+}
+
+@test "set_container_image: an unknown workload returns 1" {
+    run inventory_set_container_image Deployment default ghost containers main a:2
+    [ "$status" -eq 1 ]
+}
+
+@test "set_container_image: no cache at all is not an error" {
+    # The keelson-boot-scan CLI runs with no inventory to keep current, so a
+    # warn at the call site would fire on every update it makes.
+    KEELSON_INVENTORY_DIR="$TMP_DIR/absent"
+    run inventory_set_container_image Deployment default web containers main a:2
+    [ "$status" -eq 0 ]
+}
+
+@test "set_container_image: the record fingerprints as the new image" {
+    # The whole point: the re-read after our own patch must compare equal, or
+    # it resyncs and asks the registry a question it has already answered.
+    inventory_put Deployment default web 4242 60 "" default '[]' '' \
+        'containers main=a:1'
+    inventory_set_container_image Deployment default web containers main a:2
+    inventory_get Deployment default web
+    local after=$INVENTORY_FINGERPRINT
+    inventory_fingerprint 60 "" default '[]' '' 'containers main=a:2'
+    [ "$INVENTORY_COMPUTED_FINGERPRINT" = "$after" ]
 }
