@@ -56,6 +56,30 @@ validate_env_non_negative_int() {
     esac
 }
 
+# validate_heartbeat_headroom
+# KEELSON_HEARTBEAT_MAX_AGE must allow at least two ticks.
+#
+# The loop writes the heartbeat once per tick, so an allowance equal to the
+# tick leaves no room at all: every probe then turns on whether the loop got
+# scheduled a few milliseconds early or late, and the kubelet kills a healthy
+# controller. Two ticks means one whole tick may be missed before liveness is
+# entitled to call the loop wedged.
+#
+# Silent when either value is not a positive integer: the loop above has
+# already reported that, and a second error about their ratio would only
+# bury it.
+validate_heartbeat_headroom() {
+    local tick=${KEELSON_TICK_INTERVAL:-} max=${KEELSON_HEARTBEAT_MAX_AGE:-} min
+    case "$tick" in ''|*[!0-9]*|0) return 0 ;; esac
+    case "$max" in ''|*[!0-9]*|0) return 0 ;; esac
+    min=$(( tick * 2 ))
+    [ "$max" -ge "$min" ] && return 0
+    log_error validate-heartbeat-max-age-too-tight \
+        tick="$tick" max-age="$max" minimum="$min" \
+        msg="Validation failed: KEELSON_HEARTBEAT_MAX_AGE is ${max}s against a KEELSON_TICK_INTERVAL of ${tick}s; it must be at least ${min}s (two ticks) or the liveness probe kills a healthy loop on scheduling jitter."
+    return 1
+}
+
 validate_env_kinds() {
     local kind value=${KEELSON_WATCHED_KINDS:-}
     if [ -z "$value" ]; then
@@ -231,6 +255,8 @@ validate_config() {
                KEELSON_LOG_WARN_REPEAT_INTERVAL KEELSON_LOG_ERROR_REPEAT_INTERVAL; do
         validate_env_set "$var" && validate_env_non_negative_int "$var" || errors=$((errors+1))
     done
+
+    validate_heartbeat_headroom || errors=$((errors+1))
 
     validate_env_kinds || errors=$((errors+1))
 
