@@ -147,7 +147,7 @@ validate_yq_v4() {
 validate_registries_auth_modes() {
     [ -r "$KEELSON_REGISTRIES_FILE" ] || return 0
     local modes mode errors=0
-    if ! modes=$(yq -p=yaml '.registries[].auth-mode // ""' "$KEELSON_REGISTRIES_FILE" 2>/dev/null | sort -u); then
+    if ! modes=$(yq -o=y -p=yaml '.registries[].auth-mode // ""' "$KEELSON_REGISTRIES_FILE" 2>/dev/null | sort -u); then
         log_error validate-registries-parse-failed file="$KEELSON_REGISTRIES_FILE" \
             msg="Validation failed: could not parse registries file '$KEELSON_REGISTRIES_FILE'."
         return 1

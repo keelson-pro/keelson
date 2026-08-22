@@ -51,7 +51,7 @@ registry_init() {
     _REGISTRY_CONFIG_LOADED=1
     [ ! -r "$file" ] && return 0
     local hosts host entry
-    hosts=$(yq '.registries // {} | keys | .[]' "$file" 2>/dev/null) || return 0
+    hosts=$(yq -o=y '.registries // {} | keys | .[]' "$file" 2>/dev/null) || return 0
     [ -z "$hosts" ] && return 0
     while IFS= read -r host; do
         [ -z "$host" ] && continue
@@ -146,7 +146,7 @@ registry_creds_central() {
         printf ''
         return 0
     fi
-    auth_mode=$(printf '%s' "$cfg" | yq -p=json '."auth-mode"')
+    auth_mode=$(printf '%s' "$cfg" | yq -p=json -o=y '."auth-mode"')
     case "$auth_mode" in
         secret)   registry_creds_secret "$cfg" "$host" ;;
         aws-irsa) registry_creds_aws_irsa "$host" ;;
@@ -163,7 +163,7 @@ registry_creds_central() {
 registry_creds_secret() {
     local cfg=$1 host=$2
     local ns
-    ns=$(printf '%s' "$cfg" | yq -p=json '.namespace // ""')
+    ns=$(printf '%s' "$cfg" | yq -p=json -o=y '.namespace // ""')
     if [ -z "$ns" ] || [ "$ns" = "null" ]; then
         ns=$(registry_own_namespace)
     fi
@@ -180,12 +180,12 @@ registry_creds_from_pull_secrets() {
     [ -z "$ips_json" ] && return 1
     [ "$ips_json" = "null" ] && return 1
     local count i name creds
-    count=$(printf '%s' "$ips_json" | yq -p=json 'length // 0')
+    count=$(printf '%s' "$ips_json" | yq -p=json -o=y 'length // 0')
     if [ -z "$count" ] || [ "$count" -eq 0 ]; then
         return 1
     fi
     for ((i=0; i<count; i++)); do
-        name=$(printf '%s' "$ips_json" | yq -p=json ".[$i].name")
+        name=$(printf '%s' "$ips_json" | yq -p=json -o=y ".[$i].name")
         if creds=$(registry_creds_from_named_secret "$name" "$ns" "$host") \
                 && [ -n "$creds" ]; then
             printf '%s' "$creds"
@@ -203,7 +203,7 @@ registry_creds_from_named_secret() {
     [ -z "$b64" ] && return 1
     dockerconfig=$(printf '%s' "$b64" | base64 -d 2>/dev/null) || return 1
     auth=$(printf '%s' "$dockerconfig" \
-            | yq -p=json '.auths."'"$host"'".auth // ""')
+            | yq -p=json -o=y '.auths."'"$host"'".auth // ""')
     if [ -z "$auth" ] || [ "$auth" = "null" ]; then
         return 1
     fi
@@ -214,8 +214,8 @@ registry_creds_aws_irsa() {
     local host=$1 raw user secret
     raw=$(printf '%s' "$host" | docker-credential-ecr-login get 2>/dev/null) || return 1
     [ -z "$raw" ] && return 1
-    user=$(printf '%s' "$raw" | yq -p=json '.Username')
-    secret=$(printf '%s' "$raw" | yq -p=json '.Secret')
+    user=$(printf '%s' "$raw" | yq -p=json -o=y '.Username')
+    secret=$(printf '%s' "$raw" | yq -p=json -o=y '.Secret')
     if [ -z "$user" ] || [ -z "$secret" ]; then
         return 1
     fi
@@ -226,7 +226,7 @@ registry_creds_gcp_wi() {
     local token
     token=$(curl -fsSL -H 'Metadata-Flavor: Google' \
         'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
-        2>/dev/null | yq -p=json '.access_token') || return 1
+        2>/dev/null | yq -p=json -o=y '.access_token') || return 1
     if [ -z "$token" ] || [ "$token" = "null" ]; then
         return 1
     fi
@@ -247,7 +247,7 @@ registry_creds_azure_wi() {
         --data-urlencode "client_assertion=${fed_token}" \
         --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
         --data-urlencode "grant_type=client_credentials" \
-        2>/dev/null | yq -p=json '.access_token') || return 1
+        2>/dev/null | yq -p=json -o=y '.access_token') || return 1
     if [ -z "$aad_token" ] || [ "$aad_token" = "null" ]; then
         return 1
     fi
@@ -256,7 +256,7 @@ registry_creds_azure_wi() {
         --data-urlencode "grant_type=access_token" \
         --data-urlencode "service=${host}" \
         --data-urlencode "access_token=${aad_token}" \
-        2>/dev/null | yq -p=json '.refresh_token') || return 1
+        2>/dev/null | yq -p=json -o=y '.refresh_token') || return 1
     if [ -z "$refresh" ] || [ "$refresh" = "null" ]; then
         return 1
     fi
@@ -288,5 +288,5 @@ registry_list_tags() {
         fi
     fi
     [ -n "$tmperr" ] && rm -f "$tmperr"
-    printf '%s' "$out" | yq -p=json '.Tags[]'
+    printf '%s' "$out" | yq -p=json -o=y '.Tags[]'
 }

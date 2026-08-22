@@ -32,7 +32,7 @@ managedfields_apply_owner_of_image() {
     local mf_json=$1 clist=${2:-containers} container=$3
     [ -z "$mf_json" ] && return 0
     local count i entry hit op manager t
-    count=$(printf '%s' "$mf_json" | yq -p=json 'length // 0' 2>/dev/null)
+    count=$(printf '%s' "$mf_json" | yq -p=json -o=y 'length // 0' 2>/dev/null)
     if [ -z "$count" ] || [ "$count" = "null" ] || [ "$count" -eq 0 ]; then
         return 0
     fi
@@ -42,14 +42,14 @@ managedfields_apply_owner_of_image() {
     local best_manager="" best_time=""
     for ((i=0; i<count; i++)); do
         entry=$(printf '%s' "$mf_json" | yq -p=json -o=json ".[$i]" 2>/dev/null)
-        op=$(printf '%s' "$entry" | yq -p=json '.operation' 2>/dev/null)
+        op=$(printf '%s' "$entry" | yq -p=json -o=y '.operation' 2>/dev/null)
         [ "$op" = "Apply" ] || continue
         hit=$(printf '%s' "$entry" | yq -p=json -o=json "$expr" 2>/dev/null)
         if [ -z "$hit" ] || [ "$hit" = "null" ]; then
             continue
         fi
-        manager=$(printf '%s' "$entry" | yq -p=json '.manager' 2>/dev/null)
-        t=$(printf '%s' "$entry" | yq -p=json '.time // ""' 2>/dev/null)
+        manager=$(printf '%s' "$entry" | yq -p=json -o=y '.manager' 2>/dev/null)
+        t=$(printf '%s' "$entry" | yq -p=json -o=y '.time // ""' 2>/dev/null)
         if [ -z "$best_manager" ] || [[ "$t" > "$best_time" ]]; then
             best_manager=$manager
             best_time=$t

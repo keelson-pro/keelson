@@ -130,7 +130,7 @@ scan_refresh_kind() {
 
     inventory_evict_kind "$kind"
 
-    count=$(printf '%s' "$list_json" | yq -p=json '.items | length // 0')
+    count=$(printf '%s' "$list_json" | yq -p=json -o=y '.items | length // 0')
     if [ -z "$count" ] || [ "$count" = "null" ]; then
         count=0
     fi
@@ -219,7 +219,7 @@ scan_refresh_workload() {
             msg="Could not re-read $kind '$name' in '$ns'; leaving its cache record as it was."
         return 0
     fi
-    count=$(printf '%s' "$obj_json" | yq -p=json '.items | length // 0')
+    count=$(printf '%s' "$obj_json" | yq -p=json -o=y '.items | length // 0')
     [ "$count" = "1" ] || return 0
     scan_workload "$obj_json" "$kind" 0
 }
@@ -234,7 +234,7 @@ scan_kind() {
     fi
     # Only a kind we actually listed is a candidate for eviction below.
     SCAN_LISTED["$kind"]=1
-    count=$(printf '%s' "$list_json" | yq -p=json '.items | length // 0')
+    count=$(printf '%s' "$list_json" | yq -p=json -o=y '.items | length // 0')
     if [ -z "$count" ] || [ "$count" = "null" ]; then
         count=0
     fi
@@ -250,8 +250,8 @@ scan_workload() {
           ips_path sa_path containers_json init_containers_json \
           ips_json mf_json suspend sa_name
 
-    ns=$(printf '%s' "$list_json" | yq -p=json ".items[$i].metadata.namespace")
-    name=$(printf '%s' "$list_json" | yq -p=json ".items[$i].metadata.name")
+    ns=$(printf '%s' "$list_json" | yq -p=json -o=y ".items[$i].metadata.namespace")
+    name=$(printf '%s' "$list_json" | yq -p=json -o=y ".items[$i].metadata.name")
     annotations=$(scan_flatten_annotations "$list_json" "$i")
     mf_json=$(printf '%s' "$list_json" \
         | yq -p=json -o=json ".items[$i].metadata.managedFields // []")
@@ -259,7 +259,7 @@ scan_workload() {
     suspend=""
     if [ "$kind" = "CronJob" ]; then
         suspend=$(printf '%s' "$list_json" \
-            | yq -p=json ".items[$i].spec.suspend // false")
+            | yq -p=json -o=y ".items[$i].spec.suspend // false")
     fi
 
     containers_path=$(workload_containers_path "$kind")
@@ -278,7 +278,7 @@ scan_workload() {
     # kubelet behaviour at pod admission. Drives the SA-imagePullSecrets
     # walk that is gated by KEELSON_RESPECT_SA_PULL_SECRETS.
     sa_name=$(printf '%s' "$list_json" \
-        | yq -p=json ".items[$i]$sa_path // \"default\"")
+        | yq -p=json -o=y ".items[$i]$sa_path // \"default\"")
 
     local n j clist cjson cname cimage _workload_updated=0 \
           _workload_last_from="" _workload_last_to="" _workload_last_repo=""
@@ -298,10 +298,10 @@ scan_workload() {
             else
                 cjson=$init_containers_json
             fi
-            n=$(printf '%s' "$cjson" | yq -p=json 'length')
+            n=$(printf '%s' "$cjson" | yq -p=json -o=y 'length')
             for ((j=0; j<n; j++)); do
-                cname=$(printf '%s' "$cjson" | yq -p=json ".[$j].name")
-                cimage=$(printf '%s' "$cjson" | yq -p=json ".[$j].image")
+                cname=$(printf '%s' "$cjson" | yq -p=json -o=y ".[$j].name")
+                cimage=$(printf '%s' "$cjson" | yq -p=json -o=y ".[$j].image")
                 _scan_total=$((_scan_total + 1))
                 scan_container "$kind" "$ns" "$name" "$clist" "$cname" "$cimage" \
                     "$annotations" "$ips_json" "$mf_json" "$sa_name"
@@ -346,9 +346,9 @@ scan_cache_workload() {
     # write an update back.
     local containers init_containers
     containers=$(printf '%s' "$containers_json" \
-        | yq -p=json '.[] | "containers " + .name + "=" + .image')
+        | yq -p=json -o=y '.[] | "containers " + .name + "=" + .image')
     init_containers=$(printf '%s' "$init_containers_json" \
-        | yq -p=json '.[] | "initContainers " + .name + "=" + .image')
+        | yq -p=json -o=y '.[] | "initContainers " + .name + "=" + .image')
     if [ -n "$init_containers" ]; then
         if [ -n "$containers" ]; then
             containers="${containers}"$'\n'"${init_containers}"
