@@ -55,3 +55,9 @@ this differs from Keel.
 See [EntryPoints.md](EntryPoints.md) for the five executable scripts in
 `src/scripts/` — what calls them, with what arguments, and how they fit
 together at runtime.
+
+
+# License
+
+Keelson is MIT licensed except for `*.md` Markdown docs which are CC-BY-SA-4.0
+For more detail see [LICENSE.md](https://github.com/keelson-pro/.github/blob/main/LICENSE.md).
