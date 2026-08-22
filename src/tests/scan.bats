@@ -1466,3 +1466,40 @@ SH
     [ "$status" -eq 0 ]
     [[ "$output" == *'"candidate":"1.4.0"'* ]]
 }
+
+@test "match-tag: a backslash in the pattern survives the flattener" {
+    # yq's props output escapes backslashes in values as well as keys, and
+    # only the key side was ever unescaped. An escaped dot, which is how
+    # every real regex spells one, arrived doubled and matched nothing: the
+    # workload silently never updated and nothing said why.
+    kubectl_returns "$(cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "minor",
+          "keelson.pro/match-tag": "^1\\.",
+          "keelson.pro/match-mode": "regex"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {"containers": [{"name": "main", "image": "ghcr.io/x/y:1.2.3"}]}
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.4.0","2.0.0"]}'
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"candidate":"1.4.0"'* ]]
+}

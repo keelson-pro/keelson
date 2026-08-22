@@ -484,9 +484,13 @@ scan_is_keelson_managed() {
 }
 
 # Flatten one workload's annotations object to lines of "<key>=<value>",
-# stable for downstream annotation_get. yq's props output escapes dots in
-# keys with backslashes; we strip only those (iteratively, anchored to the
-# key portion) and leave value-side backslashes intact (regexes need them).
+# stable for downstream annotation_get.
+#
+# to_entries rather than yq's props output, which escapes backslashes in
+# values as well as dots in keys. Only the key side was ever unescaped, so a
+# match-tag of '^1\.' was stored as '^1\\.' and matched no tag at all: the
+# workload silently never updated and nothing said why. Building the pairs
+# directly needs no escaping and no sed to undo it.
 #
 # Only Keelson's own prefixes survive, which is all annotation_get ever asks
 # for. The rest belong to other people and move constantly: patching a
@@ -497,8 +501,9 @@ scan_is_keelson_managed() {
 scan_flatten_annotations() {
     local list_json=$1 i=$2
     printf '%s' "$list_json" \
-        | yq -p=json -o=props ".items[$i].metadata.annotations // {}" 2>/dev/null \
-        | sed -E ':a; s/^([^=]*)\\\./\1./; ta; s/ = /=/' \
+        | yq -p=json -o=y -r \
+            ".items[$i].metadata.annotations // {} | to_entries | .[] | .key + \"=\" + .value" \
+            2>/dev/null \
         | grep -E '^(keelson\.pro|keel\.sh)/' || true
 }
 
