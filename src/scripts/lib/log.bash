@@ -90,6 +90,18 @@ log_json_escape() {
     local s=$1
     s=${s//\\/\\\\}
     s=${s//\"/\\\"}
+    # A raw control character inside a JSON string is invalid, and callers
+    # that flatten first are the tidy answer rather than the safe one: the
+    # one who forgets emits a line no parser will take. Guarded so text
+    # without any pays a single test, and run after the backslash pass so
+    # the backslashes inserted here stay single.
+    case "$s" in
+        *[$'\n\r\t']*)
+            s=${s//$'\n'/\\n}
+            s=${s//$'\r'/\\r}
+            s=${s//$'\t'/\\t}
+            ;;
+    esac
     LOG_ESCAPED=$s
 }
 
@@ -101,9 +113,10 @@ LOG_FLAT=
 LOG_HINT=
 
 # log_flatten <text>  -> LOG_FLAT
-# One line, single-spaced. An event is a line, and in JSON format a raw
-# newline or tab inside a value is invalid: log_json_escape covers quotes and
-# backslashes, not control characters.
+# One line, single-spaced. An event is a line, and a blob spread over several
+# is one to read rather than to grep. log_json_escape will turn a stray
+# newline into \n rather than emit invalid JSON, so this is about the shape of
+# the line, not its validity.
 log_flatten() {
     local s=$1
     s=${s//$'\n'/ }

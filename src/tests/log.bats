@@ -345,8 +345,8 @@ emit() { "$@" 2>&1; }
 }
 
 @test "hint: a multi-line blob is flattened before it is clipped" {
-    # Without flattening first, the clip could carry a raw newline into a
-    # JSON value, which log_json_escape does not cover.
+    # log_json_escape would keep the JSON valid either way; flattening is
+    # what keeps the clip from spending its budget on a line break.
     log_hint "$(printf 'first\nsecond\tthird\n')"
     [[ "$LOG_HINT" != *$'\n'* ]]
     [[ "$LOG_HINT" != *$'\t'* ]]
@@ -467,4 +467,63 @@ emit() { "$@" 2>&1; }
     local first=$LOG_THROTTLE_HASH
     log_throttle_hash INFO ev a=1 'msg=two words'
     [ "$LOG_THROTTLE_HASH" = "$first" ]
+}
+
+# --- control characters in JSON values ---
+#
+# Flattening at the call site is the tidy answer, not the safe one: a raw
+# newline reaching a JSON value produces a line no parser will take, and the
+# only thing stopping that was every author remembering.
+
+@test "json escape: a newline becomes \\n, not a raw break" {
+    log_json_escape "$(printf 'a\nb')"
+    [ "$LOG_ESCAPED" = 'a\nb' ]
+    [[ "$LOG_ESCAPED" != *$'\n'* ]]
+}
+
+@test "json escape: a tab becomes \\t" {
+    log_json_escape "$(printf 'a\tb')"
+    [ "$LOG_ESCAPED" = 'a\tb' ]
+}
+
+@test "json escape: a carriage return becomes \\r" {
+    log_json_escape "$(printf 'a\rb')"
+    [ "$LOG_ESCAPED" = 'a\rb' ]
+}
+
+@test "json escape: quotes and backslashes still escape" {
+    log_json_escape 'say "hi" c:\path'
+    [ "$LOG_ESCAPED" = 'say \"hi\" c:\\path' ]
+}
+
+@test "json escape: an escaped newline is not double-escaped" {
+    # The backslash pass runs first, so the backslash this inserts must stay
+    # single or the value decodes as a literal backslash-n.
+    log_json_escape "$(printf 'a\nb')"
+    [ "$LOG_ESCAPED" = 'a\nb' ]
+    [[ "$LOG_ESCAPED" != *'\\n'* ]]
+}
+
+@test "json escape: a literal backslash-n in the input stays literal" {
+    log_json_escape 'a\nb'
+    [ "$LOG_ESCAPED" = 'a\\nb' ]
+}
+
+@test "json escape: plain text is untouched" {
+    log_json_escape 'nothing special here'
+    [ "$LOG_ESCAPED" = 'nothing special here' ]
+}
+
+@test "json output: an unflattened multi-line value stays one valid line" {
+    KEELSON_LOG_FORMAT=json
+    run emit log_error evt detail="$(printf 'first\nsecond')"
+    [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+    [[ "$output" == *'"detail":"first\nsecond"'* ]]
+}
+
+@test "json output: an unflattened value with a tab stays one valid line" {
+    KEELSON_LOG_FORMAT=json
+    run emit log_error evt detail="$(printf 'a\tb')"
+    [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+    [[ "$output" == *'"detail":"a\tb"'* ]]
 }
