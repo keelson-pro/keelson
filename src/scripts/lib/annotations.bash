@@ -84,13 +84,15 @@ annotation_get() {
 
 # annotation_has_prefix <annotation-lines> <prefix>
 # Returns 0 if any line starts with the prefix, 1 otherwise.
+#
+# The leading newline makes "start of a line" expressible as a substring, so
+# the whole set is one glob match. Reading it line by line meant a here-string,
+# and every here-string is a temp file created, written, read and unlinked.
 annotation_has_prefix() {
-    local lines=$1 prefix=$2 line
-    while IFS= read -r line; do
-        case "$line" in
-            "$prefix"*) return 0 ;;
-        esac
-    done <<< "$lines"
+    local lines=$1 prefix=$2
+    case $'\n'"$lines" in
+        *$'\n'"$prefix"*) return 0 ;;
+    esac
     return 1
 }
 
@@ -131,14 +133,13 @@ annotation_translate_keel_value() {
 # annotation_lookup_raw <annotation-lines> <full-key>  -> ANNOTATION_RAW
 # Empty when the key is absent.
 annotation_lookup_raw() {
-    local lines=$1 key=$2 line
+    local lines=$1 key=$2
     ANNOTATION_RAW=
-    while IFS= read -r line; do
-        case "$line" in
-            "$key="*)
-                ANNOTATION_RAW=${line#"$key="}
-                return 0
-                ;;
-        esac
-    done <<< "$lines"
+    local hay=$'\n'$lines
+    case "$hay" in
+        *$'\n'"$key="*) ;;
+        *) return 0 ;;
+    esac
+    local rest=${hay#*$'\n'"$key="}
+    ANNOTATION_RAW=${rest%%$'\n'*}
 }

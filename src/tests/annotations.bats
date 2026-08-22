@@ -152,3 +152,88 @@ keelson.pro/policy=minor'
     KEELSON_CONFIG_MODE=junk annotation_get "$KEELSON_LINES" policy || rc=$?
     [ "$rc" -eq 2 ]
 }
+
+# --- lookup mechanics ---
+#
+# These pin the line-scanning contract directly, so an implementation swap
+# underneath annotation_get has something to answer to.
+
+@test "lookup: matches on the first line" {
+    annotation_lookup_raw 'keelson.pro/policy=minor
+keelson.pro/trigger=poll' 'keelson.pro/policy'
+    [ "$ANNOTATION_RAW" = "minor" ]
+}
+
+@test "lookup: matches on the last line" {
+    annotation_lookup_raw 'keelson.pro/trigger=poll
+keelson.pro/policy=minor' 'keelson.pro/policy'
+    [ "$ANNOTATION_RAW" = "minor" ]
+}
+
+@test "lookup: absent key leaves the raw value empty" {
+    annotation_lookup_raw 'keelson.pro/policy=minor' 'keelson.pro/trigger'
+    [ -z "$ANNOTATION_RAW" ]
+}
+
+@test "lookup: empty input leaves the raw value empty" {
+    annotation_lookup_raw '' 'keelson.pro/policy'
+    [ -z "$ANNOTATION_RAW" ]
+}
+
+@test "lookup: empty value is read as empty, not as absent-then-stale" {
+    ANNOTATION_RAW=stale
+    annotation_lookup_raw 'keelson.pro/policy=' 'keelson.pro/policy'
+    [ -z "$ANNOTATION_RAW" ]
+}
+
+@test "lookup: a longer key is not matched by its prefix" {
+    annotation_lookup_raw 'keelson.pro/match-mode=regex' 'keelson.pro/match'
+    [ -z "$ANNOTATION_RAW" ]
+}
+
+@test "lookup: a key spelled inside another line's value does not match" {
+    annotation_lookup_raw 'keelson.pro/notify=on keelson.pro/policy=all
+keelson.pro/policy=minor' 'keelson.pro/policy'
+    [ "$ANNOTATION_RAW" = "minor" ]
+}
+
+@test "lookup: the first of two duplicate keys wins" {
+    annotation_lookup_raw 'keelson.pro/policy=minor
+keelson.pro/policy=major' 'keelson.pro/policy'
+    [ "$ANNOTATION_RAW" = "minor" ]
+}
+
+@test "lookup: an equals sign in the value survives" {
+    annotation_lookup_raw 'keelson.pro/match-tag=^v=1' 'keelson.pro/match-tag'
+    [ "$ANNOTATION_RAW" = '^v=1' ]
+}
+
+@test "lookup: a backslash in the value survives" {
+    annotation_lookup_raw 'keelson.pro/match-tag=^1\.' 'keelson.pro/match-tag'
+    [ "$ANNOTATION_RAW" = '^1\.' ]
+}
+
+@test "has-prefix: finds a prefix on the first line" {
+    annotation_has_prefix 'keel.sh/policy=all
+keelson.pro/policy=minor' 'keel.sh/'
+}
+
+@test "has-prefix: finds a prefix on the last line" {
+    annotation_has_prefix 'keelson.pro/policy=minor
+keel.sh/policy=all' 'keel.sh/'
+}
+
+@test "has-prefix: absent prefix returns 1" {
+    run annotation_has_prefix 'keelson.pro/policy=minor' 'keel.sh/'
+    [ "$status" -eq 1 ]
+}
+
+@test "has-prefix: empty input returns 1" {
+    run annotation_has_prefix '' 'keel.sh/'
+    [ "$status" -eq 1 ]
+}
+
+@test "has-prefix: a prefix only inside a value does not count" {
+    run annotation_has_prefix 'keelson.pro/notify=migrate off keel.sh/' 'keel.sh/'
+    [ "$status" -eq 1 ]
+}
