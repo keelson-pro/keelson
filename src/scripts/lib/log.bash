@@ -63,6 +63,8 @@ declare -gA LOG_THROTTLE_LAST=()
 LOG_LEVEL_NUM=0
 LOG_LINE=
 LOG_ESCAPED=
+LOG_THROTTLE_INTERVAL=0
+LOG_THROTTLE_HASH=
 
 # log_level_num <level>  -> LOG_LEVEL_NUM
 log_level_num() {
@@ -130,27 +132,47 @@ log_hint() {
     fi
 }
 
-# log_throttle_interval <level>
-# Echoes the configured repeat-interval (seconds) for <level>. 0 means never
+# log_throttle_interval <level>  -> LOG_THROTTLE_INTERVAL
+# The configured repeat-interval (seconds) for <level>. 0 means never
 # throttle. Missing var also means 0 so older deploys don't break.
 log_throttle_interval() {
     case "$1" in
-        DEBUG) printf '%s' "${KEELSON_LOG_DEBUG_REPEAT_INTERVAL:-0}" ;;
-        INFO)  printf '%s' "${KEELSON_LOG_INFO_REPEAT_INTERVAL:-0}" ;;
-        WARN)  printf '%s' "${KEELSON_LOG_WARN_REPEAT_INTERVAL:-0}" ;;
-        ERROR) printf '%s' "${KEELSON_LOG_ERROR_REPEAT_INTERVAL:-0}" ;;
-        *)     printf '0' ;;
+        DEBUG) LOG_THROTTLE_INTERVAL=${KEELSON_LOG_DEBUG_REPEAT_INTERVAL:-0} ;;
+        INFO)  LOG_THROTTLE_INTERVAL=${KEELSON_LOG_INFO_REPEAT_INTERVAL:-0} ;;
+        WARN)  LOG_THROTTLE_INTERVAL=${KEELSON_LOG_WARN_REPEAT_INTERVAL:-0} ;;
+        ERROR) LOG_THROTTLE_INTERVAL=${KEELSON_LOG_ERROR_REPEAT_INTERVAL:-0} ;;
+        *)     LOG_THROTTLE_INTERVAL=0 ;;
     esac
 }
 
-# log_throttle_hash <level> <event> <kv...>
+# log_throttle_hash <level> <event> <kv...>  -> LOG_THROTTLE_HASH
 # Stable identity for the rate limiter: level + event + sorted kv pairs.
 # Sorting keeps order-of-arguments from creating spurious cache misses.
+#
+# Insertion sort rather than a pipe to sort(1). The key only has to be
+# consistent within this process, never to match anything on disk, and the
+# pipeline cost four process creations on every throttled line. Callers pass
+# a handful of pairs, so the quadratic comparison count stays far below what
+# one fork costs. LC_ALL=C is enforced at boot, so > collates bytewise.
 log_throttle_hash() {
     local level=$1 event=$2; shift 2
-    local pairs
-    pairs=$(printf '%s\n' "$@" | sort | tr '\n' '|')
-    printf '%s|%s|%s' "$level" "$event" "$pairs"
+    local -a pairs=("$@")
+    local i j held
+    for ((i = 1; i < ${#pairs[@]}; i++)); do
+        held=${pairs[i]}
+        j=$((i - 1))
+        # [[ ]] and not (( )): these are strings, and an arithmetic context
+        # reads "a=1 > b=2" as an assignment.
+        while [ "$j" -ge 0 ] && [[ ${pairs[j]} > $held ]]; do
+            pairs[j + 1]=${pairs[j]}
+            j=$((j - 1))
+        done
+        pairs[j + 1]=$held
+    done
+    LOG_THROTTLE_HASH="$level|$event|"
+    for held in ${pairs[@]+"${pairs[@]}"}; do
+        LOG_THROTTLE_HASH+="$held|"
+    done
 }
 
 # log_render_plain <ts> <LEVEL> <event> <kv...>
@@ -285,16 +307,16 @@ log_emit() {
     log_should_emit_stdout "$level" || return 0
 
     if [ "$throttle" = "1" ]; then
-        local interval now hash last
-        interval=$(log_throttle_interval "$level")
-        if [ "$interval" -gt 0 ]; then
-            now=$(date -u +%s)
-            hash=$(log_throttle_hash "$level" "$event" "$@")
-            last=${LOG_THROTTLE_LAST[$hash]:-0}
-            if [ $(( now - last )) -lt "$interval" ]; then
+        local now last
+        log_throttle_interval "$level"
+        if [ "$LOG_THROTTLE_INTERVAL" -gt 0 ]; then
+            printf -v now '%(%s)T' -1
+            log_throttle_hash "$level" "$event" "$@"
+            last=${LOG_THROTTLE_LAST[$LOG_THROTTLE_HASH]:-0}
+            if [ $(( now - last )) -lt "$LOG_THROTTLE_INTERVAL" ]; then
                 return 0
             fi
-            LOG_THROTTLE_LAST[$hash]=$now
+            LOG_THROTTLE_LAST[$LOG_THROTTLE_HASH]=$now
         fi
     fi
 

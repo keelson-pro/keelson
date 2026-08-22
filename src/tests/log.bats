@@ -390,3 +390,81 @@ emit() { "$@" 2>&1; }
     run log_file_init
     [ "$status" -eq 0 ]
 }
+
+# --- throttle helpers ---
+#
+# Both land in globals: they run on every emitted line, and a command
+# substitution forks a subshell before the line is even known to be wanted.
+
+@test "throttle interval: each level reads its own variable" {
+    KEELSON_LOG_DEBUG_REPEAT_INTERVAL=1 KEELSON_LOG_INFO_REPEAT_INTERVAL=2 \
+    KEELSON_LOG_WARN_REPEAT_INTERVAL=3 KEELSON_LOG_ERROR_REPEAT_INTERVAL=4 \
+    bash -c '
+        source "'"${BATS_TEST_DIRNAME}"'/../scripts/lib/log.bash"
+        for l in DEBUG INFO WARN ERROR; do
+            log_throttle_interval "$l"; printf "%s " "$LOG_THROTTLE_INTERVAL"
+        done' > "$BATS_TEST_TMPDIR/out"
+    [ "$(cat "$BATS_TEST_TMPDIR/out")" = "1 2 3 4 " ]
+}
+
+@test "throttle interval: an unset variable means never throttle" {
+    unset KEELSON_LOG_INFO_REPEAT_INTERVAL
+    log_throttle_interval INFO
+    [ "$LOG_THROTTLE_INTERVAL" = "0" ]
+}
+
+@test "throttle interval: an unknown level means never throttle" {
+    log_throttle_interval NOPE
+    [ "$LOG_THROTTLE_INTERVAL" = "0" ]
+}
+
+@test "throttle hash: same level, event and pairs give the same identity" {
+    log_throttle_hash INFO ev a=1 b=2
+    local first=$LOG_THROTTLE_HASH
+    log_throttle_hash INFO ev a=1 b=2
+    [ "$LOG_THROTTLE_HASH" = "$first" ]
+}
+
+@test "throttle hash: argument order does not change the identity" {
+    log_throttle_hash INFO ev a=1 b=2 c=3
+    local ordered=$LOG_THROTTLE_HASH
+    log_throttle_hash INFO ev c=3 a=1 b=2
+    [ "$LOG_THROTTLE_HASH" = "$ordered" ]
+    log_throttle_hash INFO ev b=2 c=3 a=1
+    [ "$LOG_THROTTLE_HASH" = "$ordered" ]
+}
+
+@test "throttle hash: a different level is a different identity" {
+    log_throttle_hash INFO ev a=1
+    local info=$LOG_THROTTLE_HASH
+    log_throttle_hash WARN ev a=1
+    [ "$LOG_THROTTLE_HASH" != "$info" ]
+}
+
+@test "throttle hash: a different event is a different identity" {
+    log_throttle_hash INFO one a=1
+    local one=$LOG_THROTTLE_HASH
+    log_throttle_hash INFO two a=1
+    [ "$LOG_THROTTLE_HASH" != "$one" ]
+}
+
+@test "throttle hash: a different value is a different identity" {
+    log_throttle_hash INFO ev a=1
+    local one=$LOG_THROTTLE_HASH
+    log_throttle_hash INFO ev a=2
+    [ "$LOG_THROTTLE_HASH" != "$one" ]
+}
+
+@test "throttle hash: no pairs at all is still an identity" {
+    log_throttle_hash INFO ev
+    [ -n "$LOG_THROTTLE_HASH" ]
+    log_throttle_hash INFO other
+    [ -n "$LOG_THROTTLE_HASH" ]
+}
+
+@test "throttle hash: a pair holding a space survives" {
+    log_throttle_hash INFO ev 'msg=two words' a=1
+    local first=$LOG_THROTTLE_HASH
+    log_throttle_hash INFO ev a=1 'msg=two words'
+    [ "$LOG_THROTTLE_HASH" = "$first" ]
+}
