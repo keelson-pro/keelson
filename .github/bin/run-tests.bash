@@ -13,7 +13,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 IMAGE_BUILD_COMMAND="${IMAGE_BUILD_COMMAND:-podman}"
-TEST_IMAGE="${KEELSON_TEST_IMAGE:-ghcr.io/keelson-pro/keelson/keelson-test-image:1.2}"
+TEST_IMAGE="${KEELSON_TEST_IMAGE:-ghcr.io/keelson-pro/keelson/keelson-test-image:1.4}"
 
 # Derived, not hand-listed: a hand-listed set silently skips new files,
 # which is how keelson-probe and keelson-validate went unlinted.
