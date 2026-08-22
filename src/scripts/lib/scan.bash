@@ -699,8 +699,12 @@ scan_tag_passes_filter() {
 #
 # managedFields is the one thing deliberately not cached. It changes whenever
 # anyone writes the object, so a cached copy could be hours stale and drive
-# the field-manager strategy to the wrong owner. It is fetched here, once per
-# workload actually due, rather than kept.
+# the field-manager strategy to the wrong owner.
+#
+# Nor is it fetched here. Only update_apply reads it, and only when a write is
+# actually about to happen, which almost no poll reaches: fetching it per due
+# workload spent a kubectl process on every one of them to throw the answer
+# away. update_apply fetches its own when handed nothing.
 scan_poll_due() {
     local _scan_apply=${1:-0} now=$2
     inventory_enabled || return 0
@@ -712,13 +716,10 @@ scan_poll_due() {
           _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
     registry_init
 
-    local entry kind ns name i mf_json
+    local entry kind ns name i
     for entry in "${INVENTORY_DUE[@]}"; do
         read -r kind ns name <<<"$entry"
         inventory_get "$kind" "$ns" "$name" || continue
-
-        mf_json=$(workload_managed_fields "$kind" "$ns" "$name" 2>/dev/null) || mf_json='[]'
-        [ -n "$mf_json" ] || mf_json='[]'
 
         local _workload_updated=0 \
               _workload_last_from="" _workload_last_to="" _workload_last_repo=""
@@ -728,7 +729,7 @@ scan_poll_due() {
                 "${INVENTORY_CONTAINER_LISTS[$i]}" \
                 "${INVENTORY_CONTAINER_NAMES[$i]}" "${INVENTORY_CONTAINER_IMAGES[$i]}" \
                 "$INVENTORY_ANNOTATIONS" "$INVENTORY_IMAGE_PULL_SECRETS" \
-                "$mf_json" "$INVENTORY_SERVICE_ACCOUNT"
+                "" "$INVENTORY_SERVICE_ACCOUNT"
         done
 
         if [ "$kind" = "CronJob" ] && [ "$_scan_apply" -eq 1 ]; then

@@ -1410,3 +1410,24 @@ JSON
     run emit scan_run 0 0
     [[ "$output" == *"scan-resync"* ]]
 }
+
+@test "poll: a poll with nothing to update talks to kubectl not at all" {
+    # managedFields are only ever read when an update is about to be written,
+    # and almost every poll finds no newer tag. Fetching them up front is one
+    # kubectl process per due workload per poll, thrown away.
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3"]}'
+SH
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMP_DIR/kubectl.calls"
+printf '{"items":[]}'
+SH
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    [ ! -f "$TMP_DIR/kubectl.calls" ]
+}
