@@ -40,66 +40,6 @@ setup() {
     [ "$status" -ne 0 ]
 }
 
-# --- containers_path / image_pull_secrets_path ---
-
-@test "containers_path: Deployment" {
-    run workload_containers_path Deployment
-    [ "$status" -eq 0 ]
-    [ "$output" = ".spec.template.spec.containers" ]
-}
-
-@test "containers_path: CronJob" {
-    run workload_containers_path CronJob
-    [ "$status" -eq 0 ]
-    [ "$output" = ".spec.jobTemplate.spec.template.spec.containers" ]
-}
-
-@test "init_containers_path: Deployment" {
-    run workload_init_containers_path Deployment
-    [ "$status" -eq 0 ]
-    [ "$output" = ".spec.template.spec.initContainers" ]
-}
-
-@test "init_containers_path: CronJob" {
-    run workload_init_containers_path CronJob
-    [ "$status" -eq 0 ]
-    [ "$output" = ".spec.jobTemplate.spec.template.spec.initContainers" ]
-}
-
-@test "init_containers_path: unknown kind returns non-zero" {
-    run workload_init_containers_path Pod
-    [ "$status" -ne 0 ]
-}
-
-@test "image_pull_secrets_path: Deployment" {
-    run workload_image_pull_secrets_path Deployment
-    [ "$status" -eq 0 ]
-    [ "$output" = ".spec.template.spec.imagePullSecrets" ]
-}
-
-@test "image_pull_secrets_path: CronJob" {
-    run workload_image_pull_secrets_path CronJob
-    [ "$status" -eq 0 ]
-    [ "$output" = ".spec.jobTemplate.spec.template.spec.imagePullSecrets" ]
-}
-
-@test "service_account_name_path: Deployment" {
-    run workload_service_account_name_path Deployment
-    [ "$status" -eq 0 ]
-    [ "$output" = ".spec.template.spec.serviceAccountName" ]
-}
-
-@test "service_account_name_path: CronJob" {
-    run workload_service_account_name_path CronJob
-    [ "$status" -eq 0 ]
-    [ "$output" = ".spec.jobTemplate.spec.template.spec.serviceAccountName" ]
-}
-
-@test "service_account_name_path: unknown kind returns non-zero" {
-    run workload_service_account_name_path Pod
-    [ "$status" -ne 0 ]
-}
-
 # --- workload_is_watched ---
 
 @test "is_watched: Deployment" {

@@ -14,6 +14,17 @@
 # state. The only persisted state is the CronJob always-once trigger gate,
 # read once per scan via state_get_trigger_field.
 
+# Set by scan_extract_workload, read by scan_workload.
+SCAN_WL_NS=
+SCAN_WL_NAME=
+SCAN_WL_ANNOTATIONS=
+SCAN_WL_MANAGED_FIELDS=
+SCAN_WL_SUSPEND=
+SCAN_WL_CONTAINERS_JSON=
+SCAN_WL_INIT_CONTAINERS_JSON=
+SCAN_WL_IPS_JSON=
+SCAN_WL_SA_NAME=
+
 # scan_run <apply> [poll-all]
 #
 # poll-all defaults to 1: a scan scans, which is what a one-shot
@@ -244,41 +255,121 @@ scan_kind() {
     done
 }
 
-scan_workload() {
+# scan_extract_workload <list-json> <kind> <index>
+# Pulls everything scan_workload needs out of one entry of a kubectl List,
+# into SCAN_WL_* rather than onto stdout.
+#
+# One function so the reads have one place to be counted: this runs once per
+# workload per scan, and a cluster of fifty makes whatever it costs the
+# dominant cost of a pass.
+scan_extract_workload() {
     local list_json=$1 kind=$2 i=$3
-    local ns name annotations containers_path init_containers_path \
-          ips_path sa_path containers_json init_containers_json \
-          ips_json mf_json suspend sa_name
+    local base suspend_expr='' out rest line in_annotations=0
 
-    ns=$(printf '%s' "$list_json" | yq -p=json -o=y ".items[$i].metadata.namespace")
-    name=$(printf '%s' "$list_json" | yq -p=json -o=y ".items[$i].metadata.name")
-    annotations=$(scan_flatten_annotations "$list_json" "$i")
-    mf_json=$(printf '%s' "$list_json" \
-        | yq -p=json -o=json ".items[$i].metadata.managedFields // []")
+    base=$(workload_pod_spec_path "$kind") || return 1
 
-    suspend=""
+    # Only CronJob carries suspend, and "no such field" has to stay
+    # distinguishable from a CronJob that is not suspended.
     if [ "$kind" = "CronJob" ]; then
-        suspend=$(printf '%s' "$list_json" \
-            | yq -p=json -o=y ".items[$i].spec.suspend // false")
+        suspend_expr='"suspend=" + ($w.spec.suspend // false | @json),'
     fi
 
-    containers_path=$(workload_containers_path "$kind")
-    init_containers_path=$(workload_init_containers_path "$kind")
-    ips_path=$(workload_image_pull_secrets_path "$kind")
-    sa_path=$(workload_service_account_name_path "$kind")
-    containers_json=$(printf '%s' "$list_json" \
-        | yq -p=json -o=json ".items[$i]$containers_path // []")
-    init_containers_json=$(printf '%s' "$list_json" \
-        | yq -p=json -o=json ".items[$i]$init_containers_path // []")
-    # -I=0 keeps this on one line: it goes into the inventory record, which
-    # is read back a line at a time.
-    ips_json=$(printf '%s' "$list_json" \
-        | yq -p=json -o=json -I=0 ".items[$i]$ips_path // []")
-    # Default to "default" when serviceAccountName is unset - matches
-    # kubelet behaviour at pod admission. Drives the SA-imagePullSecrets
-    # walk that is gated by KEELSON_RESPECT_SA_PULL_SECRETS.
-    sa_name=$(printf '%s' "$list_json" \
-        | yq -p=json -o=y ".items[$i]$sa_path // \"default\"")
+    SCAN_WL_NS=
+    SCAN_WL_NAME=
+    SCAN_WL_ANNOTATIONS=
+    SCAN_WL_MANAGED_FIELDS=
+    SCAN_WL_SUSPEND=
+    SCAN_WL_CONTAINERS_JSON=
+    SCAN_WL_INIT_CONTAINERS_JSON=
+    SCAN_WL_IPS_JSON=
+    SCAN_WL_SA_NAME=
+
+    # -r keeps every scalar raw, so a serviceAccountName of "sa: weird" or a
+    # match-tag of "*-rc" arrives as written rather than YAML-quoted.
+    # @json holds each sub-object to one line, which the key=value framing
+    # needs and which the inventory record needed anyway.
+    # Default serviceAccountName to "default", matching kubelet at pod
+    # admission. Drives the SA-imagePullSecrets walk gated by
+    # KEELSON_RESPECT_SA_PULL_SECRETS.
+    #
+    # to_entries rather than yq's props output, which escapes backslashes in
+    # values as well as dots in keys. Only the key side was ever unescaped, so
+    # a match-tag of '^1\.' was stored as '^1\\.' and matched no tag at all:
+    # the workload silently never updated and nothing said why.
+    #
+    # The select is what keeps foreign annotations out of the record, and it
+    # has to stay. They belong to other people and move constantly: patching a
+    # Deployment makes its controller bump deployment.kubernetes.io/revision,
+    # and a rollout restart writes kubectl.kubernetes.io/restartedAt. Drop the
+    # filter and those reach the fingerprint, where any change reads as "a
+    # decision input moved" and forces a resync poll that can only return what
+    # the schedule would have.
+    out=$(printf '%s' "$list_json" | yq -p=json -o=y -r "
+        .items[$i] as \$w | (
+        \"ns=\" + \$w.metadata.namespace,
+        \"name=\" + \$w.metadata.name,
+        \"sa=\" + (\$w${base}.serviceAccountName // \"default\"),
+        ${suspend_expr}
+        \"mf=\" + (\$w.metadata.managedFields // [] | @json),
+        \"containers=\" + (\$w${base}.containers // [] | @json),
+        \"initContainers=\" + (\$w${base}.initContainers // [] | @json),
+        \"ips=\" + (\$w${base}.imagePullSecrets // [] | @json),
+        \"annotations=\",
+        (\$w.metadata.annotations // {} | to_entries | .[]
+            | select(.key | test(\"^(keelson\\.pro|keel\\.sh)/\"))
+            | .key + \"=\" + .value)
+        )")
+
+    # Everything past the annotations= sentinel is annotation text, matched
+    # against no key at all. An annotation value holding a newline can then
+    # only corrupt the annotations, exactly as it could when they were read
+    # by themselves, rather than forging a name or a service account.
+    rest=$out
+    while [ -n "$rest" ]; do
+        line=${rest%%$'\n'*}
+        if [ "$line" = "$rest" ]; then
+            rest=
+        else
+            rest=${rest#*$'\n'}
+        fi
+        if [ "$in_annotations" -eq 1 ]; then
+            [ -n "$line" ] || continue
+            if [ -n "$SCAN_WL_ANNOTATIONS" ]; then
+                SCAN_WL_ANNOTATIONS+=$'\n'$line
+            else
+                SCAN_WL_ANNOTATIONS=$line
+            fi
+            continue
+        fi
+        case "$line" in
+            'annotations=')     in_annotations=1 ;;
+            'ns='*)             SCAN_WL_NS=${line#ns=} ;;
+            'name='*)           SCAN_WL_NAME=${line#name=} ;;
+            'sa='*)             SCAN_WL_SA_NAME=${line#sa=} ;;
+            'suspend='*)        SCAN_WL_SUSPEND=${line#suspend=} ;;
+            'mf='*)             SCAN_WL_MANAGED_FIELDS=${line#mf=} ;;
+            'containers='*)     SCAN_WL_CONTAINERS_JSON=${line#containers=} ;;
+            'initContainers='*) SCAN_WL_INIT_CONTAINERS_JSON=${line#initContainers=} ;;
+            'ips='*)            SCAN_WL_IPS_JSON=${line#ips=} ;;
+        esac
+    done
+}
+
+scan_workload() {
+    local list_json=$1 kind=$2 i=$3
+    local ns name annotations containers_json init_containers_json \
+          ips_json mf_json suspend sa_name
+
+    scan_extract_workload "$list_json" "$kind" "$i"
+    ns=$SCAN_WL_NS
+    name=$SCAN_WL_NAME
+    annotations=$SCAN_WL_ANNOTATIONS
+    mf_json=$SCAN_WL_MANAGED_FIELDS
+    suspend=$SCAN_WL_SUSPEND
+    containers_json=$SCAN_WL_CONTAINERS_JSON
+    init_containers_json=$SCAN_WL_INIT_CONTAINERS_JSON
+    ips_json=$SCAN_WL_IPS_JSON
+    sa_name=$SCAN_WL_SA_NAME
 
     local n j clist cjson cname cimage _workload_updated=0 \
           _workload_last_from="" _workload_last_to="" _workload_last_repo=""
@@ -481,30 +572,6 @@ scan_is_keelson_managed() {
         esac
     done <<< "$ann"
     return 1
-}
-
-# Flatten one workload's annotations object to lines of "<key>=<value>",
-# stable for downstream annotation_get.
-#
-# to_entries rather than yq's props output, which escapes backslashes in
-# values as well as dots in keys. Only the key side was ever unescaped, so a
-# match-tag of '^1\.' was stored as '^1\\.' and matched no tag at all: the
-# workload silently never updated and nothing said why. Building the pairs
-# directly needs no escaping and no sed to undo it.
-#
-# Only Keelson's own prefixes survive, which is all annotation_get ever asks
-# for. The rest belong to other people and move constantly: patching a
-# Deployment makes its controller bump deployment.kubernetes.io/revision, and
-# a rollout restart writes kubectl.kubernetes.io/restartedAt. Carried into the
-# record they end up in the fingerprint, where each one reads as "a decision
-# input moved" and forces a poll that can only return what the schedule would.
-scan_flatten_annotations() {
-    local list_json=$1 i=$2
-    printf '%s' "$list_json" \
-        | yq -p=json -o=y -r \
-            ".items[$i].metadata.annotations // {} | to_entries | .[] | .key + \"=\" + .value" \
-            2>/dev/null \
-        | grep -E '^(keelson\.pro|keel\.sh)/' || true
 }
 
 # scan_container <kind> <ns> <name> <list> <container> <image> <annotations>

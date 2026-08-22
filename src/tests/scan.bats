@@ -1503,3 +1503,139 @@ SH
     [ "$status" -eq 0 ]
     [[ "$output" == *'"candidate":"1.4.0"'* ]]
 }
+
+# --- scan_extract_workload ---
+#
+# The extraction runs once per workload per scan and is the bulk of what a
+# pass costs, so it is the thing most likely to be rewritten for speed. These
+# pin what it produces, field by field, so a rewrite has to answer for each.
+
+EXTRACT_LIST='{"items":[
+ {"metadata":{"namespace":"prod","name":"web",
+   "annotations":{"keelson.pro/policy":"minor","keelson.pro/match-tag":"^1\\.",
+                  "deployment.kubernetes.io/revision":"7"},
+   "managedFields":[{"manager":"argocd","operation":"Apply"}]},
+  "spec":{"template":{"spec":{
+    "serviceAccountName":"deployer",
+    "imagePullSecrets":[{"name":"regcred"}],
+    "initContainers":[{"name":"migrate","image":"ghcr.io/acme/migrate:2.0.0"}],
+    "containers":[{"name":"web","image":"ghcr.io/acme/web:1.2.3"},
+                  {"name":"side","image":"ghcr.io/acme/side:0.1.0"}]}}}},
+ {"metadata":{"namespace":"other","name":"bare"},
+  "spec":{"template":{"spec":{
+    "containers":[{"name":"only","image":"nginx:1.0"}]}}}}
+]}'
+
+@test "extract: namespace and name come from the indexed item" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ "$SCAN_WL_NS" = "prod" ]
+    [ "$SCAN_WL_NAME" = "web" ]
+}
+
+@test "extract: the index selects the workload" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    [ "$SCAN_WL_NS" = "other" ]
+    [ "$SCAN_WL_NAME" = "bare" ]
+}
+
+@test "extract: names come out bare, not quoted" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    case "$SCAN_WL_NAME" in *'"'*) return 1 ;; esac
+    case "$SCAN_WL_NS" in *'"'*) return 1 ;; esac
+    case "$SCAN_WL_SA_NAME" in *'"'*) return 1 ;; esac
+}
+
+@test "extract: only keelson and keel annotations survive" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [[ "$SCAN_WL_ANNOTATIONS" == *"keelson.pro/policy=minor"* ]]
+    [[ "$SCAN_WL_ANNOTATIONS" != *"deployment.kubernetes.io/revision"* ]]
+}
+
+@test "extract: a backslash in an annotation value is not doubled" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [[ "$SCAN_WL_ANNOTATIONS" == *'keelson.pro/match-tag=^1\.'* ]]
+}
+
+@test "extract: a workload with no annotations yields nothing" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    [ -z "$SCAN_WL_ANNOTATIONS" ]
+}
+
+@test "extract: containers carry name and image" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    local names
+    names=$(printf '%s' "$SCAN_WL_CONTAINERS_JSON" | yq -p=json -o=y '.[].name' | tr '\n' ' ')
+    [ "$names" = "web side " ]
+    [[ "$SCAN_WL_CONTAINERS_JSON" == *"ghcr.io/acme/web:1.2.3"* ]]
+}
+
+@test "extract: init containers are kept separate from containers" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [[ "$SCAN_WL_INIT_CONTAINERS_JSON" == *"migrate"* ]]
+    [[ "$SCAN_WL_CONTAINERS_JSON" != *"migrate"* ]]
+}
+
+@test "extract: absent init containers are an empty array, not null" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    [ "$(printf '%s' "$SCAN_WL_INIT_CONTAINERS_JSON" | yq -p=json -o=y 'length')" = "0" ]
+}
+
+@test "extract: image pull secrets stay on one line for the cache record" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ "$(printf '%s\n' "$SCAN_WL_IPS_JSON" | wc -l | tr -d ' ')" = "1" ]
+    [[ "$SCAN_WL_IPS_JSON" == *"regcred"* ]]
+}
+
+@test "extract: absent image pull secrets are an empty array" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    [ "$SCAN_WL_IPS_JSON" = "[]" ]
+}
+
+@test "extract: service account is read when set" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ "$SCAN_WL_SA_NAME" = "deployer" ]
+}
+
+@test "extract: an unset service account defaults to 'default'" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    [ "$SCAN_WL_SA_NAME" = "default" ]
+}
+
+@test "extract: managed fields come through as JSON" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ "$(printf '%s' "$SCAN_WL_MANAGED_FIELDS" | yq -p=json -o=y '.[0].manager')" = "argocd" ]
+}
+
+@test "extract: absent managed fields are an empty array" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    [ "$(printf '%s' "$SCAN_WL_MANAGED_FIELDS" | yq -p=json -o=y 'length')" = "0" ]
+}
+
+@test "extract: suspend is only read for CronJob" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ -z "$SCAN_WL_SUSPEND" ]
+}
+
+CRONJOB_LIST='{"items":[
+ {"metadata":{"namespace":"prod","name":"nightly"},
+  "spec":{"suspend":true,"jobTemplate":{"spec":{"template":{"spec":{
+    "containers":[{"name":"job","image":"ghcr.io/acme/job:3.0.0"}]}}}}}},
+ {"metadata":{"namespace":"prod","name":"hourly"},
+  "spec":{"jobTemplate":{"spec":{"template":{"spec":{
+    "containers":[{"name":"job","image":"ghcr.io/acme/job:3.0.0"}]}}}}}}
+]}'
+
+@test "extract: CronJob suspend is read" {
+    scan_extract_workload "$CRONJOB_LIST" CronJob 0
+    [ "$SCAN_WL_SUSPEND" = "true" ]
+}
+
+@test "extract: an unset CronJob suspend reads false, not empty" {
+    scan_extract_workload "$CRONJOB_LIST" CronJob 1
+    [ "$SCAN_WL_SUSPEND" = "false" ]
+}
+
+@test "extract: CronJob containers come from under jobTemplate" {
+    scan_extract_workload "$CRONJOB_LIST" CronJob 0
+    [ "$(printf '%s' "$SCAN_WL_CONTAINERS_JSON" | yq -p=json -o=y '.[0].name')" = "job" ]
+}
