@@ -1431,3 +1431,38 @@ SH
     scan_poll_due 0 "$LATE" 2>/dev/null
     [ ! -f "$TMP_DIR/kubectl.calls" ]
 }
+
+@test "match-mode: regex is honoured, not silently treated as a glob" {
+    # match_mode defaults to glob when empty, so a value that fails to arrive
+    # is indistinguishable from one that was never set.
+    kubectl_returns "$(cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "minor",
+          "keelson.pro/match-tag": "^1",
+          "keelson.pro/match-mode": "regex"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {"containers": [{"name": "main", "image": "ghcr.io/x/y:1.2.3"}]}
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.4.0","2.0.0"]}'
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"candidate":"1.4.0"'* ]]
+}

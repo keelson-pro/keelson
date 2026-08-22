@@ -358,7 +358,8 @@ scan_cache_workload() {
     fi
 
     local interval=$_scan_interval sched
-    sched=$(annotation_get "$annotations" poll-schedule)
+    annotation_get "$annotations" poll-schedule
+    sched=$ANNOTATION_VALUE
     if [ -n "$sched" ]; then
         if clock_parse_duration "$sched"; then
             interval=$CLOCK_DURATION
@@ -511,7 +512,8 @@ scan_container() {
           mf_json=${9:-} sa_name=${10:-}
 
     local result
-    result=$(eligibility_check "$ann" "$cimage" "$cname") || true
+    eligibility_check "$ann" "$cimage" "$cname" || true
+    result=$ELIGIBILITY_RESULT
     case "$result" in
         SKIP\ *)
             log_debug skip-not-eligible \
@@ -557,10 +559,13 @@ scan_container() {
     fi
 
     local match_tag match_mode current_tag winner candidate
-    match_tag=$(annotation_get "$ann" match-tag "$cname")
-    match_mode=$(annotation_get "$ann" match-mode "$cname")
+    annotation_get "$ann" match-tag "$cname"
+    match_tag=$ANNOTATION_VALUE
+    annotation_get "$ann" match-mode "$cname"
+    match_mode=$ANNOTATION_VALUE
     match_mode=${match_mode:-glob}
-    current_tag=$(image_tag "$cimage")
+    image_tag "$cimage"
+    current_tag=$IMAGE_TAG
     winner=$current_tag
 
     while IFS= read -r candidate; do
@@ -601,7 +606,8 @@ scan_container() {
     fi
 
     local new_image repo
-    repo=$(image_repo "$cimage")
+    image_repo "$cimage"
+    repo=$IMAGE_REPO
     new_image="$repo:$winner"
     if update_apply "$kind" "$ns" "$name" "$clist" "$cname" "$new_image" "$current_tag" "$mf_json" "$ann"; then
         inventory_set_container_image "$kind" "$ns" "$name" "$clist" "$cname" "$new_image" \
@@ -636,7 +642,8 @@ scan_check_cronjob_trigger() {
     local ns=$1 name=$2 ann=$3 suspend=$4 updated=$5
     local from_tag=${6:-} to_tag=${7:-} repo=${8:-}
     local trigger
-    trigger=$(annotation_get "$ann" trigger-job-on-update)
+    annotation_get "$ann" trigger-job-on-update
+    trigger=$ANNOTATION_VALUE
     [ "$trigger" = "true" ] || return 0
 
     if [ "$suspend" != "true" ]; then

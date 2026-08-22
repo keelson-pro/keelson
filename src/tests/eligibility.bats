@@ -17,97 +17,113 @@ setup() {
 }
 
 @test "eligible: minor policy + 3-segment tag" {
-    run eligibility_check "keelson.pro/policy=minor" "ghcr.io/x/y:1.2.3"
-    [ "$status" -eq 0 ]
-    [ "$output" = "OK minor 2" ]
+    rc=0
+    eligibility_check "keelson.pro/policy=minor" "ghcr.io/x/y:1.2.3" || rc=$?
+    [ "$rc" -eq 0 ]
+    [ "$ELIGIBILITY_RESULT" = "OK minor 2" ]
 }
 
 @test "eligible: patch policy on 4-segment tag picks last position" {
-    run eligibility_check "keelson.pro/policy=patch" "ghcr.io/x/y:1.2.3.4"
-    [ "$status" -eq 0 ]
-    [ "$output" = "OK patch 4" ]
+    rc=0
+    eligibility_check "keelson.pro/policy=patch" "ghcr.io/x/y:1.2.3.4" || rc=$?
+    [ "$rc" -eq 0 ]
+    [ "$ELIGIBILITY_RESULT" = "OK patch 4" ]
 }
 
 @test "eligible: numeric N policy" {
-    run eligibility_check "keelson.pro/policy=2" "ghcr.io/x/y:1.2.3"
-    [ "$status" -eq 0 ]
-    [ "$output" = "OK 2 2" ]
+    rc=0
+    eligibility_check "keelson.pro/policy=2" "ghcr.io/x/y:1.2.3" || rc=$?
+    [ "$rc" -eq 0 ]
+    [ "$ELIGIBILITY_RESULT" = "OK 2 2" ]
 }
 
 @test "eligible: all is alias for major" {
-    run eligibility_check "keelson.pro/policy=all" "ghcr.io/x/y:1.2.3"
-    [ "$status" -eq 0 ]
-    [ "$output" = "OK all 1" ]
+    rc=0
+    eligibility_check "keelson.pro/policy=all" "ghcr.io/x/y:1.2.3" || rc=$?
+    [ "$rc" -eq 0 ]
+    [ "$ELIGIBILITY_RESULT" = "OK all 1" ]
 }
 
 @test "skip: no policy annotation" {
-    run eligibility_check "" "ghcr.io/x/y:1.2.3"
-    [ "$status" -eq 1 ]
-    [ "$output" = "SKIP no-policy-annotation" ]
+    rc=0
+    eligibility_check "" "ghcr.io/x/y:1.2.3" || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$ELIGIBILITY_RESULT" = "SKIP no-policy-annotation" ]
 }
 
 @test "skip: policy=never" {
-    run eligibility_check "keelson.pro/policy=never" "ghcr.io/x/y:1.2.3"
-    [ "$status" -eq 1 ]
-    [ "$output" = "SKIP policy-never" ]
+    rc=0
+    eligibility_check "keelson.pro/policy=never" "ghcr.io/x/y:1.2.3" || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$ELIGIBILITY_RESULT" = "SKIP policy-never" ]
 }
 
 @test "skip: invalid policy junk" {
-    run eligibility_check "keelson.pro/policy=foo" "ghcr.io/x/y:1.2.3"
-    [ "$status" -eq 1 ]
-    [ "$output" = "SKIP invalid-policy" ]
+    rc=0
+    eligibility_check "keelson.pro/policy=foo" "ghcr.io/x/y:1.2.3" || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$ELIGIBILITY_RESULT" = "SKIP invalid-policy" ]
 }
 
 @test "skip: keel policy=force under keel mode" {
-    KEELSON_CONFIG_MODE=keel run eligibility_check "keel.sh/policy=force" "ghcr.io/x/y:1.2.3"
-    [ "$status" -eq 1 ]
-    [ "$output" = "SKIP keel-policy-force-unsupported" ]
+    rc=0
+    KEELSON_CONFIG_MODE=keel eligibility_check "keel.sh/policy=force" "ghcr.io/x/y:1.2.3" || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$ELIGIBILITY_RESULT" = "SKIP keel-policy-force-unsupported" ]
 }
 
 @test "skip: tag is latest" {
-    run eligibility_check "keelson.pro/policy=minor" "nginx:latest"
-    [ "$status" -eq 1 ]
-    [ "$output" = "SKIP tag-is-latest" ]
+    rc=0
+    eligibility_check "keelson.pro/policy=minor" "nginx:latest" || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$ELIGIBILITY_RESULT" = "SKIP tag-is-latest" ]
 }
 
 @test "skip: no tag at all" {
-    run eligibility_check "keelson.pro/policy=minor" "nginx"
-    [ "$status" -eq 1 ]
-    [ "$output" = "SKIP no-tag" ]
+    rc=0
+    eligibility_check "keelson.pro/policy=minor" "nginx" || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$ELIGIBILITY_RESULT" = "SKIP no-tag" ]
 }
 
 @test "skip: digest-pinned" {
-    run eligibility_check "keelson.pro/policy=minor" "nginx@sha256:abc"
-    [ "$status" -eq 1 ]
-    [ "$output" = "SKIP tag-is-digest-pinned" ]
+    rc=0
+    eligibility_check "keelson.pro/policy=minor" "nginx@sha256:abc" || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$ELIGIBILITY_RESULT" = "SKIP tag-is-digest-pinned" ]
 }
 
 @test "skip: non-numeric tag segment" {
-    run eligibility_check "keelson.pro/policy=minor" "nginx:v1.2.3"
-    [ "$status" -eq 1 ]
-    [ "$output" = "SKIP tag-has-non-numeric-segment" ]
+    rc=0
+    eligibility_check "keelson.pro/policy=minor" "nginx:v1.2.3" || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$ELIGIBILITY_RESULT" = "SKIP tag-has-non-numeric-segment" ]
 }
 
 @test "skip: minor policy on 4-segment tag" {
-    run eligibility_check "keelson.pro/policy=minor" "nginx:1.2.3.4"
-    [ "$status" -eq 1 ]
-    [ "$output" = "SKIP policy-position-incompatible-with-tag" ]
+    rc=0
+    eligibility_check "keelson.pro/policy=minor" "nginx:1.2.3.4" || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$ELIGIBILITY_RESULT" = "SKIP policy-position-incompatible-with-tag" ]
 }
 
 @test "skip: minor policy on 2-segment tag" {
-    run eligibility_check "keelson.pro/policy=minor" "nginx:1.2"
-    [ "$status" -eq 1 ]
-    [ "$output" = "SKIP policy-position-incompatible-with-tag" ]
+    rc=0
+    eligibility_check "keelson.pro/policy=minor" "nginx:1.2" || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$ELIGIBILITY_RESULT" = "SKIP policy-position-incompatible-with-tag" ]
 }
 
 @test "skip: numeric N out of range" {
-    run eligibility_check "keelson.pro/policy=5" "nginx:1.2.3"
-    [ "$status" -eq 1 ]
-    [ "$output" = "SKIP policy-position-incompatible-with-tag" ]
+    rc=0
+    eligibility_check "keelson.pro/policy=5" "nginx:1.2.3" || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$ELIGIBILITY_RESULT" = "SKIP policy-position-incompatible-with-tag" ]
 }
 
 @test "keel mode: cleanly maps major policy" {
-    KEELSON_CONFIG_MODE=keel run eligibility_check "keel.sh/policy=major" "ghcr.io/x/y:1.2.3"
-    [ "$status" -eq 0 ]
-    [ "$output" = "OK major 1" ]
+    rc=0
+    KEELSON_CONFIG_MODE=keel eligibility_check "keel.sh/policy=major" "ghcr.io/x/y:1.2.3" || rc=$?
+    [ "$rc" -eq 0 ]
+    [ "$ELIGIBILITY_RESULT" = "OK major 1" ]
 }

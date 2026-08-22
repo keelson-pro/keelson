@@ -90,8 +90,10 @@ registry_config_for_host() {
 registry_resolve_creds() {
     local image=$1 ips_json=$2 ns=$3 ann=$4 sa=${5:-} container=${6:-}
     local host mode creds
-    host=$(image_host "$image")
-    mode=$(annotation_get "$ann" credentials "$container")
+    image_host "$image"
+    host=$IMAGE_HOST
+    annotation_get "$ann" credentials "$container"
+    mode=$ANNOTATION_VALUE
     mode=${mode:-respect-pod}
 
     case "$mode" in
@@ -268,7 +270,8 @@ registry_creds_azure_wi() {
 registry_list_tags() {
     local image=$1 creds=${2:-}
     local repo out tmperr
-    repo=$(image_repo "$image")
+    image_repo "$image"
+    repo=$IMAGE_REPO
     tmperr=$(mktemp 2>/dev/null) || tmperr=""
     REGISTRY_LAST_ERROR=""
     if [ -n "$creds" ]; then
