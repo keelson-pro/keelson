@@ -256,3 +256,95 @@ JSON
     [ "$status" -eq 0 ]
     [ "$output" = "flux" ]
 }
+
+# Equal timestamps were undocumented and untested: the comparison is strictly
+# greater, so the earlier entry keeps the field.
+equal_time_mf() {
+    cat <<'JSON'
+[
+  {
+    "manager": "first-controller",
+    "operation": "Apply",
+    "time": "2026-04-01T10:00:00Z",
+    "fieldsV1": {"f:spec":{"f:template":{"f:spec":{"f:containers":{
+      "k:{\"name\":\"main\"}": {"f:image": {}}}}}}}
+  },
+  {
+    "manager": "second-controller",
+    "operation": "Apply",
+    "time": "2026-04-01T10:00:00Z",
+    "fieldsV1": {"f:spec":{"f:template":{"f:spec":{"f:containers":{
+      "k:{\"name\":\"main\"}": {"f:image": {}}}}}}}
+  }
+]
+JSON
+}
+
+# An Apply owner with no time at all, alongside one that has a time.
+untimed_owner_mf() {
+    cat <<'JSON'
+[
+  {
+    "manager": "untimed-controller",
+    "operation": "Apply",
+    "fieldsV1": {"f:spec":{"f:template":{"f:spec":{"f:containers":{
+      "k:{\"name\":\"main\"}": {"f:image": {}}}}}}}
+  }
+]
+JSON
+}
+
+@test "apply_owner_of_image: equal timestamps keep the earlier entry" {
+    run managedfields_apply_owner_of_image "$(equal_time_mf)" containers main
+    [ "$status" -eq 0 ]
+    [ "$output" = "first-controller" ]
+}
+
+@test "apply_owner_of_image: an Apply owner with no time still wins alone" {
+    run managedfields_apply_owner_of_image "$(untimed_owner_mf)" containers main
+    [ "$status" -eq 0 ]
+    [ "$output" = "untimed-controller" ]
+}
+
+@test "apply_owner_of_image: an Update entry never beats an older Apply" {
+    local mf
+    mf=$(cat <<'JSON'
+[
+  {
+    "manager": "old-apply",
+    "operation": "Apply",
+    "time": "2026-01-01T00:00:00Z",
+    "fieldsV1": {"f:spec":{"f:template":{"f:spec":{"f:containers":{
+      "k:{\"name\":\"main\"}": {"f:image": {}}}}}}}
+  },
+  {
+    "manager": "recent-update",
+    "operation": "Update",
+    "time": "2026-09-01T00:00:00Z",
+    "fieldsV1": {"f:spec":{"f:template":{"f:spec":{"f:containers":{
+      "k:{\"name\":\"main\"}": {"f:image": {}}}}}}}
+  }
+]
+JSON
+)
+    run managedfields_apply_owner_of_image "$mf" containers main
+    [ "$output" = "old-apply" ]
+}
+
+@test "apply_owner_of_image: an Apply entry owning no image field is ignored" {
+    local mf
+    mf=$(cat <<'JSON'
+[
+  {
+    "manager": "replicas-owner",
+    "operation": "Apply",
+    "time": "2026-09-01T00:00:00Z",
+    "fieldsV1": {"f:spec":{"f:replicas": {}}}
+  }
+]
+JSON
+)
+    run managedfields_apply_owner_of_image "$mf" containers main
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
