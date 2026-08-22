@@ -37,11 +37,16 @@ queue_enqueue() {
 # enqueues: a new file written after the iteration starts may be picked up
 # on this drain or the next, depending on directory ordering.
 queue_drain() {
-    local f
+    local f entry
     shopt -s nullglob
     for f in "$KEELSON_QUEUE_DIR"/*; do
-        cat "$f"
-        printf '\n'
+        entry=
+        # queue_enqueue writes the identity with no trailing newline, so read
+        # reports EOF having filled entry anyway. Unlike state_own_namespace,
+        # nothing here is gated on that status: an unreadable or empty entry
+        # emits the blank line cat would have, and the consumer skips it.
+        read -r entry < "$f" || true
+        printf '%s\n' "$entry"
         rm -f "$f"
     done
     shopt -u nullglob
