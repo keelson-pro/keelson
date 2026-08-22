@@ -1561,25 +1561,6 @@ EXTRACT_LIST='{"items":[
     [ -z "$SCAN_WL_ANNOTATIONS" ]
 }
 
-@test "extract: containers carry name and image" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
-    local names
-    names=$(printf '%s' "$SCAN_WL_CONTAINERS_JSON" | yq -p=json -o=y '.[].name' | tr '\n' ' ')
-    [ "$names" = "web side " ]
-    [[ "$SCAN_WL_CONTAINERS_JSON" == *"ghcr.io/acme/web:1.2.3"* ]]
-}
-
-@test "extract: init containers are kept separate from containers" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
-    [[ "$SCAN_WL_INIT_CONTAINERS_JSON" == *"migrate"* ]]
-    [[ "$SCAN_WL_CONTAINERS_JSON" != *"migrate"* ]]
-}
-
-@test "extract: absent init containers are an empty array, not null" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 1
-    [ "$(printf '%s' "$SCAN_WL_INIT_CONTAINERS_JSON" | yq -p=json -o=y 'length')" = "0" ]
-}
-
 @test "extract: image pull secrets stay on one line for the cache record" {
     scan_extract_workload "$EXTRACT_LIST" Deployment 0
     [ "$(printf '%s\n' "$SCAN_WL_IPS_JSON" | wc -l | tr -d ' ')" = "1" ]
@@ -1635,7 +1616,68 @@ CRONJOB_LIST='{"items":[
     [ "$SCAN_WL_SUSPEND" = "false" ]
 }
 
-@test "extract: CronJob containers come from under jobTemplate" {
+# --- container pairs ---
+#
+# "<list> <name>=<image>" is what the cache record stores and what the poll
+# loop reads back, so the format is a contract between the two.
+
+@test "pairs: every container is listed with its list, name and image" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [[ "$SCAN_WL_CONTAINER_PAIRS" == *"containers web=ghcr.io/acme/web:1.2.3"* ]]
+    [[ "$SCAN_WL_CONTAINER_PAIRS" == *"containers side=ghcr.io/acme/side:0.1.0"* ]]
+}
+
+@test "pairs: init containers carry initContainers as their list" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [[ "$SCAN_WL_CONTAINER_PAIRS" == *"initContainers migrate=ghcr.io/acme/migrate:2.0.0"* ]]
+}
+
+@test "pairs: containers come before init containers" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ "${SCAN_WL_CONTAINER_PAIRS%%$'\n'*}" = "containers web=ghcr.io/acme/web:1.2.3" ]
+}
+
+@test "pairs: one line per container, no blanks" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ "$(printf '%s\n' "$SCAN_WL_CONTAINER_PAIRS" | wc -l | tr -d ' ')" = "3" ]
+    ! printf '%s\n' "$SCAN_WL_CONTAINER_PAIRS" | grep -q '^$'
+}
+
+@test "pairs: a workload with no init containers lists only its containers" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    [ "$SCAN_WL_CONTAINER_PAIRS" = "containers only=nginx:1.0" ]
+}
+
+@test "pairs: a digest-pinned image keeps its at-sign intact" {
+    local list='{"items":[{"metadata":{"namespace":"n","name":"w"},
+      "spec":{"template":{"spec":{"containers":[
+        {"name":"c","image":"ghcr.io/acme/w@sha256:abc123"}]}}}}]}'
+    scan_extract_workload "$list" Deployment 0
+    [ "$SCAN_WL_CONTAINER_PAIRS" = "containers c=ghcr.io/acme/w@sha256:abc123" ]
+}
+
+@test "pairs: a registry port survives the colon" {
+    local list='{"items":[{"metadata":{"namespace":"n","name":"w"},
+      "spec":{"template":{"spec":{"containers":[
+        {"name":"c","image":"reg.local:5000/acme/w:1.0"}]}}}}]}'
+    scan_extract_workload "$list" Deployment 0
+    [ "$SCAN_WL_CONTAINER_PAIRS" = "containers c=reg.local:5000/acme/w:1.0" ]
+}
+
+@test "pairs: a workload with no containers at all yields nothing" {
+    local list='{"items":[{"metadata":{"namespace":"n","name":"w"},
+      "spec":{"template":{"spec":{}}}}]}'
+    scan_extract_workload "$list" Deployment 0
+    [ -z "$SCAN_WL_CONTAINER_PAIRS" ]
+}
+
+@test "pairs: CronJob containers read through jobTemplate" {
     scan_extract_workload "$CRONJOB_LIST" CronJob 0
-    [ "$(printf '%s' "$SCAN_WL_CONTAINERS_JSON" | yq -p=json -o=y '.[0].name')" = "job" ]
+    [ "$SCAN_WL_CONTAINER_PAIRS" = "containers job=ghcr.io/acme/job:3.0.0" ]
+}
+
+@test "pairs: annotations after the sentinel do not swallow the pairs" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [[ "$SCAN_WL_ANNOTATIONS" != *"containers "* ]]
+    [[ "$SCAN_WL_CONTAINER_PAIRS" != *"keelson.pro/"* ]]
 }

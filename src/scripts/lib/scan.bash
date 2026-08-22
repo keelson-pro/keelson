@@ -20,8 +20,10 @@ SCAN_WL_NAME=
 SCAN_WL_ANNOTATIONS=
 SCAN_WL_MANAGED_FIELDS=
 SCAN_WL_SUSPEND=
-SCAN_WL_CONTAINERS_JSON=
-SCAN_WL_INIT_CONTAINERS_JSON=
+# Both container lists in one block, each line "<list> <name>=<image>", so
+# everything downstream keeps a single loop and still knows which array to
+# write an update back to.
+SCAN_WL_CONTAINER_PAIRS=
 SCAN_WL_IPS_JSON=
 SCAN_WL_SA_NAME=
 
@@ -279,8 +281,7 @@ scan_extract_workload() {
     SCAN_WL_ANNOTATIONS=
     SCAN_WL_MANAGED_FIELDS=
     SCAN_WL_SUSPEND=
-    SCAN_WL_CONTAINERS_JSON=
-    SCAN_WL_INIT_CONTAINERS_JSON=
+    SCAN_WL_CONTAINER_PAIRS=
     SCAN_WL_IPS_JSON=
     SCAN_WL_SA_NAME=
 
@@ -311,9 +312,11 @@ scan_extract_workload() {
         \"sa=\" + (\$w${base}.serviceAccountName // \"default\"),
         ${suspend_expr}
         \"mf=\" + (\$w.metadata.managedFields // [] | @json),
-        \"containers=\" + (\$w${base}.containers // [] | @json),
-        \"initContainers=\" + (\$w${base}.initContainers // [] | @json),
         \"ips=\" + (\$w${base}.imagePullSecrets // [] | @json),
+        (\$w${base}.containers // [] | .[]
+            | \"container=containers \" + .name + \"=\" + .image),
+        (\$w${base}.initContainers // [] | .[]
+            | \"container=initContainers \" + .name + \"=\" + .image),
         \"annotations=\",
         (\$w.metadata.annotations // {} | to_entries | .[]
             | select(.key | test(\"^(keelson\\.pro|keel\\.sh)/\"))
@@ -348,16 +351,21 @@ scan_extract_workload() {
             'sa='*)             SCAN_WL_SA_NAME=${line#sa=} ;;
             'suspend='*)        SCAN_WL_SUSPEND=${line#suspend=} ;;
             'mf='*)             SCAN_WL_MANAGED_FIELDS=${line#mf=} ;;
-            'containers='*)     SCAN_WL_CONTAINERS_JSON=${line#containers=} ;;
-            'initContainers='*) SCAN_WL_INIT_CONTAINERS_JSON=${line#initContainers=} ;;
             'ips='*)            SCAN_WL_IPS_JSON=${line#ips=} ;;
+            'container='*)
+                if [ -n "$SCAN_WL_CONTAINER_PAIRS" ]; then
+                    SCAN_WL_CONTAINER_PAIRS+=$'\n'${line#container=}
+                else
+                    SCAN_WL_CONTAINER_PAIRS=${line#container=}
+                fi
+                ;;
         esac
     done
 }
 
 scan_workload() {
     local list_json=$1 kind=$2 i=$3
-    local ns name annotations containers_json init_containers_json \
+    local ns name annotations container_pairs \
           ips_json mf_json suspend sa_name
 
     scan_extract_workload "$list_json" "$kind" "$i"
@@ -366,12 +374,11 @@ scan_workload() {
     annotations=$SCAN_WL_ANNOTATIONS
     mf_json=$SCAN_WL_MANAGED_FIELDS
     suspend=$SCAN_WL_SUSPEND
-    containers_json=$SCAN_WL_CONTAINERS_JSON
-    init_containers_json=$SCAN_WL_INIT_CONTAINERS_JSON
+    container_pairs=$SCAN_WL_CONTAINER_PAIRS
     ips_json=$SCAN_WL_IPS_JSON
     sa_name=$SCAN_WL_SA_NAME
 
-    local n j clist cjson cname cimage _workload_updated=0 \
+    local rest line clist cname cimage _workload_updated=0 \
           _workload_last_from="" _workload_last_to="" _workload_last_repo=""
 
     # Cached before anything is polled, because an update records the image it
@@ -380,23 +387,24 @@ scan_workload() {
     # A workload whose record could not be written is one workload lost until
     # the next pass, not a reason to abandon the other thirty in this one.
     scan_cache_workload "$kind" "$ns" "$name" "$annotations" "$suspend" \
-        "$sa_name" "$ips_json" "$containers_json" "$init_containers_json" || true
+        "$sa_name" "$ips_json" "$container_pairs" || true
 
     if [ "$_scan_poll_all" -eq 1 ]; then
-        for clist in containers initContainers; do
-            if [ "$clist" = containers ]; then
-                cjson=$containers_json
+        rest=$container_pairs
+        while [ -n "$rest" ]; do
+            line=${rest%%$'\n'*}
+            if [ "$line" = "$rest" ]; then
+                rest=
             else
-                cjson=$init_containers_json
+                rest=${rest#*$'\n'}
             fi
-            n=$(printf '%s' "$cjson" | yq -p=json -o=y 'length')
-            for ((j=0; j<n; j++)); do
-                cname=$(printf '%s' "$cjson" | yq -p=json -o=y ".[$j].name")
-                cimage=$(printf '%s' "$cjson" | yq -p=json -o=y ".[$j].image")
-                _scan_total=$((_scan_total + 1))
-                scan_container "$kind" "$ns" "$name" "$clist" "$cname" "$cimage" \
-                    "$annotations" "$ips_json" "$mf_json" "$sa_name"
-            done
+            clist=${line%% *}
+            line=${line#* }
+            cname=${line%%=*}
+            cimage=${line#*=}
+            _scan_total=$((_scan_total + 1))
+            scan_container "$kind" "$ns" "$name" "$clist" "$cname" "$cimage" \
+                "$annotations" "$ips_json" "$mf_json" "$sa_name"
         done
     fi
 
@@ -416,7 +424,7 @@ scan_workload() {
 }
 
 # scan_cache_workload <kind> <ns> <name> <annotations> <suspend> <sa> <ips>
-#                     <containers-json> <init-containers-json>
+#                     <container-pairs>
 #
 # Records everything a later poll needs, so a due workload can be handled
 # straight from cache with no read of the cluster. Cached whether or not any
@@ -424,28 +432,12 @@ scan_workload() {
 # an annotation added later is noticed.
 scan_cache_workload() {
     local kind=$1 ns=$2 name=$3 annotations=$4 suspend=$5 sa=$6 ips=$7 \
-          containers_json=$8 init_containers_json=${9:-'[]'}
+          containers=$8
     inventory_enabled || return 0
 
     SCAN_SEEN["$kind $ns $name"]=1
     if scan_is_keelson_managed "$annotations"; then
         _scan_managed=$(( _scan_managed + 1 ))
-    fi
-
-    # Both lists in one block, each entry carrying the list it came from, so
-    # everything downstream keeps a single loop and still knows where to
-    # write an update back.
-    local containers init_containers
-    containers=$(printf '%s' "$containers_json" \
-        | yq -p=json -o=y '.[] | "containers " + .name + "=" + .image')
-    init_containers=$(printf '%s' "$init_containers_json" \
-        | yq -p=json -o=y '.[] | "initContainers " + .name + "=" + .image')
-    if [ -n "$init_containers" ]; then
-        if [ -n "$containers" ]; then
-            containers="${containers}"$'\n'"${init_containers}"
-        else
-            containers=$init_containers
-        fi
     fi
 
     local interval=$_scan_interval sched
