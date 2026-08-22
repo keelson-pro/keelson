@@ -181,6 +181,7 @@ metadata:
     keelson.pro/policy: minor              # default for every container
     keelson.pro/policy.web: major          # the "web" container gets major bumps
     keelson.pro/match-tag.db: '^pg-15\.'   # restrict tag set for "db" only
+    keelson.pro/match-mode.db: regex       # match-tag is a glob unless you say this
 ```
 
 The container-suffixed key wins when present; otherwise Keelson falls back to the workload-wide key. The same precedence applies under `KEELSON_CONFIG_MODE=keel` with `keel.sh/policy.<container>`.
@@ -221,7 +222,8 @@ moved elsewhere — usually to the GitOps or CI layer where it belongs.
   Run those steps from the workload's own lifecycle (initContainers, Jobs) or
   from CI.
 - **`keel.sh/maxAge`** — skip tags older than a duration. Express the
-  constraint through a `match-tag` regex or by tagging discipline upstream.
+  constraint through `match-tag` (with `match-mode: regex`) or by tagging
+  discipline upstream.
 - **`keel.sh/releaseNotes`** — surface release notes alongside notifications.
   Keelson has no notification sinks yet, so the value has nowhere to go.
 - **`keel.sh/pollSchedule` as a raw cron expression** — Keel accepts robfig
