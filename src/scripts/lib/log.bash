@@ -242,10 +242,23 @@ log_file_rotate_if_needed() {
 log_file_write() {
     local line=$1
     [ -n "$KEELSON_LOG_FILE_PATH" ] || return 0
-    local dir
-    dir=$(dirname "$KEELSON_LOG_FILE_PATH")
+    # stderr is silenced before the append, not after: bash applies
+    # redirections left to right, so a failing >> reports itself to whatever
+    # stderr is at that point. The file channel must never contaminate the
+    # console it is a copy of.
+    printf '%s' "$line" 2>/dev/null >> "$KEELSON_LOG_FILE_PATH" || true
+}
+
+# log_file_init
+# Creates the log directory. Called once at startup by every entry point that
+# logs, so log_file_write never has to: it lives on the Pod's emptyDir for the
+# life of the Pod, and checking per line cost a fork on a path that cannot
+# change.
+log_file_init() {
+    [ -n "$KEELSON_LOG_FILE_PATH" ] || return 0
+    local dir=${KEELSON_LOG_FILE_PATH%/*}
+    [ "$dir" = "$KEELSON_LOG_FILE_PATH" ] && return 0
     mkdir -p "$dir" 2>/dev/null || return 0
-    printf '%s' "$line" >> "$KEELSON_LOG_FILE_PATH" 2>/dev/null || true
 }
 
 # log_emit <level> <throttle: 0|1> <event> [k=v ...]

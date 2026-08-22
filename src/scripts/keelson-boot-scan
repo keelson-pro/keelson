@@ -45,6 +45,7 @@ USAGE
 }
 
 main() {
+    log_file_init
     local apply=0
     while [ $# -gt 0 ]; do
         case "$1" in

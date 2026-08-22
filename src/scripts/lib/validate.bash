@@ -186,6 +186,7 @@ validate_filesystem() {
         return 1
     fi
     rm -f "$probe"
+    log_file_init
 }
 
 validate_config() {

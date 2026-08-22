@@ -359,3 +359,34 @@ emit() { "$@" 2>&1; }
     [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
     [[ "$output" == *'"detail":"a b c"'* ]]
 }
+
+# --- the file channel is on every log line's path ---
+
+@test "file channel: writing a line forks nothing" {
+    # The directory is on the Pod's emptyDir for the life of the Pod, so
+    # checking for it per line cost two forks on a path that cannot change.
+    local mkdirs=0 dirnames=0
+    mkdir() { mkdirs=$(( mkdirs + 1 )); command mkdir "$@"; }
+    dirname() { dirnames=$(( dirnames + 1 )); command dirname "$@"; }
+
+    log_info one k=v 2>/dev/null
+    log_info two k=v 2>/dev/null
+    log_info three k=v 2>/dev/null
+
+    unset -f mkdir dirname
+    [ "$mkdirs" -eq 0 ]
+    [ "$dirnames" -eq 0 ]
+    [ "$(grep -c . "$KEELSON_LOG_FILE_PATH")" = "3" ]
+}
+
+@test "file_init: creates the log directory" {
+    KEELSON_LOG_FILE_PATH="$TMP_DIR/fresh/keelson.log"
+    log_file_init
+    [ -d "$TMP_DIR/fresh" ]
+}
+
+@test "file_init: an empty path creates nothing" {
+    KEELSON_LOG_FILE_PATH=
+    run log_file_init
+    [ "$status" -eq 0 ]
+}
