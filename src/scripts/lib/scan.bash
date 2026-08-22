@@ -589,9 +589,13 @@ scan_container() {
             ;;
     esac
 
-    local policy position
-    policy=$(printf '%s' "$result" | awk '{print $2}')
-    position=$(printf '%s' "$result" | awk '{print $3}')
+    # "OK <policy> <position>": policy is one of major/all/minor/patch and
+    # position is an integer, so neither holds a space and splitting it here
+    # costs nothing. Two awk forks per eligible container did.
+    local policy position fields
+    fields=${result#OK }
+    policy=${fields%% *}
+    position=${fields##* }
 
     local creds
     if ! creds=$(registry_resolve_creds "$cimage" "$ips_json" "$ns" "$ann" "$sa_name" "$cname"); then
