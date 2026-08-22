@@ -21,7 +21,7 @@ setup() {
     rm -f "$KEELSON_REGISTRIES_FILE"
     # Most events the scan emits are at debug level now (scan-start, summary,
     # skip-not-eligible, no-change). Run at debug so assertions can see them.
-    KEELSON_LOG_LEVEL=debug
+    KEELSON_LOG_LEVEL=DEBUG
     # Plain format collapses to the msg= sentence and drops event/field tags.
     # Tests assert on both sentences and structured fields, so use JSON.
     KEELSON_LOG_FORMAT=json

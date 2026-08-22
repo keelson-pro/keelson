@@ -49,19 +49,19 @@ emit() { "$@" 2>&1; }
 }
 
 @test "log_debug: visible at debug level" {
-    KEELSON_LOG_LEVEL=debug run emit log_debug some-event k=v
+    KEELSON_LOG_LEVEL=DEBUG run emit log_debug some-event k=v
     [ "$status" -eq 0 ]
     [[ "$output" =~ DEBUG ]]
 }
 
 @test "log_info: hidden at warn level" {
-    KEELSON_LOG_LEVEL=warn run emit log_info some-event
+    KEELSON_LOG_LEVEL=WARN run emit log_info some-event
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
 
 @test "log_error: visible at error level" {
-    KEELSON_LOG_LEVEL=error run emit log_error oh-no k=v
+    KEELSON_LOG_LEVEL=ERROR run emit log_error oh-no k=v
     [ "$status" -eq 0 ]
     [[ "$output" =~ ERROR ]]
 }
@@ -126,7 +126,7 @@ emit() { "$@" 2>&1; }
 }
 
 @test "rate limit: each level has its own interval" {
-    KEELSON_LOG_LEVEL=debug
+    KEELSON_LOG_LEVEL=DEBUG
     KEELSON_LOG_INFO_REPEAT_INTERVAL=600
     KEELSON_LOG_ERROR_REPEAT_INTERVAL=0
     log_info  evt k=v 2>"$TMP_DIR/i1.err"
@@ -158,7 +158,7 @@ emit() { "$@" 2>&1; }
 # --- file channel ---
 
 @test "file channel: always writes regardless of stdout level" {
-    KEELSON_LOG_LEVEL=error
+    KEELSON_LOG_LEVEL=ERROR
     log_debug some-event k=v 2>/dev/null
     [ -f "$KEELSON_LOG_FILE_PATH" ]
     grep -q "some-event" "$KEELSON_LOG_FILE_PATH"

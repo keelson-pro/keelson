@@ -130,7 +130,7 @@ SH
 exit 0
 SH
     KEELSON_WATCH_MAX_ITERATIONS=2 KEELSON_WATCHER_RECONNECT_INITIAL=1 \
-    KEELSON_LOG_LEVEL=debug \
+    KEELSON_LOG_LEVEL=DEBUG \
         run emit watch_run_kind Deployment
     [ "$status" -eq 0 ]
     # Two iterations -> two "Watching kind" log lines.
@@ -171,7 +171,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-    KEELSON_WATCH_MAX_ITERATIONS=3 KEELSON_LOG_LEVEL=debug run emit watch_run_kind CronJob
+    KEELSON_WATCH_MAX_ITERATIONS=3 KEELSON_LOG_LEVEL=DEBUG run emit watch_run_kind CronJob
     [ "$status" -eq 0 ]
     # All three iterations ran: set -e did not kill the loop on the first.
     [ "$(printf '%s\n' "$output" | grep -c "Watching kind 'CronJob'")" = "3" ]
@@ -229,7 +229,7 @@ SH
 
 @test "watch_run_kind: the warn line hints at the error, without the object dump" {
     install_jsonpath_failure_shim
-    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=info \
+    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=INFO \
         run emit watch_run_kind Deployment
     [[ "$output" == *"error: error executing jsonpath"* ]]
     [[ "$output" == *"Retrying in"* ]]
@@ -238,7 +238,7 @@ SH
 
 @test "watch_run_kind: the full kubectl output is there at debug" {
     install_jsonpath_failure_shim
-    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=debug \
+    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=DEBUG \
         run emit watch_run_kind Deployment
     [[ "$output" == *"DUMPMARKER"* ]]
 }
@@ -537,7 +537,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=info \
+    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=INFO \
         run emit watch_run_kind Deployment
     [[ "$output" != *"Watching kind"* ]]
 }
@@ -553,7 +553,7 @@ exit 0
 SH
     # The stream lasts no time at all here, so move the threshold instead.
     WATCH_ROUTINE_STREAM_SECONDS=0
-    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=info \
+    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=INFO \
         run emit watch_run_kind Deployment
     [[ "$output" != *"lasted"* ]]
 }
@@ -568,7 +568,7 @@ SH
 exit 0
 SH
     WATCH_ROUTINE_STREAM_SECONDS=1800
-    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=info \
+    KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=INFO \
         run emit watch_run_kind Deployment
     [[ "$output" == *"WARN"* ]]
     [[ "$output" == *"lasted 0s before disconnecting"* ]]

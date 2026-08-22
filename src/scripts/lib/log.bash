@@ -8,7 +8,7 @@
 #
 # Configuration via env (all required, validated at boot):
 #   KEELSON_LOG_FORMAT                   plain | json
-#   KEELSON_LOG_LEVEL                    debug | info | warn | error
+#   KEELSON_LOG_LEVEL                    DEBUG | INFO | WARN | ERROR
 #   KEELSON_LOG_DEBUG_REPEAT_INTERVAL    seconds; 0 = never throttle
 #   KEELSON_LOG_INFO_REPEAT_INTERVAL     seconds; 0 = never throttle
 #   KEELSON_LOG_WARN_REPEAT_INTERVAL     seconds; 0 = never throttle
@@ -67,10 +67,10 @@ LOG_ESCAPED=
 # log_level_num <level>  -> LOG_LEVEL_NUM
 log_level_num() {
     case "$1" in
-        debug) LOG_LEVEL_NUM=0 ;;
-        info)  LOG_LEVEL_NUM=1 ;;
-        warn)  LOG_LEVEL_NUM=2 ;;
-        error) LOG_LEVEL_NUM=3 ;;
+        DEBUG) LOG_LEVEL_NUM=0 ;;
+        INFO)  LOG_LEVEL_NUM=1 ;;
+        WARN)  LOG_LEVEL_NUM=2 ;;
+        ERROR) LOG_LEVEL_NUM=3 ;;
         *)     LOG_LEVEL_NUM=1 ;;
     esac
 }
@@ -79,7 +79,7 @@ log_should_emit_stdout() {
     local lvl_num
     log_level_num "$1"
     lvl_num=$LOG_LEVEL_NUM
-    log_level_num "${KEELSON_LOG_LEVEL:-info}"
+    log_level_num "${KEELSON_LOG_LEVEL:-INFO}"
     [ "$lvl_num" -ge "$LOG_LEVEL_NUM" ]
 }
 
@@ -135,10 +135,10 @@ log_hint() {
 # throttle. Missing var also means 0 so older deploys don't break.
 log_throttle_interval() {
     case "$1" in
-        debug) printf '%s' "${KEELSON_LOG_DEBUG_REPEAT_INTERVAL:-0}" ;;
-        info)  printf '%s' "${KEELSON_LOG_INFO_REPEAT_INTERVAL:-0}" ;;
-        warn)  printf '%s' "${KEELSON_LOG_WARN_REPEAT_INTERVAL:-0}" ;;
-        error) printf '%s' "${KEELSON_LOG_ERROR_REPEAT_INTERVAL:-0}" ;;
+        DEBUG) printf '%s' "${KEELSON_LOG_DEBUG_REPEAT_INTERVAL:-0}" ;;
+        INFO)  printf '%s' "${KEELSON_LOG_INFO_REPEAT_INTERVAL:-0}" ;;
+        WARN)  printf '%s' "${KEELSON_LOG_WARN_REPEAT_INTERVAL:-0}" ;;
+        ERROR) printf '%s' "${KEELSON_LOG_ERROR_REPEAT_INTERVAL:-0}" ;;
         *)     printf '0' ;;
     esac
 }
@@ -267,16 +267,15 @@ log_emit() {
     local level=$1 throttle=$2 event=$3
     shift 3
 
-    local ts level_uc
+    local ts
     # Built-in time formatting rather than a date fork on every line. The Z is
     # literal because the image sets TZ=UTC, which validate_config enforces.
     printf -v ts '%(%Y-%m-%dT%H:%M:%SZ)T' -1
-    level_uc=$(printf '%s' "$level" | tr '[:lower:]' '[:upper:]')
 
     # Copied out of the shared global: log_render_json overwrites LOG_LINE,
     # and the plain line is still needed after it for the non-JSON branch.
     local plain_line
-    log_render_plain "$ts" "$level_uc" "$event" "$@"
+    log_render_plain "$ts" "$level" "$event" "$@"
     plain_line=$LOG_LINE
 
     # File channel: always, regardless of stdout level or throttle.
@@ -300,7 +299,7 @@ log_emit() {
     fi
 
     if [ "${KEELSON_LOG_FORMAT:-plain}" = "json" ]; then
-        log_render_json "$ts" "$level_uc" "$event" "$@"
+        log_render_json "$ts" "$level" "$event" "$@"
     else
         LOG_LINE=$plain_line
     fi
@@ -309,12 +308,12 @@ log_emit() {
     printf '%s\n' "$LOG_LINE" >&2
 }
 
-log_debug()        { log_emit debug 1 "$@"; }
-log_info()         { log_emit info  1 "$@"; }
-log_warn()         { log_emit warn  1 "$@"; }
-log_error()        { log_emit error 1 "$@"; }
+log_debug()        { log_emit DEBUG 1 "$@"; }
+log_info()         { log_emit INFO  1 "$@"; }
+log_warn()         { log_emit WARN  1 "$@"; }
+log_error()        { log_emit ERROR 1 "$@"; }
 
-log_debug_always() { log_emit debug 0 "$@"; }
-log_info_always()  { log_emit info  0 "$@"; }
-log_warn_always()  { log_emit warn  0 "$@"; }
-log_error_always() { log_emit error 0 "$@"; }
+log_debug_always() { log_emit DEBUG 0 "$@"; }
+log_info_always()  { log_emit INFO  0 "$@"; }
+log_warn_always()  { log_emit WARN  0 "$@"; }
+log_error_always() { log_emit ERROR 0 "$@"; }

@@ -206,7 +206,7 @@ validate_config() {
 
     validate_env_enum KEELSON_SCOPE "cluster namespace" || errors=$((errors+1))
     validate_env_enum KEELSON_CONFIG_MODE "keelson keel both" || errors=$((errors+1))
-    validate_env_enum KEELSON_LOG_LEVEL "debug info warn error" || errors=$((errors+1))
+    validate_env_enum KEELSON_LOG_LEVEL "DEBUG INFO WARN ERROR" || errors=$((errors+1))
     validate_env_enum KEELSON_LOG_FORMAT "plain json" || errors=$((errors+1))
     validate_env_enum KEELSON_LOG_MANAGED_WORKLOADS "true false" || errors=$((errors+1))
     validate_env_enum KEELSON_RESPECT_SA_PULL_SECRETS "true false" || errors=$((errors+1))
