@@ -64,6 +64,20 @@ The file log path is convention, not configuration: `/keelson/work/log/keelson.l
 A misconfigured variable here fails `keelson-validate`, so the Pod refuses to boot rather than running with surprising defaults.
 
 
+## Resources
+
+| Kaptain Token | Default | Applied as |
+|---|---|---|
+| `Keelson/Memory` | `120Mi` | request **and** limit |
+| `Keelson/CpuRequest` | `100m` | request only (no limit is set) |
+| `Keelson/EphemeralStorage` | `150Mi` | request **and** limit |
+
+Memory request equals limit so the allocation is guaranteed and a leak dies predictably rather than growing into the node. Steady state is 64-89 MiB, so the default leaves room for a scan burst without over-reserving.
+
+There is deliberately **no CPU limit**. The tick loop is idle most of every second and then forks hard during a scan, which is exactly the shape a CPU limit throttles worst: a throttled tick reads as a wedged loop and the liveness probe restarts a controller that was only slow. Anyone who needs a limit has a `LimitRange` that will impose one.
+
+Ephemeral storage is tight on purpose, and the budget is worth knowing because it is a sum of three things. The Pod's quota covers the `emptyDir`, the container's writable layer, **and** the node-level container log for stdout. At Kubernetes' own defaults the console log rotates at 10Mi across 5 files, so 50Mi; Keelson's own log file is `LogFileMaxBytes × (LogFileKeep + 1)`, so 60Mi at defaults, since the live file reaches its size before rotating; the cache, queue and status files are under 1Mi even for a few hundred workloads. That is 120Mi at full convergence, which for a long-lived pod is where it settles rather than a spike. 150Mi is the margin over that. Lower `LogFileMaxBytes` and `LogFileKeep` together if you want it smaller: they are the only half of the sum Keelson controls.
+
 ## Probe timings
 
 Startup, readiness and liveness probes have sensible defaults but are all overrideable.
