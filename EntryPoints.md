@@ -8,7 +8,7 @@
 | `keelson` | Long-running controller. The Deployment's `command`. | Forever (until SIGTERM). |
 | `keelson-probe` | Kubernetes probe — `startup`, `readiness`, `liveness`. | Exits after one decision. |
 | `keelson-validate` | Boot-time config and dependency check. | Exits after one run. |
-| `keelson-boot-scan` | One-shot scan, default dry-run. | Exits after one pass. |
+| `keelson-user-recheck` | One-shot re-check a user runs by hand, default dry-run. | Exits after one pass. |
 | `keelson-update-resource` | Patch one container's image on one workload. | Exits after one patch. |
 
 
@@ -92,7 +92,7 @@ inventory, and the status files).
      with no workload behind them.
 
      The controller's scan makes no registry calls of its own; that is the
-     tick's job, above. `keelson-boot-scan` is the exception, being a
+     tick's job, above. `keelson-user-recheck` is the exception, being a
      one-shot with no tick behind it, so it polls everything in the same
      pass. Otherwise the scan is the reconciler for the workload inventory under
      `/keelson/work/inventory`: it records every workload it saw, eligible or
@@ -206,7 +206,7 @@ Errors accumulate across every check so a misconfigured Pod logs the full
 list once, not one failure at a time across restarts.
 
 
-## `keelson-boot-scan` — one-shot scan
+## `keelson-user-recheck` — one-shot re-check
 
 **Invoked by:** humans, debugging from a pod shell or a Job. Not wired into
 the Deployment.
@@ -226,7 +226,7 @@ before flipping a workload to controller management.
 
 ## `keelson-update-resource` — single-workload patch
 
-**Invoked by:** the scan path inside `keelson` and `keelson-boot-scan` once
+**Invoked by:** the scan path inside `keelson` and `keelson-user-recheck` once
 a workload is found eligible. Also CLI-usable for manual overrides.
 
 **Args:** `<kind> <namespace> <name> <container> <new-image> [--init]` — the
@@ -272,7 +272,7 @@ Deployment
    ├── readinessProbe:  keelson-probe readiness   (PIDs + streaming)
    └── livenessProbe:   keelson-probe liveness    (heartbeat)
 
-humans ──► keelson-boot-scan        (same scan_run code path, no watchers)
+humans ──► keelson-user-recheck     (same scan_run code path, no watchers)
 humans ──► keelson-validate         (same checks the controller runs at boot)
 ```
 

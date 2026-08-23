@@ -33,7 +33,7 @@ SCAN_WL_SA_NAME=
 # scan_run <apply> [poll-all]
 #
 # poll-all defaults to 1: a scan scans, which is what a one-shot
-# keelson-boot-scan wants. The controller passes 0, because its scan only
+# keelson-user-recheck wants. The controller passes 0, because its scan only
 # refreshes the cache and evicts; registry work is driven off next-due by the
 # tick, so a workload's cadence is its own rather than the scan's.
 scan_run() {

@@ -12,8 +12,8 @@ setup() {
     [ -x "${SCRIPT_DIR}/keelson" ]
 }
 
-@test "entry script: keelson-boot-scan is executable" {
-    [ -x "${SCRIPT_DIR}/keelson-boot-scan" ]
+@test "entry script: keelson-user-recheck is executable" {
+    [ -x "${SCRIPT_DIR}/keelson-user-recheck" ]
 }
 
 @test "entry script: keelson-update-resource is executable" {
@@ -34,8 +34,8 @@ setup() {
     [[ "$output" =~ Usage: ]]
 }
 
-@test "entry script: --help on keelson-boot-scan exits 0" {
-    run "${SCRIPT_DIR}/keelson-boot-scan" --help
+@test "entry script: --help on keelson-user-recheck exits 0" {
+    run "${SCRIPT_DIR}/keelson-user-recheck" --help
     [ "$status" -eq 0 ]
     [[ "$output" =~ Usage: ]]
 }

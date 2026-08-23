@@ -459,7 +459,7 @@ SH
 # from one pass is always enough.
 
 @test "inventory: a scan with no inventory directory touches nothing" {
-    # keelson-boot-scan run outside a controller pod has no inventory to keep.
+    # keelson-user-recheck run outside a controller pod has no inventory to keep.
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
     scan_run 0 2>/dev/null
     [ ! -d "$KEELSON_INVENTORY_DIR" ]

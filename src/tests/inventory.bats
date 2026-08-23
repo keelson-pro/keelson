@@ -418,7 +418,7 @@ put_simple() {
 }
 
 @test "set_container_image: no cache at all is not an error" {
-    # The keelson-boot-scan CLI runs with no inventory to keep current, so a
+    # The keelson-user-recheck CLI runs with no inventory to keep current, so a
     # warn at the call site would fire on every update it makes.
     KEELSON_INVENTORY_DIR="$TMP_DIR/absent"
     run inventory_set_container_image Deployment default web containers main a:2

@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 #
-# One-shot scan. Default dry-run; --apply patches workloads in place.
+# One-shot re-check a user runs by hand. Default dry-run; --apply patches
+# workloads in place.
 
 set -euo pipefail
 
@@ -36,7 +37,7 @@ source "${SCRIPT_DIR}/lib/scan.bash"
 
 usage() {
     cat <<'USAGE'
-Usage: keelson-boot-scan [--apply] [--help]
+Usage: keelson-user-recheck [--apply] [--help]
 
 Scan the cluster (or namespace, per KEELSON_SCOPE) for Keelson-managed
 workloads. Parse the current tag, query the registry, evaluate policy,
