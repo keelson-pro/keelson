@@ -281,14 +281,21 @@ loop_run() {
             loop_start_queue_refresh "$apply"
         fi
 
-        # Every tick: what needs polling now? The cache answers without
-        # touching the cluster, so this costs nothing when nothing is due.
+        # Every tick: what needs polling now? Asked here rather than left to
+        # the child, for the same reason the queue is: the child cannot find
+        # out there is nothing to do without first loading the ledger, and
+        # loading it to learn that was the whole of this controller's idle
+        # cost. inventory_due is a glob and a builtin read per record, so
+        # asking costs nothing; spawning does.
         if [ "$LOOP_POLL_PID" -gt 0 ] && ! kill -0 "$LOOP_POLL_PID" 2>/dev/null; then
             wait "$LOOP_POLL_PID" 2>/dev/null || true
             LOOP_POLL_PID=0
         fi
         if [ "$LOOP_POLL_PID" -eq 0 ]; then
-            loop_start_poll "$apply" "$now"
+            inventory_due "$now"
+            if [ "${#INVENTORY_DUE[@]}" -gt 0 ]; then
+                loop_start_poll "$apply" "$now"
+            fi
         fi
 
         if [ "$LOOP_SCAN_PID" -gt 0 ] && ! kill -0 "$LOOP_SCAN_PID" 2>/dev/null; then

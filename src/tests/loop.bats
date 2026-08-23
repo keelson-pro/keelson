@@ -46,6 +46,9 @@ setup() {
     # Stub the heavy collaborators.
     scan_run() { printf '%s\n' "$1" >>"$TMP_DIR/scan.calls"; }
     scan_poll_due() { printf '%s\n' "$2" >>"$TMP_DIR/poll.calls"; }
+    # Something due by default so the tick spawns its poll child; the tests
+    # about the gate override this.
+    inventory_due() { printf '%s\n' "$1" >>"$TMP_DIR/due.calls"; INVENTORY_DUE=("Deployment default app"); }
     scan_refresh_kind() { printf '%s\n' "$2" >>"$TMP_DIR/refresh.calls"; }
     scan_refresh_queued() { printf '%s\n' "$1" >>"$TMP_DIR/queue.calls"; }
     inventory_evict_unwatched() { printf 'evict-unwatched\n' >>"$TMP_DIR/refresh.calls"; }
@@ -488,4 +491,64 @@ emit() { "$@" 2>&1; }
     scan_log_managed_workloads() { printf 'called\n' >>"$TMP_DIR/managed.calls"; return 0; }
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     [ ! -f "$TMP_DIR/managed.calls" ]
+}
+
+# --- the poll child is gated on something actually being due ---
+#
+# The child cannot discover the queue is empty without first loading the
+# ledger from the ConfigMap, and that load was the controller's entire idle
+# cost. The queue path has had this gate since it was written; the poll path
+# had not.
+
+@test "loop_run: nothing due spawns no poll child" {
+    inventory_due() { INVENTORY_DUE=(); }
+    rm -f "$TMP_DIR/poll.calls"
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
+    [ ! -f "$TMP_DIR/poll.calls" ]
+}
+
+@test "loop_run: nothing due leaves the poll pid unset" {
+    inventory_due() { INVENTORY_DUE=(); }
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_POLL_PID" -eq 0 ]
+}
+
+@test "loop_run: something due still spawns the poll child" {
+    inventory_due() { INVENTORY_DUE=("Deployment default app"); }
+    rm -f "$TMP_DIR/poll.calls"
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
+    [ -f "$TMP_DIR/poll.calls" ]
+}
+
+@test "loop_run: the due check runs every tick" {
+    rm -f "$TMP_DIR/due.calls"
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=3 loop_run
+    [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
+    [ "$(wc -l < "$TMP_DIR/due.calls" | tr -d ' ')" -eq 3 ]
+}
+
+@test "loop_run: the due check is asked with the tick's own clock" {
+    rm -f "$TMP_DIR/due.calls"
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
+    clock_read
+    local asked
+    asked=$(head -n 1 "$TMP_DIR/due.calls")
+    [ "$asked" -gt 0 ]
+    [ "$asked" -le "$(( CLOCK_NOW_US / 1000000 ))" ]
+}
+
+@test "loop_run: the poll child gets the same clock the due check used" {
+    rm -f "$TMP_DIR/due.calls" "$TMP_DIR/poll.calls"
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
+    [ "$(head -n 1 "$TMP_DIR/due.calls")" = "$(head -n 1 "$TMP_DIR/poll.calls")" ]
 }
