@@ -36,10 +36,20 @@ STATUS_WATCHER_ERROR=
 
 # status_write_file <path> [<line> ...]
 # Atomic via write-then-rename, so a reader never sees a half-written file.
+# status_init
+# Ensures the status directory exists. Idempotent, and called once at boot
+# alongside queue_init and inventory_init.
+#
+# The writers below do not mkdir: the heartbeat is written every tick, and a
+# mkdir -p per tick is a process per tick, forever, to create a directory that
+# was made at boot and cannot go away.
+status_init() {
+    mkdir -p "$KEELSON_STATUS_DIR"
+}
+
 status_write_file() {
     local path=$1; shift
     local tmp="${path}.tmp"
-    mkdir -p "${path%/*}"
     if [ "$#" -gt 0 ]; then
         printf '%s\n' "$@" > "$tmp"
     else

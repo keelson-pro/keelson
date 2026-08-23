@@ -130,6 +130,7 @@ main() {
 
     queue_init
     inventory_init
+    status_init
     if ! state_init; then
         log_warn state-init-failed \
             configmap="${KEELSON_STATE_CONFIGMAP:-keelson-state}" \

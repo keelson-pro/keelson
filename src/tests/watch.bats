@@ -38,6 +38,7 @@ setup() {
     KEELSON_STATUS_DIR="$TMP_DIR/status"
     KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
     export KEELSON_STATUS_DIR KEELSON_INVENTORY_DIR
+    status_init
     inventory_init
 
     queue_init

@@ -240,7 +240,7 @@ loop_run() {
 
     local tick_us=$(( tick * 1000000 ))
     local now cycle_start_us remaining_us over_us over
-    local last_scan_start=0 last_refresh iter=0
+    local last_scan_start=0 last_refresh iter=0 last_rotate_check=0
     clock_read
     last_refresh=$(( CLOCK_NOW_US / 1000000 ))
 
@@ -336,7 +336,13 @@ loop_run() {
         # the same file but must never rotate it; concurrent rename shuffles
         # lose rotated files. Last thing in the tick, so it accounts for
         # everything this tick logged.
-        log_file_rotate_if_needed
+        #
+        # Not every tick, though: the check costs a wc fork and the answer
+        # changes about once an hour. Zero to start, so the first tick asks.
+        if [ $(( now - last_rotate_check )) -ge "$LOG_FILE_ROTATE_CHECK_INTERVAL" ]; then
+            last_rotate_check=$now
+            log_file_rotate_if_needed
+        fi
 
         clock_read
         remaining_us=$(( tick_us - (CLOCK_NOW_US - cycle_start_us) ))

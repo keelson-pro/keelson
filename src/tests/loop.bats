@@ -42,6 +42,7 @@ setup() {
     HEARTBEAT_FILE="$KEELSON_STATUS_DIR/heartbeat"
     WATCHERS_FILE="$KEELSON_STATUS_DIR/watchers"
     queue_init
+    status_init
 
     # Stub the heavy collaborators.
     scan_run() { printf '%s\n' "$1" >>"$TMP_DIR/scan.calls"; }
@@ -551,4 +552,22 @@ emit() { "$@" 2>&1; }
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
     [ "$(head -n 1 "$TMP_DIR/due.calls")" = "$(head -n 1 "$TMP_DIR/poll.calls")" ]
+}
+
+# --- the size check is throttled, the rotation is not ---
+
+@test "loop_run: the size check does not run on every tick" {
+    local calls="$TMP_DIR/rotate.calls"
+    log_file_rotate_if_needed() { printf 'check\n' >>"$calls"; }
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=5 loop_run
+    [ "$(wc -l < "$calls" | tr -d ' ')" -eq 1 ]
+}
+
+@test "loop_run: the first tick still checks" {
+    local calls="$TMP_DIR/rotate.calls"
+    log_file_rotate_if_needed() { printf 'check\n' >>"$calls"; }
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ -f "$calls" ]
 }
