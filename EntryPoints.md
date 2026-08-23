@@ -31,10 +31,12 @@ inventory, and the status files).
    failure at once. A bad config fails the container, not the scan.
 2. Log a `boot` event and install `TERM`/`INT` traps that kill watcher PIDs
    and any in-flight scan.
-3. Initialise the work queue under `/keelson/work` and load the trigger-state
-   ConfigMap into memory (per-CronJob always-once ledger and each workload's
-   next-due, so schedules survive a restart; log dedupe is held
-   in-memory by `lib/log.bash` and does not touch the ConfigMap).
+3. Initialise the work queue under `/keelson/work` and load the state
+   ConfigMap into memory (a record per workload saying Keelson has seen it and
+   whether it is acting on it, plus the per-CronJob always-once ledger). No
+   schedule is stored: next-due is derived from a hash of the workload's
+   identity, so it is the same on every cold start. Log dedupe is held
+   in-memory by `lib/log.bash` and does not touch the ConfigMap.
 4. Enter the tick loop (`KEELSON_TICK_INTERVAL=1s`). Each tick:
    - **Publish the heartbeat.** The clock is read and written in the same
      breath, first thing, to `/keelson/work/status/heartbeat`. Written
@@ -85,9 +87,10 @@ inventory, and the status files).
      taken per tick: the cluster is listed, and only once that list is in
      hand is that kind's cache thrown away and rebuilt, so a failed list
      leaves the cache untouched and the window where those workloads are
-     invisible stays inside a single child. next-due comes back from the
-     ledger rather than the discarded file, so a refresh corrects drift
-     without resetting every schedule at once. The last kind of the cycle
+     invisible stays inside a single child. next-due is re-derived from the
+     workload's identity rather than restored, so a refresh moves each
+     workload's phase but keeps the estate spread across the interval and
+     never makes everything due at once. The last kind of the cycle
      also drops entries for kinds no longer watched and forgets ledger keys
      with no workload behind them.
 

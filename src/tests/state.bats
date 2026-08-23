@@ -19,6 +19,8 @@ setup() {
     printf 'keelson-system' > "$KEELSON_SA_NAMESPACE_FILE"
     KEELSON_STATE_CONFIGMAP=keelson-state
     export KEELSON_SA_NAMESPACE_FILE KEELSON_STATE_CONFIGMAP
+    KEELSON_FIRST_POLL_DELAY_MAX=300
+    export KEELSON_FIRST_POLL_DELAY_MAX
     unset KEELSON_STATE_NAMESPACE
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
@@ -335,50 +337,65 @@ SH
 # --- per-workload schedule ---
 #
 # The cache is derived and rebuilt from the cluster on any restart, but a
-# schedule is not derivable. Without persisting it, a restart makes every
-# workload due at once and every repository gets polled the moment the pod
-# comes back.
+# The schedule itself is derived, not stored: inventory_first_due hashes the
+# identity, so a cold start spreads the estate without a ledger. What the
+# ledger records is that Keelson has seen the workload at all, written once.
 
-@test "next-due: round-trips through the ledger" {
-    state_set_next_due Deployment default web 1786868000
-    [ "$(state_get_next_due Deployment default web)" = "1786868000" ]
+@test "record: a workload gets a first-seen stamp" {
+    state_record_workload Deployment default web
+    [ -n "$(state_get w--Deployment--default--web first-seen)" ]
 }
 
-@test "next-due: unknown workload reads empty" {
-    [ -z "$(state_get_next_due Deployment default nope)" ]
+@test "record: an unrecorded workload reads empty" {
+    [ -z "$(state_get w--Deployment--default--nope first-seen)" ]
 }
 
-@test "next-due: uses its own key, leaving the trigger ledger alone" {
+@test "record: written once, never rewritten" {
+    # A restart must not churn the ConfigMap re-stamping what it already knows.
+    state_record_workload Deployment default web
+    local first
+    first=$(state_get w--Deployment--default--web first-seen)
+    STATE_DIRTY=()
+    state_record_workload Deployment default web
+    [ "$(state_get w--Deployment--default--web first-seen)" = "$first" ]
+    [ -z "${STATE_DIRTY[w--Deployment--default--web]:-}" ]
+}
+
+@test "record: carries no next-due, the schedule is derived" {
+    state_record_workload Deployment default web
+    [ -z "$(state_get w--Deployment--default--web next-due)" ]
+}
+
+@test "record: uses its own key, leaving the trigger ledger alone" {
     state_set_trigger_field CronJob ops backup triggered-job 111
-    state_set_next_due CronJob ops backup 222
+    state_record_workload CronJob ops backup
     [ "$(state_get_trigger_field CronJob ops backup triggered-job)" = "111" ]
-    [ "$(state_get_next_due CronJob ops backup)" = "222" ]
-    [ -n "${STATE_KEYS[s--CronJob--ops--backup]:-}" ]
+    [ -n "${STATE_KEYS[w--CronJob--ops--backup]:-}" ]
     [ -n "${STATE_KEYS[j--CronJob--ops--backup]:-}" ]
 }
 
-@test "next-due: marks the key dirty for the next flush" {
+@test "record: marks the key dirty for the next flush" {
     STATE_DIRTY=()
-    state_set_next_due Deployment default web 500
-    [ -n "${STATE_DIRTY[s--Deployment--default--web]:-}" ]
+    state_record_workload Deployment default web
+    [ -n "${STATE_DIRTY[w--Deployment--default--web]:-}" ]
 }
 
 @test "forget_workload: drops both of a workload's keys" {
     state_set_trigger_field CronJob ops backup triggered-job 111
-    state_set_next_due CronJob ops backup 222
+    state_record_workload CronJob ops backup
     state_forget_workload CronJob ops backup
-    [ -z "$(state_get_next_due CronJob ops backup)" ]
+    [ -z "$(state_get w--CronJob--ops--backup first-seen)" ]
     [ -z "$(state_get_trigger_field CronJob ops backup triggered-job)" ]
 }
 
 @test "forget_workload: both keys go null in the same patch" {
     STATE_DIRTY=(); STATE_DELETED=()
     state_set_trigger_field CronJob ops backup triggered-job 111
-    state_set_next_due CronJob ops backup 222
+    state_record_workload CronJob ops backup
     state_forget_workload CronJob ops backup
     local patch
     patch=$(state_build_patch)
-    [[ "$patch" == *'"s--CronJob--ops--backup":null'* ]]
+    [[ "$patch" == *'"w--CronJob--ops--backup":null'* ]]
     [[ "$patch" == *'"j--CronJob--ops--backup":null'* ]]
 }
 
@@ -391,13 +408,13 @@ SH
     inventory_init
     inventory_put Deployment default web 1000 60 "" default '[]' '' 'containers main=a:1'
 
-    state_set_next_due Deployment default web 111
-    state_set_next_due Deployment default ghost 222
+    state_record_workload Deployment default web
+    state_record_workload Deployment default ghost
     state_set_trigger_field CronJob ops gone triggered-job 333
 
     state_reconcile_ledger
-    [ "$(state_get_next_due Deployment default web)" = "111" ]
-    [ -z "$(state_get_next_due Deployment default ghost)" ]
+    [ -n "$(state_get w--Deployment--default--web first-seen)" ]
+    [ -z "$(state_get w--Deployment--default--ghost first-seen)" ]
     [ -z "$(state_get_trigger_field CronJob ops gone triggered-job)" ]
 }
 
@@ -405,9 +422,9 @@ SH
     # shellcheck source=../scripts/lib/inventory.bash
     source "$SCRIPT_DIR/lib/inventory.bash"
     KEELSON_INVENTORY_DIR="$TMP_DIR/absent"
-    state_set_next_due Deployment default web 111
+    state_record_workload Deployment default web
     state_reconcile_ledger
-    [ "$(state_get_next_due Deployment default web)" = "111" ]
+    [ -n "$(state_get w--Deployment--default--web first-seen)" ]
 }
 
 # --- own namespace ---

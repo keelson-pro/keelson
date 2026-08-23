@@ -9,8 +9,19 @@
 # A pod restart re-emits everything, which is the intended baseline.
 #
 # Data-key shape:
+#   w--<kind>--<ns>--<name>     per-workload record
 #   j--<kind>--<ns>--<name>     per-workload trigger state (CronJob only)
-#   s--<kind>--<ns>--<name>     per-workload schedule: next-due
+#
+# Workload fields:
+#   first-seen    when Keelson first cached it; written once, never updated
+#   managed       true when it carries a policy key under the prefix the
+#                 current KEELSON_CONFIG_MODE honours; rewritten only when it
+#                 changes, which means an annotation edit or a mode change
+#
+# No next-due. The schedule is derived by inventory_first_due from a hash of
+# the identity, so it is the same on every cold start and needs no ledger to
+# survive a restart. Persisting it bought the exact phase of a cycle and cost
+# a ConfigMap write on every poll.
 #
 # Per-workload trigger fields:
 #   triggered-job, triggered-at    last manual Job, when (the scan reads
@@ -47,34 +58,36 @@ state_trigger_key() {
     printf 'j--%s--%s--%s' "$1" "$2" "$3"
 }
 
-# state_schedule_key <kind> <ns> <name>
+# state_workload_key <kind> <ns> <name>
 # Separate from the trigger key so the CronJob ledger keeps its shape. A
-# schedule applies to every kind; the trigger gate only to CronJobs.
-state_schedule_key() {
-    printf 's--%s--%s--%s' "$1" "$2" "$3"
+# workload record says Keelson has seen this thing and whether it is acting on
+# it; the trigger record says a Job has been fired for a given image.
+state_workload_key() {
+    printf 'w--%s--%s--%s' "$1" "$2" "$3"
 }
 
-# state_get_next_due <kind> <ns> <name>
-# Echoes the persisted next-due, or empty if this workload has none.
-state_get_next_due() {
-    state_get "$(state_schedule_key "$1" "$2" "$3")" next-due
-}
-
-# state_set_next_due <kind> <ns> <name> <unix-seconds>
+# state_record_workload <kind> <ns> <name> <managed: true|false>
+# Records that Keelson knows this workload, and whether it is acting on it.
+# No next-due: the schedule is derived from the identity by inventory_first_due,
+# so persisting it bought only the exact phase of a cycle and cost a ConfigMap
+# write on every poll.
 #
-# Persisted because it is the one piece of the cache worth surviving a
-# restart. Everything else is rebuilt by one list per kind, but a schedule
-# is not derivable: without this, a pod restart resets every workload to due
-# now, and every watched workload polls its repository at once on every
-# restart.
-state_set_next_due() {
-    state_set "$(state_schedule_key "$1" "$2" "$3")" next-due "$4"
+# Each field is written only when it would change, and both reads are against
+# the already-loaded cache. first-seen is written once ever; managed moves only
+# when someone edits annotations or KEELSON_CONFIG_MODE changes. So the steady
+# state writes nothing and a restart re-stamps nothing.
+state_record_workload() {
+    local kind=$1 ns=$2 name=$3 managed=${4:-false}
+    local key
+    key=$(state_workload_key "$kind" "$ns" "$name")
+    [ -n "$(state_get "$key" first-seen)" ] || state_set "$key" first-seen "$(state_now)"
+    [ "$(state_get "$key" managed)" = "$managed" ] || state_set "$key" managed "$managed"
 }
 
 # state_forget_workload <kind> <ns> <name>
 # Drops both of a workload's keys on the next flush.
 state_forget_workload() {
-    state_forget "$(state_schedule_key "$1" "$2" "$3")"
+    state_forget "$(state_workload_key "$1" "$2" "$3")"
     state_forget "$(state_trigger_key "$1" "$2" "$3")"
 }
 
@@ -113,7 +126,7 @@ state_reconcile_ledger() {
     local key rest kind ns name
     for key in ${keys[@]+"${keys[@]}"}; do
         case "$key" in
-            j--*|s--*) ;;
+            j--*|w--*) ;;
             *) continue ;;
         esac
         rest=${key#*--}

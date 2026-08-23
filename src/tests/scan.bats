@@ -62,6 +62,8 @@ setup() {
     source "$SCRIPT_DIR/lib/scan.bash"
 
     KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
+    KEELSON_FIRST_POLL_DELAY_MAX=300
+    export KEELSON_FIRST_POLL_DELAY_MAX
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
     KEELSON_RECONCILE_INTERVAL=60
     export KEELSON_RECONCILE_INTERVAL
@@ -816,7 +818,8 @@ SH
     kubectl_returns "$(deployment_with_schedule ghcr.io/x/y:1.0 1d)"
     scan_run 0 0 2>/dev/null
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" -gt "$(( $(date -u +%s) + 1000 ))" ]
+    # A day's schedule, but the first poll is capped, so it is not yet due.
+    [ "$INVENTORY_NEXT_DUE" -gt "$(date -u +%s)" ]
 
     kubectl_returns "$(deployment_with_schedule ghcr.io/x/y:2.0 1d)"
     scan_run 0 0 2>/dev/null
@@ -861,29 +864,44 @@ SH
 
 # --- schedules survive a restart ---
 #
-# The cache is derived and dies with the pod; the ledger does not. A restart
-# must resume each workload's place in its cycle rather than making every
-# watched workload due at once.
+# The cache dies with the pod. The schedule is derived from the identity, so a
+# cold start spreads the estate without persisting anything; the ledger only
+# records that Keelson has seen the workload.
 
-@test "restart: a new cache entry resumes a persisted next-due" {
+@test "restart: a cold cache derives its offset inside the window" {
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
-    local due=$(( $(date -u +%s) + 30 ))
-    state_set_next_due Deployment default app "$due"
+    local before=$(date -u +%s)
     scan_run 0 0 2>/dev/null
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "$due" ]
+    [ "$INVENTORY_NEXT_DUE" -ge "$before" ]
+    [ "$INVENTORY_NEXT_DUE" -le "$(( before + 60 ))" ]
 }
 
-@test "restart: with nothing persisted it takes a fresh offset and records it" {
+@test "restart: the offset is the same on every cold start" {
+    # Hashed off the identity, so the spread survives a restart without a
+    # ledger entry to read it back from.
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
     scan_run 0 0 2>/dev/null
     inventory_get Deployment default app
-    [ "$(state_get_next_due Deployment default app)" = "$INVENTORY_NEXT_DUE" ]
+    local first=$INVENTORY_NEXT_DUE
+    rm -rf "$KEELSON_INVENTORY_DIR"; inventory_init
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "$first" ]
 }
 
-@test "poll: the new next-due is written back to the ledger" {
+@test "restart: a cold cache records the workload in the ledger" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    [ -n "$(state_get w--Deployment--default--app first-seen)" ]
+}
+
+@test "poll: polling writes nothing to the ledger" {
+    # The whole point: a next-due written per poll was a ConfigMap patch per
+    # tick once workloads actually came due.
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
     scan_run 0 0 2>/dev/null
@@ -891,9 +909,10 @@ SH
 #!/usr/bin/env bash
 printf '{"Tags":["1.2.3"]}'
 SH
+    STATE_DIRTY=()
     scan_poll_due 0 "$LATE" 2>/dev/null
+    [ "${#STATE_DIRTY[@]}" -eq 0 ]
     inventory_get Deployment default app
-    [ "$(state_get_next_due Deployment default app)" = "$INVENTORY_NEXT_DUE" ]
     [ "$INVENTORY_NEXT_DUE" -gt "$LATE" ]
 }
 
@@ -903,12 +922,12 @@ SH
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
     scan_run 0 0 2>/dev/null
-    [ -n "$(state_get_next_due Deployment default app)" ]
+    [ -n "$(state_get w--Deployment--default--app first-seen)" ]
 
     kubectl_returns '{"items": []}'
     scan_run 0 0 2>/dev/null
-    [ -z "$(state_get_next_due Deployment default app)" ]
-    [ -n "${STATE_DELETED[s--Deployment--default--app]:-}" ]
+    [ -z "$(state_get w--Deployment--default--app first-seen)" ]
+    [ -n "${STATE_DELETED[w--Deployment--default--app]:-}" ]
 }
 
 # --- the queued re-read: what a watch event actually turns into ---
@@ -1711,28 +1730,23 @@ CRONJOB_LIST='{"items":[
     [ "$INVENTORY_NEXT_DUE" -le "$(( $(date -u +%s) + 60 ))" ]
 }
 
-@test "clamp: a far-future persisted next-due is recomputed" {
+@test "clamp: correcting it writes nothing to the ledger" {
+    # The ledger carries no next-due at all now, so a correction is a cache
+    # repair and nothing else.
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
-    state_set_next_due Deployment default app 4242424242
     scan_run 0 0 2>/dev/null
-    inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" -le "$(( $(date -u +%s) + 60 ))" ]
-}
-
-@test "clamp: the corrected value is written back to the ledger" {
-    inventory_init
-    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
-    state_set_next_due Deployment default app 4242424242
+    inventory_set_next_due Deployment default app 4242424242
+    STATE_DIRTY=()
     scan_run 0 0 2>/dev/null
-    inventory_get Deployment default app
-    [ "$(state_get_next_due Deployment default app)" = "$INVENTORY_NEXT_DUE" ]
+    [ "${#STATE_DIRTY[@]}" -eq 0 ]
 }
 
 @test "clamp: it warns, because it should never happen" {
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
-    state_set_next_due Deployment default app 4242424242
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 4242424242
     run emit scan_run 0 0
     [[ "$output" == *"next-due-implausible"* ]]
 }
@@ -1751,8 +1765,78 @@ CRONJOB_LIST='{"items":[
 @test "clamp: a non-numeric next-due is corrupt too" {
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
-    state_set_next_due Deployment default app "not-a-number"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app "not-a-number"
     scan_run 0 0 2>/dev/null
     inventory_get Deployment default app
     [ "$INVENTORY_NEXT_DUE" -le "$(( $(date -u +%s) + 60 ))" ]
+}
+
+# --- the ledger records whether Keelson is acting on a workload ---
+#
+# A workload carrying no Keelson annotation at all: catalogued, not acted on.
+deployment_no_annotations() {
+    cat <<JSON
+{
+  "items": [
+    {
+      "metadata": { "namespace": "default", "name": "app" },
+      "spec": { "template": { "spec": { "containers": [
+        { "name": "main", "image": "$1" }
+      ] } } }
+    }
+  ]
+}
+JSON
+}
+
+#
+# managed=false on a workload someone annotated is the interesting line: a
+# keel.sh/ policy under config-mode=keelson, or a match-tag with no policy,
+# are both silent misconfigurations otherwise.
+
+@test "record: an annotated workload is recorded as managed" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    [ "$(state_get w--Deployment--default--app managed)" = "true" ]
+}
+
+@test "record: an unannotated workload is recorded as not managed" {
+    inventory_init
+    kubectl_returns "$(deployment_no_annotations ghcr.io/x/y:1.0)"
+    scan_run 0 0 2>/dev/null
+    [ "$(state_get w--Deployment--default--app managed)" = "false" ]
+}
+
+@test "record: annotating a cached workload flips it" {
+    inventory_init
+    kubectl_returns "$(deployment_no_annotations ghcr.io/x/y:1.0)"
+    scan_run 0 0 2>/dev/null
+    [ "$(state_get w--Deployment--default--app managed)" = "false" ]
+
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    [ "$(state_get w--Deployment--default--app managed)" = "true" ]
+}
+
+@test "record: an unchanged workload writes nothing" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    STATE_DIRTY=()
+    scan_run 0 0 2>/dev/null
+    [ "${#STATE_DIRTY[@]}" -eq 0 ]
+}
+
+@test "record: first-seen survives a later pass unchanged" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    local first
+    first=$(state_get w--Deployment--default--app first-seen)
+    [ -n "$first" ]
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:2.0 patch)"
+    scan_run 0 0 2>/dev/null
+    [ "$(state_get w--Deployment--default--app first-seen)" = "$first" ]
 }

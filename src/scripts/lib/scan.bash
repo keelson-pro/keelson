@@ -439,9 +439,16 @@ scan_cache_workload() {
     inventory_enabled || return 0
 
     SCAN_SEEN["$kind $ns $name"]=1
+    local managed=false
     if scan_is_keelson_managed "$annotations"; then
+        managed=true
         _scan_managed=$(( _scan_managed + 1 ))
     fi
+    # Every pass, not just the first sighting: annotations are edited on
+    # workloads that are already cached, and that is the flip worth recording.
+    # Both fields are compared before writing, so an unchanged workload costs
+    # nothing.
+    state_record_workload "$kind" "$ns" "$name" "$managed"
 
     local interval=$_scan_interval sched
     annotation_get "$annotations" poll-schedule
@@ -472,7 +479,7 @@ scan_cache_workload() {
     # A workload already cached keeps its place in the cycle; a new one gets
     # an offset inside its first interval, so workloads cached in the same
     # pass do not all fall due together forever after.
-    local next_due persisted
+    local next_due
     if inventory_get "$kind" "$ns" "$name"; then
         next_due=$INVENTORY_NEXT_DUE
         if [ "$INVENTORY_FINGERPRINT" != "$computed_fingerprint" ]; then
@@ -487,17 +494,13 @@ scan_cache_workload() {
                 msg="$kind '$name' in '$ns' changed; polling it now rather than waiting for its schedule."
         fi
     else
-        # A restart empties the cache but not the ledger, so a workload
-        # resumes its schedule rather than falling due immediately along with
-        # everything else.
-        persisted=$(state_get_next_due "$kind" "$ns" "$name")
-        if [ -n "$persisted" ]; then
-            next_due=$persisted
-        else
-            inventory_first_due "$kind" "$ns" "$name" "$interval" "$_scan_now"
-            next_due=$INVENTORY_FIRST_DUE
-            state_set_next_due "$kind" "$ns" "$name" "$next_due"
-        fi
+        # Derived, never persisted. The offset is hashed off the identity, so
+        # it is the same on every cold start and spreads the estate across the
+        # window without a ledger to write, read or corrupt. All persisting it
+        # ever bought was resuming the exact phase of a cycle, at the price of
+        # a ConfigMap write per poll.
+        inventory_first_due "$kind" "$ns" "$name" "$interval" "$_scan_now"
+        next_due=$INVENTORY_FIRST_DUE
     fi
 
     # Whatever it came from, next-due cannot legitimately be beyond one
@@ -524,7 +527,6 @@ scan_cache_workload() {
             msg="$kind '$name' in '$ns' had a next-due of '$next_due', which is not within one ${interval}s interval of now; recomputing it."
         inventory_first_due "$kind" "$ns" "$name" "$interval" "$_scan_now"
         next_due=$INVENTORY_FIRST_DUE
-        state_set_next_due "$kind" "$ns" "$name" "$next_due"
     fi
 
     inventory_put "$kind" "$ns" "$name" "$next_due" "$interval" "$suspend" \
@@ -846,8 +848,6 @@ scan_poll_due() {
         inventory_mark_polled "$kind" "$ns" "$name" "$now" \
             || log_warn inventory-not-rescheduled kind="$kind" ns="$ns" name="$name" \
                 msg="Could not push $kind '$name' in '$ns' out to its next poll; it left the cache between being read as due and being polled."
-        inventory_get "$kind" "$ns" "$name" \
-            && state_set_next_due "$kind" "$ns" "$name" "$INVENTORY_NEXT_DUE"
     done
 
     log_debug poll-summary \

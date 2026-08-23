@@ -16,6 +16,8 @@ setup() {
     # shellcheck source=../scripts/lib/inventory.bash
     source "$SCRIPT_DIR/lib/inventory.bash"
     KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
+    KEELSON_FIRST_POLL_DELAY_MAX=300
+    export KEELSON_FIRST_POLL_DELAY_MAX
     inventory_init
 }
 
@@ -435,4 +437,41 @@ put_simple() {
     local after=$INVENTORY_FINGERPRINT
     inventory_fingerprint 60 "" default '[]' '' 'containers main=a:2'
     [ "$INVENTORY_COMPUTED_FINGERPRINT" = "$after" ]
+}
+
+# --- the first-poll cap ---
+#
+# The offset spreads workloads across their interval. Capping it also bounds
+# the wait: @every 24h averages twelve hours out on a cold start, so a pod
+# restarting more often than that would never poll the workload at all.
+
+@test "first_due: an interval under the cap is used whole" {
+    KEELSON_FIRST_POLL_DELAY_MAX=300
+    inventory_first_due Deployment default app 60 1000
+    [ "$INVENTORY_FIRST_DUE" -ge 1000 ]
+    [ "$INVENTORY_FIRST_DUE" -lt 1060 ]
+}
+
+@test "first_due: an interval over the cap is capped" {
+    KEELSON_FIRST_POLL_DELAY_MAX=300
+    inventory_first_due Deployment default app 86400 1000
+    [ "$INVENTORY_FIRST_DUE" -ge 1000 ]
+    [ "$INVENTORY_FIRST_DUE" -lt 1300 ]
+}
+
+@test "first_due: the cap is honoured whatever the identity" {
+    KEELSON_FIRST_POLL_DELAY_MAX=120
+    local i
+    for i in a b c d e f g h; do
+        inventory_first_due Deployment default "$i" 86400 1000
+        [ "$INVENTORY_FIRST_DUE" -lt 1120 ]
+    done
+}
+
+@test "first_due: capping does not break the spread" {
+    KEELSON_FIRST_POLL_DELAY_MAX=300
+    inventory_first_due Deployment default one 86400 1000
+    local a=$INVENTORY_FIRST_DUE
+    inventory_first_due Deployment default two 86400 1000
+    [ "$INVENTORY_FIRST_DUE" != "$a" ]
 }

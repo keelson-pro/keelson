@@ -37,6 +37,8 @@ setup() {
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
     KEELSON_STATUS_DIR="$TMP_DIR/status"
     KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
+    KEELSON_FIRST_POLL_DELAY_MAX=300
+    export KEELSON_FIRST_POLL_DELAY_MAX
     export KEELSON_STATUS_DIR KEELSON_INVENTORY_DIR
     status_init
     inventory_init
