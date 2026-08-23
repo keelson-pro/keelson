@@ -63,6 +63,8 @@ SH
 }
 
 set_required_env() {
+    export KEELSON_VERSION=1.2.3
+    export KEELSON_PACKAGE_VERSION=1.2.3.4.5
     export KEELSON_SCOPE=cluster
     export KEELSON_CONFIG_MODE=keelson
     export KEELSON_LOG_LEVEL=INFO
@@ -353,4 +355,28 @@ YAML
     install_required_binaries
     v_run emit validate_config
     [ "$status" -eq 0 ]
+}
+
+# --- image-provided versions ---
+#
+# Baked in by the keelson-package build, not set by the operator. A missing
+# one means the image was built wrong, and the boot line would otherwise
+# report a version nobody can trace back to a release.
+
+@test "validate_config: a missing KEELSON_VERSION fails" {
+    set_required_env
+    install_required_binaries
+    unset KEELSON_VERSION
+    v_run emit validate_config
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"KEELSON_VERSION"* ]]
+}
+
+@test "validate_config: a missing KEELSON_PACKAGE_VERSION fails" {
+    set_required_env
+    install_required_binaries
+    unset KEELSON_PACKAGE_VERSION
+    v_run emit validate_config
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"KEELSON_PACKAGE_VERSION"* ]]
 }

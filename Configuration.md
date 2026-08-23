@@ -13,6 +13,17 @@ The Helm values (or templated Deployment) feed these directly into the Pod's `en
 
 Each row's left cell shows the env var on top and the matching Kaptain token below. If you're deploying with Kaptain, set the token in your `Keelson/…` env config directory; if you're using Helm the same options are available in `values.yaml`; if you're templating manifests another way, set the env var directly.
 
+### Image-provided
+
+These two are not operator settings and do not appear in the Deployment's `env`. The `keelson-package` build bakes them into the image with `ENV`, so they describe the artifact rather than configure it. `keelson-validate` still requires both: a missing one means the image was built wrong, and the boot line would otherwise report a version nobody can trace.
+
+| Env Var | Set from | Purpose |
+|---|---|---|
+| `KEELSON_VERSION` | `${TemplateKeelsonVersion}` | The `keelson` release whose scripts are in the image. |
+| `KEELSON_PACKAGE_VERSION` | `${Version}` | The `keelson-package` release that assembled the image, five parts (keelson template, base image, patch). |
+
+Both are reported on the boot line: `Keelson <version> (package <package-version>) booting in ns '<ns>'`.
+
 ### Behaviour
 
 | Env Var / Kaptain Token | Default | Purpose |
