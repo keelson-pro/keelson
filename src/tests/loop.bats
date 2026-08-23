@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 
 # Tests for lib/loop.bash. The supervisor + tick scheduler are exercised
 # with shimmed sleep + date and a stubbed watch_run_kind that spawns a

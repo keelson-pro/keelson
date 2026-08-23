@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # State ConfigMap for Keelson.
 # Sourced; not directly executable.
 #
@@ -177,11 +180,11 @@ state_load() {
     fi
     local keys key val
     keys=$(printf '%s' "$cm_json" \
-        | yq -p=json '.data // {} | keys | .[]' 2>/dev/null)
+        | yq -p=json -o=y '.data // {} | keys | .[]' 2>/dev/null)
     while IFS= read -r key; do
         [ -z "$key" ] && continue
         val=$(printf '%s' "$cm_json" \
-            | yq -p=json '.data["'"$key"'"]' 2>/dev/null)
+            | yq -p=json -o=y '.data["'"$key"'"]' 2>/dev/null)
         state_load_value "$key" "$val"
     done <<< "$keys"
 }
@@ -194,10 +197,10 @@ state_load_value() {
     [ -z "$json" ] && return 0
     [ "$json" = "null" ] && return 0
     local fields field val
-    fields=$(printf '%s' "$json" | yq -p=json 'keys | .[]' 2>/dev/null)
+    fields=$(printf '%s' "$json" | yq -p=json -o=y 'keys | .[]' 2>/dev/null)
     while IFS= read -r field; do
         [ -z "$field" ] && continue
-        val=$(printf '%s' "$json" | yq -p=json '."'"$field"'"' 2>/dev/null)
+        val=$(printf '%s' "$json" | yq -p=json -o=y '."'"$field"'"' 2>/dev/null)
         [ "$val" = "null" ] && val=""
         STATE_FIELDS["$data_key:$field"]="$val"
     done <<< "$fields"

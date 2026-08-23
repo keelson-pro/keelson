@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Annotation lookup with KEELSON_CONFIG_MODE-aware dispatch.
 # Sourced; not directly executable.
 #
@@ -5,16 +8,26 @@
 # (one annotation per line) plus a *logical* key (the keelson-side short
 # name like "policy" or "match-tag"). It resolves to the right prefix
 # (keelson.pro/ vs keel.sh/) per KEELSON_CONFIG_MODE, applies any
-# value-level translation, and echoes the result.
+# value-level translation, and leaves the result in ANNOTATION_VALUE.
+#
+# Results land in globals rather than on stdout. This is the hottest path in
+# the poll: five lookups per container, each of which was a command
+# substitution around four more, so a container cost thirty forks before a
+# registry was contacted.
 #
 # Depends on log.bash being sourced first (for the "both" conflict warn).
 
+ANNOTATION_VALUE=
+ANNOTATION_RAW=
+ANNOTATION_KEEL_KEY=
+
 # annotation_get <annotation-lines> <logical-key> [<container-name>]
-# Echoes the resolved value, or empty if absent / rejected.
+#                -> ANNOTATION_VALUE
+# Empty if absent or rejected.
 # When <container-name> is non-empty, the per-container key
 # (e.g. keelson.pro/<key>.<container>) wins over the workload-wide key
 # (keelson.pro/<key>). The same precedence applies on the keel.sh/ side.
-# Special outputs:
+# Special values:
 #   "REJECT:<reason>"  - caller treats as a skip with that reason. Currently:
 #     keel-policy-force-unsupported  - keel value not honoured by keelson
 #     dual-prefix-conflict           - workload mixes keelson.pro/ and keel.sh/
@@ -24,28 +37,32 @@ annotation_get() {
     local lines=$1 key=$2 container=${3:-}
     local mode=${KEELSON_CONFIG_MODE:?KEELSON_CONFIG_MODE required}
 
-    local keelson_val keel_val keel_key
-    keelson_val=""
+    local keelson_val="" keel_val="" keel_key
     if [ -n "$container" ]; then
-        keelson_val=$(annotation_lookup_raw "$lines" "keelson.pro/$key.$container")
+        annotation_lookup_raw "$lines" "keelson.pro/$key.$container"
+        keelson_val=$ANNOTATION_RAW
     fi
     if [ -z "$keelson_val" ]; then
-        keelson_val=$(annotation_lookup_raw "$lines" "keelson.pro/$key")
+        annotation_lookup_raw "$lines" "keelson.pro/$key"
+        keelson_val=$ANNOTATION_RAW
     fi
-    keel_key=$(annotation_keel_key "$key")
-    keel_val=""
+    annotation_keel_key "$key"
+    keel_key=$ANNOTATION_KEEL_KEY
     if [ -n "$keel_key" ]; then
         if [ -n "$container" ]; then
-            keel_val=$(annotation_lookup_raw "$lines" "keel.sh/$keel_key.$container")
+            annotation_lookup_raw "$lines" "keel.sh/$keel_key.$container"
+            keel_val=$ANNOTATION_RAW
         fi
         if [ -z "$keel_val" ]; then
-            keel_val=$(annotation_lookup_raw "$lines" "keel.sh/$keel_key")
+            annotation_lookup_raw "$lines" "keel.sh/$keel_key"
+            keel_val=$ANNOTATION_RAW
         fi
     fi
 
+    ANNOTATION_VALUE=
     case "$mode" in
         keelson)
-            printf '%s' "$keelson_val"
+            ANNOTATION_VALUE=$keelson_val
             ;;
         keel)
             annotation_translate_keel_value "$key" "$keel_val"
@@ -53,11 +70,11 @@ annotation_get() {
         both)
             if annotation_has_prefix "$lines" "keelson.pro/" \
                     && annotation_has_prefix "$lines" "keel.sh/"; then
-                printf 'REJECT:dual-prefix-conflict'
+                ANNOTATION_VALUE='REJECT:dual-prefix-conflict'
                 return 0
             fi
             if [ -n "$keelson_val" ]; then
-                printf '%s' "$keelson_val"
+                ANNOTATION_VALUE=$keelson_val
             else
                 annotation_translate_keel_value "$key" "$keel_val"
             fi
@@ -70,57 +87,62 @@ annotation_get() {
 
 # annotation_has_prefix <annotation-lines> <prefix>
 # Returns 0 if any line starts with the prefix, 1 otherwise.
+#
+# The leading newline makes "start of a line" expressible as a substring, so
+# the whole set is one glob match. Reading it line by line meant a here-string,
+# and every here-string is a temp file created, written, read and unlinked.
 annotation_has_prefix() {
-    local lines=$1 prefix=$2 line
-    while IFS= read -r line; do
-        case "$line" in
-            "$prefix"*) return 0 ;;
-        esac
-    done <<< "$lines"
+    local lines=$1 prefix=$2
+    case $'\n'"$lines" in
+        *$'\n'"$prefix"*) return 0 ;;
+    esac
     return 1
 }
 
-# Map a keelson-side logical key to the corresponding keel.sh short key.
+# annotation_keel_key <logical-key>  -> ANNOTATION_KEEL_KEY
+# Maps a keelson-side logical key to the corresponding keel.sh short key.
 # Empty result = no keel equivalent (the key is keelson-only).
 annotation_keel_key() {
     case "$1" in
-        policy)        printf 'policy' ;;
-        trigger)       printf 'trigger' ;;
-        poll-schedule) printf 'pollSchedule' ;;
-        match-tag)     printf 'match-tag' ;;
-        notify)        printf 'notify' ;;
-        *)             printf '' ;;
+        policy)        ANNOTATION_KEEL_KEY='policy' ;;
+        trigger)       ANNOTATION_KEEL_KEY='trigger' ;;
+        poll-schedule) ANNOTATION_KEEL_KEY='pollSchedule' ;;
+        match-tag)     ANNOTATION_KEEL_KEY='match-tag' ;;
+        notify)        ANNOTATION_KEEL_KEY='notify' ;;
+        *)             ANNOTATION_KEEL_KEY= ;;
     esac
 }
 
-# Translate a keel-side value into a keelson-equivalent.
-# Returns "REJECT:<reason>" for keel values keelson refuses to honour.
+# annotation_translate_keel_value <logical-key> <value> -> ANNOTATION_VALUE
+# Translates a keel-side value into a keelson-equivalent.
+# Yields "REJECT:<reason>" for keel values keelson refuses to honour.
 annotation_translate_keel_value() {
     local key=$1 val=$2
-    [ -z "$val" ] && { printf ''; return 0; }
+    ANNOTATION_VALUE=
+    [ -z "$val" ] && return 0
     case "$key" in
         policy)
             case "$val" in
-                force) printf 'REJECT:keel-policy-force-unsupported' ;;
-                *)     printf '%s' "$val" ;;
+                force) ANNOTATION_VALUE='REJECT:keel-policy-force-unsupported' ;;
+                *)     ANNOTATION_VALUE=$val ;;
             esac
             ;;
         *)
-            printf '%s' "$val"
+            ANNOTATION_VALUE=$val
             ;;
     esac
 }
 
-# Lookup a full annotation key (with prefix) in the flat lines string.
-# Echoes value or empty.
+# annotation_lookup_raw <annotation-lines> <full-key>  -> ANNOTATION_RAW
+# Empty when the key is absent.
 annotation_lookup_raw() {
-    local lines=$1 key=$2 line
-    while IFS= read -r line; do
-        case "$line" in
-            "$key="*)
-                printf '%s' "${line#"$key="}"
-                return 0
-                ;;
-        esac
-    done <<< "$lines"
+    local lines=$1 key=$2
+    ANNOTATION_RAW=
+    local hay=$'\n'$lines
+    case "$hay" in
+        *$'\n'"$key="*) ;;
+        *) return 0 ;;
+    esac
+    local rest=${hay#*$'\n'"$key="}
+    ANNOTATION_RAW=${rest%%$'\n'*}
 }

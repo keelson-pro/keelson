@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 
 # Tests for lib/validate.bash. Binaries are checked against PATH; we shim
 # missing ones in/out via $TMP_BIN to drive the pass/fail paths.
@@ -63,7 +65,7 @@ SH
 set_required_env() {
     export KEELSON_SCOPE=cluster
     export KEELSON_CONFIG_MODE=keelson
-    export KEELSON_LOG_LEVEL=info
+    export KEELSON_LOG_LEVEL=INFO
     export KEELSON_LOG_FORMAT=plain
     export KEELSON_LOG_MANAGED_WORKLOADS=true
     export KEELSON_RESPECT_SA_PULL_SECRETS=false
@@ -279,4 +281,76 @@ YAML
     v_run emit validate_config
     [ "$status" -eq 1 ]
     [[ "$output" == *"KEELSON_NAMESPACE"* ]]
+}
+
+# --- heartbeat headroom ---
+#
+# The loop writes the heartbeat once per tick, so an allowance equal to the
+# tick makes every liveness probe a coin toss on scheduling jitter.
+
+@test "heartbeat headroom: exactly two ticks is allowed" {
+    KEELSON_TICK_INTERVAL=1 KEELSON_HEARTBEAT_MAX_AGE=2 \
+        validate_heartbeat_headroom
+}
+
+@test "heartbeat headroom: more than two ticks is allowed" {
+    KEELSON_TICK_INTERVAL=5 KEELSON_HEARTBEAT_MAX_AGE=15 \
+        validate_heartbeat_headroom
+}
+
+@test "heartbeat headroom: equal to the tick is rejected" {
+    KEELSON_TICK_INTERVAL=5 KEELSON_HEARTBEAT_MAX_AGE=5 \
+        v_run emit validate_heartbeat_headroom
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"validate-heartbeat-max-age-too-tight"* ]] \
+        || [[ "$output" == *"at least 10s"* ]]
+}
+
+@test "heartbeat headroom: below the tick is rejected" {
+    KEELSON_TICK_INTERVAL=10 KEELSON_HEARTBEAT_MAX_AGE=3 \
+        v_run emit validate_heartbeat_headroom
+    [ "$status" -ne 0 ]
+}
+
+@test "heartbeat headroom: one short of two ticks is rejected" {
+    KEELSON_TICK_INTERVAL=4 KEELSON_HEARTBEAT_MAX_AGE=7 \
+        v_run emit validate_heartbeat_headroom
+    [ "$status" -ne 0 ]
+}
+
+@test "heartbeat headroom: says both values and the minimum" {
+    KEELSON_TICK_INTERVAL=5 KEELSON_HEARTBEAT_MAX_AGE=5 \
+        v_run emit validate_heartbeat_headroom
+    [[ "$output" == *"5"* ]]
+    [[ "$output" == *"10"* ]]
+}
+
+@test "heartbeat headroom: a non-integer is left to the integer check" {
+    KEELSON_TICK_INTERVAL=abc KEELSON_HEARTBEAT_MAX_AGE=5 \
+        v_run emit validate_heartbeat_headroom
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "heartbeat headroom: an unset value is left to the required check" {
+    unset KEELSON_HEARTBEAT_MAX_AGE
+    KEELSON_TICK_INTERVAL=1 v_run emit validate_heartbeat_headroom
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "validate_config: a too-tight heartbeat fails the whole config" {
+    set_required_env
+    install_required_binaries
+    export KEELSON_TICK_INTERVAL=5
+    export KEELSON_HEARTBEAT_MAX_AGE=5
+    v_run emit validate_config
+    [ "$status" -ne 0 ]
+}
+
+@test "validate_config: the shipped defaults clear the headroom rule" {
+    set_required_env
+    install_required_binaries
+    v_run emit validate_config
+    [ "$status" -eq 0 ]
 }

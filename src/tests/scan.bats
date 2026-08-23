@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 
 # Tests for lib/scan.bash orchestration. Network tooling (kubectl, skopeo) is
 # provided via PATH-prepended shim scripts in $TMP_BIN. Real yq is used.
@@ -21,7 +23,7 @@ setup() {
     rm -f "$KEELSON_REGISTRIES_FILE"
     # Most events the scan emits are at debug level now (scan-start, summary,
     # skip-not-eligible, no-change). Run at debug so assertions can see them.
-    KEELSON_LOG_LEVEL=debug
+    KEELSON_LOG_LEVEL=DEBUG
     # Plain format collapses to the msg= sentence and drops event/field tags.
     # Tests assert on both sentences and structured fields, so use JSON.
     KEELSON_LOG_FORMAT=json
@@ -1409,4 +1411,275 @@ JSON
     kubectl_returns "$(deployment_with_foreign_annotation ghcr.io/x/y:1.2.3 major 1)"
     run emit scan_run 0 0
     [[ "$output" == *"scan-resync"* ]]
+}
+
+@test "poll: a poll with nothing to update talks to kubectl not at all" {
+    # managedFields are only ever read when an update is about to be written,
+    # and almost every poll finds no newer tag. Fetching them up front is one
+    # kubectl process per due workload per poll, thrown away.
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3"]}'
+SH
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMP_DIR/kubectl.calls"
+printf '{"items":[]}'
+SH
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    [ ! -f "$TMP_DIR/kubectl.calls" ]
+}
+
+@test "match-mode: regex is honoured, not silently treated as a glob" {
+    # match_mode defaults to glob when empty, so a value that fails to arrive
+    # is indistinguishable from one that was never set.
+    kubectl_returns "$(cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "minor",
+          "keelson.pro/match-tag": "^1",
+          "keelson.pro/match-mode": "regex"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {"containers": [{"name": "main", "image": "ghcr.io/x/y:1.2.3"}]}
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.4.0","2.0.0"]}'
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"candidate":"1.4.0"'* ]]
+}
+
+@test "match-tag: a backslash in the pattern survives the flattener" {
+    # yq's props output escapes backslashes in values as well as keys, and
+    # only the key side was ever unescaped. An escaped dot, which is how
+    # every real regex spells one, arrived doubled and matched nothing: the
+    # workload silently never updated and nothing said why.
+    kubectl_returns "$(cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "minor",
+          "keelson.pro/match-tag": "^1\\.",
+          "keelson.pro/match-mode": "regex"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {"containers": [{"name": "main", "image": "ghcr.io/x/y:1.2.3"}]}
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.4.0","2.0.0"]}'
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"candidate":"1.4.0"'* ]]
+}
+
+# --- scan_extract_workload ---
+#
+# The extraction runs once per workload per scan and is the bulk of what a
+# pass costs, so it is the thing most likely to be rewritten for speed. These
+# pin what it produces, field by field, so a rewrite has to answer for each.
+
+EXTRACT_LIST='{"items":[
+ {"metadata":{"namespace":"prod","name":"web",
+   "annotations":{"keelson.pro/policy":"minor","keelson.pro/match-tag":"^1\\.",
+                  "deployment.kubernetes.io/revision":"7"},
+   "managedFields":[{"manager":"argocd","operation":"Apply"}]},
+  "spec":{"template":{"spec":{
+    "serviceAccountName":"deployer",
+    "imagePullSecrets":[{"name":"regcred"}],
+    "initContainers":[{"name":"migrate","image":"ghcr.io/acme/migrate:2.0.0"}],
+    "containers":[{"name":"web","image":"ghcr.io/acme/web:1.2.3"},
+                  {"name":"side","image":"ghcr.io/acme/side:0.1.0"}]}}}},
+ {"metadata":{"namespace":"other","name":"bare"},
+  "spec":{"template":{"spec":{
+    "containers":[{"name":"only","image":"nginx:1.0"}]}}}}
+]}'
+
+@test "extract: namespace and name come from the indexed item" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ "$SCAN_WL_NS" = "prod" ]
+    [ "$SCAN_WL_NAME" = "web" ]
+}
+
+@test "extract: the index selects the workload" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    [ "$SCAN_WL_NS" = "other" ]
+    [ "$SCAN_WL_NAME" = "bare" ]
+}
+
+@test "extract: names come out bare, not quoted" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    case "$SCAN_WL_NAME" in *'"'*) return 1 ;; esac
+    case "$SCAN_WL_NS" in *'"'*) return 1 ;; esac
+    case "$SCAN_WL_SA_NAME" in *'"'*) return 1 ;; esac
+}
+
+@test "extract: only keelson and keel annotations survive" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [[ "$SCAN_WL_ANNOTATIONS" == *"keelson.pro/policy=minor"* ]]
+    [[ "$SCAN_WL_ANNOTATIONS" != *"deployment.kubernetes.io/revision"* ]]
+}
+
+@test "extract: a backslash in an annotation value is not doubled" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [[ "$SCAN_WL_ANNOTATIONS" == *'keelson.pro/match-tag=^1\.'* ]]
+}
+
+@test "extract: a workload with no annotations yields nothing" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    [ -z "$SCAN_WL_ANNOTATIONS" ]
+}
+
+@test "extract: image pull secrets stay on one line for the cache record" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ "$(printf '%s\n' "$SCAN_WL_IPS_JSON" | wc -l | tr -d ' ')" = "1" ]
+    [[ "$SCAN_WL_IPS_JSON" == *"regcred"* ]]
+}
+
+@test "extract: absent image pull secrets are an empty array" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    [ "$SCAN_WL_IPS_JSON" = "[]" ]
+}
+
+@test "extract: service account is read when set" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ "$SCAN_WL_SA_NAME" = "deployer" ]
+}
+
+@test "extract: an unset service account defaults to 'default'" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    [ "$SCAN_WL_SA_NAME" = "default" ]
+}
+
+@test "extract: managed fields come through as JSON" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ "$(printf '%s' "$SCAN_WL_MANAGED_FIELDS" | yq -p=json -o=y '.[0].manager')" = "argocd" ]
+}
+
+@test "extract: absent managed fields are an empty array" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    [ "$(printf '%s' "$SCAN_WL_MANAGED_FIELDS" | yq -p=json -o=y 'length')" = "0" ]
+}
+
+@test "extract: suspend is only read for CronJob" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ -z "$SCAN_WL_SUSPEND" ]
+}
+
+CRONJOB_LIST='{"items":[
+ {"metadata":{"namespace":"prod","name":"nightly"},
+  "spec":{"suspend":true,"jobTemplate":{"spec":{"template":{"spec":{
+    "containers":[{"name":"job","image":"ghcr.io/acme/job:3.0.0"}]}}}}}},
+ {"metadata":{"namespace":"prod","name":"hourly"},
+  "spec":{"jobTemplate":{"spec":{"template":{"spec":{
+    "containers":[{"name":"job","image":"ghcr.io/acme/job:3.0.0"}]}}}}}}
+]}'
+
+@test "extract: CronJob suspend is read" {
+    scan_extract_workload "$CRONJOB_LIST" CronJob 0
+    [ "$SCAN_WL_SUSPEND" = "true" ]
+}
+
+@test "extract: an unset CronJob suspend reads false, not empty" {
+    scan_extract_workload "$CRONJOB_LIST" CronJob 1
+    [ "$SCAN_WL_SUSPEND" = "false" ]
+}
+
+# --- container pairs ---
+#
+# "<list> <name>=<image>" is what the cache record stores and what the poll
+# loop reads back, so the format is a contract between the two.
+
+@test "pairs: every container is listed with its list, name and image" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [[ "$SCAN_WL_CONTAINER_PAIRS" == *"containers web=ghcr.io/acme/web:1.2.3"* ]]
+    [[ "$SCAN_WL_CONTAINER_PAIRS" == *"containers side=ghcr.io/acme/side:0.1.0"* ]]
+}
+
+@test "pairs: init containers carry initContainers as their list" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [[ "$SCAN_WL_CONTAINER_PAIRS" == *"initContainers migrate=ghcr.io/acme/migrate:2.0.0"* ]]
+}
+
+@test "pairs: containers come before init containers" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ "${SCAN_WL_CONTAINER_PAIRS%%$'\n'*}" = "containers web=ghcr.io/acme/web:1.2.3" ]
+}
+
+@test "pairs: one line per container, no blanks" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [ "$(printf '%s\n' "$SCAN_WL_CONTAINER_PAIRS" | wc -l | tr -d ' ')" = "3" ]
+    ! printf '%s\n' "$SCAN_WL_CONTAINER_PAIRS" | grep -q '^$'
+}
+
+@test "pairs: a workload with no init containers lists only its containers" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    [ "$SCAN_WL_CONTAINER_PAIRS" = "containers only=nginx:1.0" ]
+}
+
+@test "pairs: a digest-pinned image keeps its at-sign intact" {
+    local list='{"items":[{"metadata":{"namespace":"n","name":"w"},
+      "spec":{"template":{"spec":{"containers":[
+        {"name":"c","image":"ghcr.io/acme/w@sha256:abc123"}]}}}}]}'
+    scan_extract_workload "$list" Deployment 0
+    [ "$SCAN_WL_CONTAINER_PAIRS" = "containers c=ghcr.io/acme/w@sha256:abc123" ]
+}
+
+@test "pairs: a registry port survives the colon" {
+    local list='{"items":[{"metadata":{"namespace":"n","name":"w"},
+      "spec":{"template":{"spec":{"containers":[
+        {"name":"c","image":"reg.local:5000/acme/w:1.0"}]}}}}]}'
+    scan_extract_workload "$list" Deployment 0
+    [ "$SCAN_WL_CONTAINER_PAIRS" = "containers c=reg.local:5000/acme/w:1.0" ]
+}
+
+@test "pairs: a workload with no containers at all yields nothing" {
+    local list='{"items":[{"metadata":{"namespace":"n","name":"w"},
+      "spec":{"template":{"spec":{}}}}]}'
+    scan_extract_workload "$list" Deployment 0
+    [ -z "$SCAN_WL_CONTAINER_PAIRS" ]
+}
+
+@test "pairs: CronJob containers read through jobTemplate" {
+    scan_extract_workload "$CRONJOB_LIST" CronJob 0
+    [ "$SCAN_WL_CONTAINER_PAIRS" = "containers job=ghcr.io/acme/job:3.0.0" ]
+}
+
+@test "pairs: annotations after the sentinel do not swallow the pairs" {
+    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    [[ "$SCAN_WL_ANNOTATIONS" != *"containers "* ]]
+    [[ "$SCAN_WL_CONTAINER_PAIRS" != *"keelson.pro/"* ]]
 }

@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 
 load helper
 
@@ -49,19 +51,19 @@ emit() { "$@" 2>&1; }
 }
 
 @test "log_debug: visible at debug level" {
-    KEELSON_LOG_LEVEL=debug run emit log_debug some-event k=v
+    KEELSON_LOG_LEVEL=DEBUG run emit log_debug some-event k=v
     [ "$status" -eq 0 ]
     [[ "$output" =~ DEBUG ]]
 }
 
 @test "log_info: hidden at warn level" {
-    KEELSON_LOG_LEVEL=warn run emit log_info some-event
+    KEELSON_LOG_LEVEL=WARN run emit log_info some-event
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
 
 @test "log_error: visible at error level" {
-    KEELSON_LOG_LEVEL=error run emit log_error oh-no k=v
+    KEELSON_LOG_LEVEL=ERROR run emit log_error oh-no k=v
     [ "$status" -eq 0 ]
     [[ "$output" =~ ERROR ]]
 }
@@ -126,7 +128,7 @@ emit() { "$@" 2>&1; }
 }
 
 @test "rate limit: each level has its own interval" {
-    KEELSON_LOG_LEVEL=debug
+    KEELSON_LOG_LEVEL=DEBUG
     KEELSON_LOG_INFO_REPEAT_INTERVAL=600
     KEELSON_LOG_ERROR_REPEAT_INTERVAL=0
     log_info  evt k=v 2>"$TMP_DIR/i1.err"
@@ -158,7 +160,7 @@ emit() { "$@" 2>&1; }
 # --- file channel ---
 
 @test "file channel: always writes regardless of stdout level" {
-    KEELSON_LOG_LEVEL=error
+    KEELSON_LOG_LEVEL=ERROR
     log_debug some-event k=v 2>/dev/null
     [ -f "$KEELSON_LOG_FILE_PATH" ]
     grep -q "some-event" "$KEELSON_LOG_FILE_PATH"
@@ -345,8 +347,8 @@ emit() { "$@" 2>&1; }
 }
 
 @test "hint: a multi-line blob is flattened before it is clipped" {
-    # Without flattening first, the clip could carry a raw newline into a
-    # JSON value, which log_json_escape does not cover.
+    # log_json_escape would keep the JSON valid either way; flattening is
+    # what keeps the clip from spending its budget on a line break.
     log_hint "$(printf 'first\nsecond\tthird\n')"
     [[ "$LOG_HINT" != *$'\n'* ]]
     [[ "$LOG_HINT" != *$'\t'* ]]
@@ -358,4 +360,172 @@ emit() { "$@" 2>&1; }
     run emit log_error evt detail="$LOG_HINT"
     [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
     [[ "$output" == *'"detail":"a b c"'* ]]
+}
+
+# --- the file channel is on every log line's path ---
+
+@test "file channel: writing a line forks nothing" {
+    # The directory is on the Pod's emptyDir for the life of the Pod, so
+    # checking for it per line cost two forks on a path that cannot change.
+    local mkdirs=0 dirnames=0
+    mkdir() { mkdirs=$(( mkdirs + 1 )); command mkdir "$@"; }
+    dirname() { dirnames=$(( dirnames + 1 )); command dirname "$@"; }
+
+    log_info one k=v 2>/dev/null
+    log_info two k=v 2>/dev/null
+    log_info three k=v 2>/dev/null
+
+    unset -f mkdir dirname
+    [ "$mkdirs" -eq 0 ]
+    [ "$dirnames" -eq 0 ]
+    [ "$(grep -c . "$KEELSON_LOG_FILE_PATH")" = "3" ]
+}
+
+@test "file_init: creates the log directory" {
+    KEELSON_LOG_FILE_PATH="$TMP_DIR/fresh/keelson.log"
+    log_file_init
+    [ -d "$TMP_DIR/fresh" ]
+}
+
+@test "file_init: an empty path creates nothing" {
+    KEELSON_LOG_FILE_PATH=
+    run log_file_init
+    [ "$status" -eq 0 ]
+}
+
+# --- throttle helpers ---
+#
+# Both land in globals: they run on every emitted line, and a command
+# substitution forks a subshell before the line is even known to be wanted.
+
+@test "throttle interval: each level reads its own variable" {
+    KEELSON_LOG_DEBUG_REPEAT_INTERVAL=1 KEELSON_LOG_INFO_REPEAT_INTERVAL=2 \
+    KEELSON_LOG_WARN_REPEAT_INTERVAL=3 KEELSON_LOG_ERROR_REPEAT_INTERVAL=4 \
+    bash -c '
+        source "'"${BATS_TEST_DIRNAME}"'/../scripts/lib/log.bash"
+        for l in DEBUG INFO WARN ERROR; do
+            log_throttle_interval "$l"; printf "%s " "$LOG_THROTTLE_INTERVAL"
+        done' > "$BATS_TEST_TMPDIR/out"
+    [ "$(cat "$BATS_TEST_TMPDIR/out")" = "1 2 3 4 " ]
+}
+
+@test "throttle interval: an unset variable means never throttle" {
+    unset KEELSON_LOG_INFO_REPEAT_INTERVAL
+    log_throttle_interval INFO
+    [ "$LOG_THROTTLE_INTERVAL" = "0" ]
+}
+
+@test "throttle interval: an unknown level means never throttle" {
+    log_throttle_interval NOPE
+    [ "$LOG_THROTTLE_INTERVAL" = "0" ]
+}
+
+@test "throttle hash: same level, event and pairs give the same identity" {
+    log_throttle_hash INFO ev a=1 b=2
+    local first=$LOG_THROTTLE_HASH
+    log_throttle_hash INFO ev a=1 b=2
+    [ "$LOG_THROTTLE_HASH" = "$first" ]
+}
+
+@test "throttle hash: argument order does not change the identity" {
+    log_throttle_hash INFO ev a=1 b=2 c=3
+    local ordered=$LOG_THROTTLE_HASH
+    log_throttle_hash INFO ev c=3 a=1 b=2
+    [ "$LOG_THROTTLE_HASH" = "$ordered" ]
+    log_throttle_hash INFO ev b=2 c=3 a=1
+    [ "$LOG_THROTTLE_HASH" = "$ordered" ]
+}
+
+@test "throttle hash: a different level is a different identity" {
+    log_throttle_hash INFO ev a=1
+    local info=$LOG_THROTTLE_HASH
+    log_throttle_hash WARN ev a=1
+    [ "$LOG_THROTTLE_HASH" != "$info" ]
+}
+
+@test "throttle hash: a different event is a different identity" {
+    log_throttle_hash INFO one a=1
+    local one=$LOG_THROTTLE_HASH
+    log_throttle_hash INFO two a=1
+    [ "$LOG_THROTTLE_HASH" != "$one" ]
+}
+
+@test "throttle hash: a different value is a different identity" {
+    log_throttle_hash INFO ev a=1
+    local one=$LOG_THROTTLE_HASH
+    log_throttle_hash INFO ev a=2
+    [ "$LOG_THROTTLE_HASH" != "$one" ]
+}
+
+@test "throttle hash: no pairs at all is still an identity" {
+    log_throttle_hash INFO ev
+    [ -n "$LOG_THROTTLE_HASH" ]
+    log_throttle_hash INFO other
+    [ -n "$LOG_THROTTLE_HASH" ]
+}
+
+@test "throttle hash: a pair holding a space survives" {
+    log_throttle_hash INFO ev 'msg=two words' a=1
+    local first=$LOG_THROTTLE_HASH
+    log_throttle_hash INFO ev a=1 'msg=two words'
+    [ "$LOG_THROTTLE_HASH" = "$first" ]
+}
+
+# --- control characters in JSON values ---
+#
+# Flattening at the call site is the tidy answer, not the safe one: a raw
+# newline reaching a JSON value produces a line no parser will take, and the
+# only thing stopping that was every author remembering.
+
+@test "json escape: a newline becomes \\n, not a raw break" {
+    log_json_escape "$(printf 'a\nb')"
+    [ "$LOG_ESCAPED" = 'a\nb' ]
+    [[ "$LOG_ESCAPED" != *$'\n'* ]]
+}
+
+@test "json escape: a tab becomes \\t" {
+    log_json_escape "$(printf 'a\tb')"
+    [ "$LOG_ESCAPED" = 'a\tb' ]
+}
+
+@test "json escape: a carriage return becomes \\r" {
+    log_json_escape "$(printf 'a\rb')"
+    [ "$LOG_ESCAPED" = 'a\rb' ]
+}
+
+@test "json escape: quotes and backslashes still escape" {
+    log_json_escape 'say "hi" c:\path'
+    [ "$LOG_ESCAPED" = 'say \"hi\" c:\\path' ]
+}
+
+@test "json escape: an escaped newline is not double-escaped" {
+    # The backslash pass runs first, so the backslash this inserts must stay
+    # single or the value decodes as a literal backslash-n.
+    log_json_escape "$(printf 'a\nb')"
+    [ "$LOG_ESCAPED" = 'a\nb' ]
+    [[ "$LOG_ESCAPED" != *'\\n'* ]]
+}
+
+@test "json escape: a literal backslash-n in the input stays literal" {
+    log_json_escape 'a\nb'
+    [ "$LOG_ESCAPED" = 'a\\nb' ]
+}
+
+@test "json escape: plain text is untouched" {
+    log_json_escape 'nothing special here'
+    [ "$LOG_ESCAPED" = 'nothing special here' ]
+}
+
+@test "json output: an unflattened multi-line value stays one valid line" {
+    KEELSON_LOG_FORMAT=json
+    run emit log_error evt detail="$(printf 'first\nsecond')"
+    [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+    [[ "$output" == *'"detail":"first\nsecond"'* ]]
+}
+
+@test "json output: an unflattened value with a tab stays one valid line" {
+    KEELSON_LOG_FORMAT=json
+    run emit log_error evt detail="$(printf 'a\tb')"
+    [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+    [[ "$output" == *'"detail":"a\tb"'* ]]
 }

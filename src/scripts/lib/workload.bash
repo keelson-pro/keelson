@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # kubectl helpers and per-kind path resolution.
 # Sourced; not directly executable.
 #
@@ -67,42 +70,6 @@ workload_pod_spec_path() {
             return 1
             ;;
     esac
-}
-
-# workload_containers_path <kind>
-# Echoes the yq path to the containers array under a single resource.
-workload_containers_path() {
-    local base
-    base=$(workload_pod_spec_path "$1") || return 1
-    printf '%s.containers' "$base"
-}
-
-# workload_init_containers_path <kind>
-# Echoes the yq path to the initContainers array under a single resource.
-#
-# Keelson treats init containers exactly like any other: they are part of the
-# workload, they carry image tags, and an init container left a release behind
-# the app container it prepares is the version skew this exists to prevent.
-workload_init_containers_path() {
-    local base
-    base=$(workload_pod_spec_path "$1") || return 1
-    printf '%s.initContainers' "$base"
-}
-
-# workload_image_pull_secrets_path <kind>
-# Echoes the yq path to the imagePullSecrets array under a single resource.
-workload_image_pull_secrets_path() {
-    local base
-    base=$(workload_pod_spec_path "$1") || return 1
-    printf '%s.imagePullSecrets' "$base"
-}
-
-# workload_service_account_name_path <kind>
-# Echoes the yq path to the serviceAccountName string under a single resource.
-workload_service_account_name_path() {
-    local base
-    base=$(workload_pod_spec_path "$1") || return 1
-    printf '%s.serviceAccountName' "$base"
 }
 
 # workload_is_watched <kind>

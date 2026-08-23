@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Logging primitives for Keelson. Source-only - do not execute.
 #
 # Two channels per emission:
@@ -8,7 +11,7 @@
 #
 # Configuration via env (all required, validated at boot):
 #   KEELSON_LOG_FORMAT                   plain | json
-#   KEELSON_LOG_LEVEL                    debug | info | warn | error
+#   KEELSON_LOG_LEVEL                    DEBUG | INFO | WARN | ERROR
 #   KEELSON_LOG_DEBUG_REPEAT_INTERVAL    seconds; 0 = never throttle
 #   KEELSON_LOG_INFO_REPEAT_INTERVAL     seconds; 0 = never throttle
 #   KEELSON_LOG_WARN_REPEAT_INTERVAL     seconds; 0 = never throttle
@@ -63,14 +66,16 @@ declare -gA LOG_THROTTLE_LAST=()
 LOG_LEVEL_NUM=0
 LOG_LINE=
 LOG_ESCAPED=
+LOG_THROTTLE_INTERVAL=0
+LOG_THROTTLE_HASH=
 
 # log_level_num <level>  -> LOG_LEVEL_NUM
 log_level_num() {
     case "$1" in
-        debug) LOG_LEVEL_NUM=0 ;;
-        info)  LOG_LEVEL_NUM=1 ;;
-        warn)  LOG_LEVEL_NUM=2 ;;
-        error) LOG_LEVEL_NUM=3 ;;
+        DEBUG) LOG_LEVEL_NUM=0 ;;
+        INFO)  LOG_LEVEL_NUM=1 ;;
+        WARN)  LOG_LEVEL_NUM=2 ;;
+        ERROR) LOG_LEVEL_NUM=3 ;;
         *)     LOG_LEVEL_NUM=1 ;;
     esac
 }
@@ -79,7 +84,7 @@ log_should_emit_stdout() {
     local lvl_num
     log_level_num "$1"
     lvl_num=$LOG_LEVEL_NUM
-    log_level_num "${KEELSON_LOG_LEVEL:-info}"
+    log_level_num "${KEELSON_LOG_LEVEL:-INFO}"
     [ "$lvl_num" -ge "$LOG_LEVEL_NUM" ]
 }
 
@@ -88,6 +93,18 @@ log_json_escape() {
     local s=$1
     s=${s//\\/\\\\}
     s=${s//\"/\\\"}
+    # A raw control character inside a JSON string is invalid, and callers
+    # that flatten first are the tidy answer rather than the safe one: the
+    # one who forgets emits a line no parser will take. Guarded so text
+    # without any pays a single test, and run after the backslash pass so
+    # the backslashes inserted here stay single.
+    case "$s" in
+        *[$'\n\r\t']*)
+            s=${s//$'\n'/\\n}
+            s=${s//$'\r'/\\r}
+            s=${s//$'\t'/\\t}
+            ;;
+    esac
     LOG_ESCAPED=$s
 }
 
@@ -99,9 +116,10 @@ LOG_FLAT=
 LOG_HINT=
 
 # log_flatten <text>  -> LOG_FLAT
-# One line, single-spaced. An event is a line, and in JSON format a raw
-# newline or tab inside a value is invalid: log_json_escape covers quotes and
-# backslashes, not control characters.
+# One line, single-spaced. An event is a line, and a blob spread over several
+# is one to read rather than to grep. log_json_escape will turn a stray
+# newline into \n rather than emit invalid JSON, so this is about the shape of
+# the line, not its validity.
 log_flatten() {
     local s=$1
     s=${s//$'\n'/ }
@@ -130,27 +148,47 @@ log_hint() {
     fi
 }
 
-# log_throttle_interval <level>
-# Echoes the configured repeat-interval (seconds) for <level>. 0 means never
+# log_throttle_interval <level>  -> LOG_THROTTLE_INTERVAL
+# The configured repeat-interval (seconds) for <level>. 0 means never
 # throttle. Missing var also means 0 so older deploys don't break.
 log_throttle_interval() {
     case "$1" in
-        debug) printf '%s' "${KEELSON_LOG_DEBUG_REPEAT_INTERVAL:-0}" ;;
-        info)  printf '%s' "${KEELSON_LOG_INFO_REPEAT_INTERVAL:-0}" ;;
-        warn)  printf '%s' "${KEELSON_LOG_WARN_REPEAT_INTERVAL:-0}" ;;
-        error) printf '%s' "${KEELSON_LOG_ERROR_REPEAT_INTERVAL:-0}" ;;
-        *)     printf '0' ;;
+        DEBUG) LOG_THROTTLE_INTERVAL=${KEELSON_LOG_DEBUG_REPEAT_INTERVAL:-0} ;;
+        INFO)  LOG_THROTTLE_INTERVAL=${KEELSON_LOG_INFO_REPEAT_INTERVAL:-0} ;;
+        WARN)  LOG_THROTTLE_INTERVAL=${KEELSON_LOG_WARN_REPEAT_INTERVAL:-0} ;;
+        ERROR) LOG_THROTTLE_INTERVAL=${KEELSON_LOG_ERROR_REPEAT_INTERVAL:-0} ;;
+        *)     LOG_THROTTLE_INTERVAL=0 ;;
     esac
 }
 
-# log_throttle_hash <level> <event> <kv...>
+# log_throttle_hash <level> <event> <kv...>  -> LOG_THROTTLE_HASH
 # Stable identity for the rate limiter: level + event + sorted kv pairs.
 # Sorting keeps order-of-arguments from creating spurious cache misses.
+#
+# Insertion sort rather than a pipe to sort(1). The key only has to be
+# consistent within this process, never to match anything on disk, and the
+# pipeline cost four process creations on every throttled line. Callers pass
+# a handful of pairs, so the quadratic comparison count stays far below what
+# one fork costs. LC_ALL=C is enforced at boot, so > collates bytewise.
 log_throttle_hash() {
     local level=$1 event=$2; shift 2
-    local pairs
-    pairs=$(printf '%s\n' "$@" | sort | tr '\n' '|')
-    printf '%s|%s|%s' "$level" "$event" "$pairs"
+    local -a pairs=("$@")
+    local i j held
+    for ((i = 1; i < ${#pairs[@]}; i++)); do
+        held=${pairs[i]}
+        j=$((i - 1))
+        # [[ ]] and not (( )): these are strings, and an arithmetic context
+        # reads "a=1 > b=2" as an assignment.
+        while [ "$j" -ge 0 ] && [[ ${pairs[j]} > $held ]]; do
+            pairs[j + 1]=${pairs[j]}
+            j=$((j - 1))
+        done
+        pairs[j + 1]=$held
+    done
+    LOG_THROTTLE_HASH="$level|$event|"
+    for held in ${pairs[@]+"${pairs[@]}"}; do
+        LOG_THROTTLE_HASH+="$held|"
+    done
 }
 
 # log_render_plain <ts> <LEVEL> <event> <kv...>
@@ -242,10 +280,23 @@ log_file_rotate_if_needed() {
 log_file_write() {
     local line=$1
     [ -n "$KEELSON_LOG_FILE_PATH" ] || return 0
-    local dir
-    dir=$(dirname "$KEELSON_LOG_FILE_PATH")
+    # stderr is silenced before the append, not after: bash applies
+    # redirections left to right, so a failing >> reports itself to whatever
+    # stderr is at that point. The file channel must never contaminate the
+    # console it is a copy of.
+    printf '%s' "$line" 2>/dev/null >> "$KEELSON_LOG_FILE_PATH" || true
+}
+
+# log_file_init
+# Creates the log directory. Called once at startup by every entry point that
+# logs, so log_file_write never has to: it lives on the Pod's emptyDir for the
+# life of the Pod, and checking per line cost a fork on a path that cannot
+# change.
+log_file_init() {
+    [ -n "$KEELSON_LOG_FILE_PATH" ] || return 0
+    local dir=${KEELSON_LOG_FILE_PATH%/*}
+    [ "$dir" = "$KEELSON_LOG_FILE_PATH" ] && return 0
     mkdir -p "$dir" 2>/dev/null || return 0
-    printf '%s' "$line" >> "$KEELSON_LOG_FILE_PATH" 2>/dev/null || true
 }
 
 # log_emit <level> <throttle: 0|1> <event> [k=v ...]
@@ -254,16 +305,15 @@ log_emit() {
     local level=$1 throttle=$2 event=$3
     shift 3
 
-    local ts level_uc
+    local ts
     # Built-in time formatting rather than a date fork on every line. The Z is
     # literal because the image sets TZ=UTC, which validate_config enforces.
     printf -v ts '%(%Y-%m-%dT%H:%M:%SZ)T' -1
-    level_uc=$(printf '%s' "$level" | tr '[:lower:]' '[:upper:]')
 
     # Copied out of the shared global: log_render_json overwrites LOG_LINE,
     # and the plain line is still needed after it for the non-JSON branch.
     local plain_line
-    log_render_plain "$ts" "$level_uc" "$event" "$@"
+    log_render_plain "$ts" "$level" "$event" "$@"
     plain_line=$LOG_LINE
 
     # File channel: always, regardless of stdout level or throttle.
@@ -273,21 +323,21 @@ log_emit() {
     log_should_emit_stdout "$level" || return 0
 
     if [ "$throttle" = "1" ]; then
-        local interval now hash last
-        interval=$(log_throttle_interval "$level")
-        if [ "$interval" -gt 0 ]; then
-            now=$(date -u +%s)
-            hash=$(log_throttle_hash "$level" "$event" "$@")
-            last=${LOG_THROTTLE_LAST[$hash]:-0}
-            if [ $(( now - last )) -lt "$interval" ]; then
+        local now last
+        log_throttle_interval "$level"
+        if [ "$LOG_THROTTLE_INTERVAL" -gt 0 ]; then
+            printf -v now '%(%s)T' -1
+            log_throttle_hash "$level" "$event" "$@"
+            last=${LOG_THROTTLE_LAST[$LOG_THROTTLE_HASH]:-0}
+            if [ $(( now - last )) -lt "$LOG_THROTTLE_INTERVAL" ]; then
                 return 0
             fi
-            LOG_THROTTLE_LAST[$hash]=$now
+            LOG_THROTTLE_LAST[$LOG_THROTTLE_HASH]=$now
         fi
     fi
 
     if [ "${KEELSON_LOG_FORMAT:-plain}" = "json" ]; then
-        log_render_json "$ts" "$level_uc" "$event" "$@"
+        log_render_json "$ts" "$level" "$event" "$@"
     else
         LOG_LINE=$plain_line
     fi
@@ -296,12 +346,12 @@ log_emit() {
     printf '%s\n' "$LOG_LINE" >&2
 }
 
-log_debug()        { log_emit debug 1 "$@"; }
-log_info()         { log_emit info  1 "$@"; }
-log_warn()         { log_emit warn  1 "$@"; }
-log_error()        { log_emit error 1 "$@"; }
+log_debug()        { log_emit DEBUG 1 "$@"; }
+log_info()         { log_emit INFO  1 "$@"; }
+log_warn()         { log_emit WARN  1 "$@"; }
+log_error()        { log_emit ERROR 1 "$@"; }
 
-log_debug_always() { log_emit debug 0 "$@"; }
-log_info_always()  { log_emit info  0 "$@"; }
-log_warn_always()  { log_emit warn  0 "$@"; }
-log_error_always() { log_emit error 0 "$@"; }
+log_debug_always() { log_emit DEBUG 0 "$@"; }
+log_info_always()  { log_emit INFO  0 "$@"; }
+log_warn_always()  { log_emit WARN  0 "$@"; }
+log_error_always() { log_emit ERROR 0 "$@"; }

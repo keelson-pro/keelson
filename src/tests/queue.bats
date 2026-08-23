@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 
 load helper
 
@@ -104,4 +106,33 @@ setup() {
     queue_enqueue Deployment default app
     run queue_pending
     [ -z "$output" ]
+}
+
+@test "queue_drain: exactly one line per entry, no blanks" {
+    queue_enqueue Deployment default app
+    queue_enqueue CronJob ns2 cron
+    queue_enqueue StatefulSet ns3 db
+    run queue_drain
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 3 ]
+    printf '%s\n' "${lines[@]}" | grep -qv '^$'
+}
+
+@test "queue_drain: an entry file with no trailing newline still emits" {
+    # queue_enqueue writes exactly this shape, so the EOF-without-newline
+    # case is the normal one, not the edge case.
+    printf '%s' 'Deployment default app' > "$KEELSON_QUEUE_DIR/Deployment--default--app"
+    run queue_drain
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+    [ "${lines[0]}" = "Deployment default app" ]
+}
+
+@test "queue_drain: emits every entry when several are queued" {
+    local i
+    for i in 1 2 3 4 5; do queue_enqueue Deployment ns "app$i"; done
+    run queue_drain
+    [ "${#lines[@]}" -eq 5 ]
+    run queue_size
+    [ "$output" = "0" ]
 }

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Scan orchestration for Keelson.
 # Sourced; not directly executable.
 #
@@ -13,6 +16,19 @@
 # (KEELSON_LOG_<LEVEL>_REPEAT_INTERVAL). The scan keeps no per-container
 # state. The only persisted state is the CronJob always-once trigger gate,
 # read once per scan via state_get_trigger_field.
+
+# Set by scan_extract_workload, read by scan_workload.
+SCAN_WL_NS=
+SCAN_WL_NAME=
+SCAN_WL_ANNOTATIONS=
+SCAN_WL_MANAGED_FIELDS=
+SCAN_WL_SUSPEND=
+# Both container lists in one block, each line "<list> <name>=<image>", so
+# everything downstream keeps a single loop and still knows which array to
+# write an update back to.
+SCAN_WL_CONTAINER_PAIRS=
+SCAN_WL_IPS_JSON=
+SCAN_WL_SA_NAME=
 
 # scan_run <apply> [poll-all]
 #
@@ -130,7 +146,7 @@ scan_refresh_kind() {
 
     inventory_evict_kind "$kind"
 
-    count=$(printf '%s' "$list_json" | yq -p=json '.items | length // 0')
+    count=$(printf '%s' "$list_json" | yq -p=json -o=y '.items | length // 0')
     if [ -z "$count" ] || [ "$count" = "null" ]; then
         count=0
     fi
@@ -219,7 +235,7 @@ scan_refresh_workload() {
             msg="Could not re-read $kind '$name' in '$ns'; leaving its cache record as it was."
         return 0
     fi
-    count=$(printf '%s' "$obj_json" | yq -p=json '.items | length // 0')
+    count=$(printf '%s' "$obj_json" | yq -p=json -o=y '.items | length // 0')
     [ "$count" = "1" ] || return 0
     scan_workload "$obj_json" "$kind" 0
 }
@@ -234,7 +250,7 @@ scan_kind() {
     fi
     # Only a kind we actually listed is a candidate for eviction below.
     SCAN_LISTED["$kind"]=1
-    count=$(printf '%s' "$list_json" | yq -p=json '.items | length // 0')
+    count=$(printf '%s' "$list_json" | yq -p=json -o=y '.items | length // 0')
     if [ -z "$count" ] || [ "$count" = "null" ]; then
         count=0
     fi
@@ -244,43 +260,128 @@ scan_kind() {
     done
 }
 
-scan_workload() {
+# scan_extract_workload <list-json> <kind> <index>
+# Pulls everything scan_workload needs out of one entry of a kubectl List,
+# into SCAN_WL_* rather than onto stdout.
+#
+# One function so the reads have one place to be counted: this runs once per
+# workload per scan, and a cluster of fifty makes whatever it costs the
+# dominant cost of a pass.
+scan_extract_workload() {
     local list_json=$1 kind=$2 i=$3
-    local ns name annotations containers_path init_containers_path \
-          ips_path sa_path containers_json init_containers_json \
-          ips_json mf_json suspend sa_name
+    local base suspend_expr='' out rest line in_annotations=0
 
-    ns=$(printf '%s' "$list_json" | yq -p=json ".items[$i].metadata.namespace")
-    name=$(printf '%s' "$list_json" | yq -p=json ".items[$i].metadata.name")
-    annotations=$(scan_flatten_annotations "$list_json" "$i")
-    mf_json=$(printf '%s' "$list_json" \
-        | yq -p=json -o=json ".items[$i].metadata.managedFields // []")
+    base=$(workload_pod_spec_path "$kind") || return 1
 
-    suspend=""
+    # Only CronJob carries suspend, and "no such field" has to stay
+    # distinguishable from a CronJob that is not suspended.
     if [ "$kind" = "CronJob" ]; then
-        suspend=$(printf '%s' "$list_json" \
-            | yq -p=json ".items[$i].spec.suspend // false")
+        suspend_expr='"suspend=" + ($w.spec.suspend // false | @json),'
     fi
 
-    containers_path=$(workload_containers_path "$kind")
-    init_containers_path=$(workload_init_containers_path "$kind")
-    ips_path=$(workload_image_pull_secrets_path "$kind")
-    sa_path=$(workload_service_account_name_path "$kind")
-    containers_json=$(printf '%s' "$list_json" \
-        | yq -p=json -o=json ".items[$i]$containers_path // []")
-    init_containers_json=$(printf '%s' "$list_json" \
-        | yq -p=json -o=json ".items[$i]$init_containers_path // []")
-    # -I=0 keeps this on one line: it goes into the inventory record, which
-    # is read back a line at a time.
-    ips_json=$(printf '%s' "$list_json" \
-        | yq -p=json -o=json -I=0 ".items[$i]$ips_path // []")
-    # Default to "default" when serviceAccountName is unset - matches
-    # kubelet behaviour at pod admission. Drives the SA-imagePullSecrets
-    # walk that is gated by KEELSON_RESPECT_SA_PULL_SECRETS.
-    sa_name=$(printf '%s' "$list_json" \
-        | yq -p=json ".items[$i]$sa_path // \"default\"")
+    SCAN_WL_NS=
+    SCAN_WL_NAME=
+    SCAN_WL_ANNOTATIONS=
+    SCAN_WL_MANAGED_FIELDS=
+    SCAN_WL_SUSPEND=
+    SCAN_WL_CONTAINER_PAIRS=
+    SCAN_WL_IPS_JSON=
+    SCAN_WL_SA_NAME=
 
-    local n j clist cjson cname cimage _workload_updated=0 \
+    # -r keeps every scalar raw, so a serviceAccountName of "sa: weird" or a
+    # match-tag of "*-rc" arrives as written rather than YAML-quoted.
+    # @json holds each sub-object to one line, which the key=value framing
+    # needs and which the inventory record needed anyway.
+    # Default serviceAccountName to "default", matching kubelet at pod
+    # admission. Drives the SA-imagePullSecrets walk gated by
+    # KEELSON_RESPECT_SA_PULL_SECRETS.
+    #
+    # to_entries rather than yq's props output, which escapes backslashes in
+    # values as well as dots in keys. Only the key side was ever unescaped, so
+    # a match-tag of '^1\.' was stored as '^1\\.' and matched no tag at all:
+    # the workload silently never updated and nothing said why.
+    #
+    # The select is what keeps foreign annotations out of the record, and it
+    # has to stay. They belong to other people and move constantly: patching a
+    # Deployment makes its controller bump deployment.kubernetes.io/revision,
+    # and a rollout restart writes kubectl.kubernetes.io/restartedAt. Drop the
+    # filter and those reach the fingerprint, where any change reads as "a
+    # decision input moved" and forces a resync poll that can only return what
+    # the schedule would have.
+    out=$(printf '%s' "$list_json" | yq -p=json -o=y -r "
+        .items[$i] as \$w | (
+        \"ns=\" + \$w.metadata.namespace,
+        \"name=\" + \$w.metadata.name,
+        \"sa=\" + (\$w${base}.serviceAccountName // \"default\"),
+        ${suspend_expr}
+        \"mf=\" + (\$w.metadata.managedFields // [] | @json),
+        \"ips=\" + (\$w${base}.imagePullSecrets // [] | @json),
+        (\$w${base}.containers // [] | .[]
+            | \"container=containers \" + .name + \"=\" + .image),
+        (\$w${base}.initContainers // [] | .[]
+            | \"container=initContainers \" + .name + \"=\" + .image),
+        \"annotations=\",
+        (\$w.metadata.annotations // {} | to_entries | .[]
+            | select(.key | test(\"^(keelson\\.pro|keel\\.sh)/\"))
+            | .key + \"=\" + .value)
+        )")
+
+    # Everything past the annotations= sentinel is annotation text, matched
+    # against no key at all. An annotation value holding a newline can then
+    # only corrupt the annotations, exactly as it could when they were read
+    # by themselves, rather than forging a name or a service account.
+    rest=$out
+    while [ -n "$rest" ]; do
+        line=${rest%%$'\n'*}
+        if [ "$line" = "$rest" ]; then
+            rest=
+        else
+            rest=${rest#*$'\n'}
+        fi
+        if [ "$in_annotations" -eq 1 ]; then
+            [ -n "$line" ] || continue
+            if [ -n "$SCAN_WL_ANNOTATIONS" ]; then
+                SCAN_WL_ANNOTATIONS+=$'\n'$line
+            else
+                SCAN_WL_ANNOTATIONS=$line
+            fi
+            continue
+        fi
+        case "$line" in
+            'annotations=')     in_annotations=1 ;;
+            'ns='*)             SCAN_WL_NS=${line#ns=} ;;
+            'name='*)           SCAN_WL_NAME=${line#name=} ;;
+            'sa='*)             SCAN_WL_SA_NAME=${line#sa=} ;;
+            'suspend='*)        SCAN_WL_SUSPEND=${line#suspend=} ;;
+            'mf='*)             SCAN_WL_MANAGED_FIELDS=${line#mf=} ;;
+            'ips='*)            SCAN_WL_IPS_JSON=${line#ips=} ;;
+            'container='*)
+                if [ -n "$SCAN_WL_CONTAINER_PAIRS" ]; then
+                    SCAN_WL_CONTAINER_PAIRS+=$'\n'${line#container=}
+                else
+                    SCAN_WL_CONTAINER_PAIRS=${line#container=}
+                fi
+                ;;
+        esac
+    done
+}
+
+scan_workload() {
+    local list_json=$1 kind=$2 i=$3
+    local ns name annotations container_pairs \
+          ips_json mf_json suspend sa_name
+
+    scan_extract_workload "$list_json" "$kind" "$i"
+    ns=$SCAN_WL_NS
+    name=$SCAN_WL_NAME
+    annotations=$SCAN_WL_ANNOTATIONS
+    mf_json=$SCAN_WL_MANAGED_FIELDS
+    suspend=$SCAN_WL_SUSPEND
+    container_pairs=$SCAN_WL_CONTAINER_PAIRS
+    ips_json=$SCAN_WL_IPS_JSON
+    sa_name=$SCAN_WL_SA_NAME
+
+    local rest line clist cname cimage _workload_updated=0 \
           _workload_last_from="" _workload_last_to="" _workload_last_repo=""
 
     # Cached before anything is polled, because an update records the image it
@@ -289,23 +390,24 @@ scan_workload() {
     # A workload whose record could not be written is one workload lost until
     # the next pass, not a reason to abandon the other thirty in this one.
     scan_cache_workload "$kind" "$ns" "$name" "$annotations" "$suspend" \
-        "$sa_name" "$ips_json" "$containers_json" "$init_containers_json" || true
+        "$sa_name" "$ips_json" "$container_pairs" || true
 
     if [ "$_scan_poll_all" -eq 1 ]; then
-        for clist in containers initContainers; do
-            if [ "$clist" = containers ]; then
-                cjson=$containers_json
+        rest=$container_pairs
+        while [ -n "$rest" ]; do
+            line=${rest%%$'\n'*}
+            if [ "$line" = "$rest" ]; then
+                rest=
             else
-                cjson=$init_containers_json
+                rest=${rest#*$'\n'}
             fi
-            n=$(printf '%s' "$cjson" | yq -p=json 'length')
-            for ((j=0; j<n; j++)); do
-                cname=$(printf '%s' "$cjson" | yq -p=json ".[$j].name")
-                cimage=$(printf '%s' "$cjson" | yq -p=json ".[$j].image")
-                _scan_total=$((_scan_total + 1))
-                scan_container "$kind" "$ns" "$name" "$clist" "$cname" "$cimage" \
-                    "$annotations" "$ips_json" "$mf_json" "$sa_name"
-            done
+            clist=${line%% *}
+            line=${line#* }
+            cname=${line%%=*}
+            cimage=${line#*=}
+            _scan_total=$((_scan_total + 1))
+            scan_container "$kind" "$ns" "$name" "$clist" "$cname" "$cimage" \
+                "$annotations" "$ips_json" "$mf_json" "$sa_name"
         done
     fi
 
@@ -325,7 +427,7 @@ scan_workload() {
 }
 
 # scan_cache_workload <kind> <ns> <name> <annotations> <suspend> <sa> <ips>
-#                     <containers-json> <init-containers-json>
+#                     <container-pairs>
 #
 # Records everything a later poll needs, so a due workload can be handled
 # straight from cache with no read of the cluster. Cached whether or not any
@@ -333,7 +435,7 @@ scan_workload() {
 # an annotation added later is noticed.
 scan_cache_workload() {
     local kind=$1 ns=$2 name=$3 annotations=$4 suspend=$5 sa=$6 ips=$7 \
-          containers_json=$8 init_containers_json=${9:-'[]'}
+          containers=$8
     inventory_enabled || return 0
 
     SCAN_SEEN["$kind $ns $name"]=1
@@ -341,24 +443,9 @@ scan_cache_workload() {
         _scan_managed=$(( _scan_managed + 1 ))
     fi
 
-    # Both lists in one block, each entry carrying the list it came from, so
-    # everything downstream keeps a single loop and still knows where to
-    # write an update back.
-    local containers init_containers
-    containers=$(printf '%s' "$containers_json" \
-        | yq -p=json '.[] | "containers " + .name + "=" + .image')
-    init_containers=$(printf '%s' "$init_containers_json" \
-        | yq -p=json '.[] | "initContainers " + .name + "=" + .image')
-    if [ -n "$init_containers" ]; then
-        if [ -n "$containers" ]; then
-            containers="${containers}"$'\n'"${init_containers}"
-        else
-            containers=$init_containers
-        fi
-    fi
-
     local interval=$_scan_interval sched
-    sched=$(annotation_get "$annotations" poll-schedule)
+    annotation_get "$annotations" poll-schedule
+    sched=$ANNOTATION_VALUE
     if [ -n "$sched" ]; then
         if clock_parse_duration "$sched"; then
             interval=$CLOCK_DURATION
@@ -482,25 +569,6 @@ scan_is_keelson_managed() {
     return 1
 }
 
-# Flatten one workload's annotations object to lines of "<key>=<value>",
-# stable for downstream annotation_get. yq's props output escapes dots in
-# keys with backslashes; we strip only those (iteratively, anchored to the
-# key portion) and leave value-side backslashes intact (regexes need them).
-#
-# Only Keelson's own prefixes survive, which is all annotation_get ever asks
-# for. The rest belong to other people and move constantly: patching a
-# Deployment makes its controller bump deployment.kubernetes.io/revision, and
-# a rollout restart writes kubectl.kubernetes.io/restartedAt. Carried into the
-# record they end up in the fingerprint, where each one reads as "a decision
-# input moved" and forces a poll that can only return what the schedule would.
-scan_flatten_annotations() {
-    local list_json=$1 i=$2
-    printf '%s' "$list_json" \
-        | yq -p=json -o=props ".items[$i].metadata.annotations // {}" 2>/dev/null \
-        | sed -E ':a; s/^([^=]*)\\\./\1./; ta; s/ = /=/' \
-        | grep -E '^(keelson\.pro|keel\.sh)/' || true
-}
-
 # scan_container <kind> <ns> <name> <list> <container> <image> <annotations>
 #                <ips-json> [managed-fields-json] [service-account]
 #
@@ -511,7 +579,8 @@ scan_container() {
           mf_json=${9:-} sa_name=${10:-}
 
     local result
-    result=$(eligibility_check "$ann" "$cimage" "$cname") || true
+    eligibility_check "$ann" "$cimage" "$cname" || true
+    result=$ELIGIBILITY_RESULT
     case "$result" in
         SKIP\ *)
             log_debug skip-not-eligible \
@@ -523,9 +592,13 @@ scan_container() {
             ;;
     esac
 
-    local policy position
-    policy=$(printf '%s' "$result" | awk '{print $2}')
-    position=$(printf '%s' "$result" | awk '{print $3}')
+    # "OK <policy> <position>": policy is one of major/all/minor/patch and
+    # position is an integer, so neither holds a space and splitting it here
+    # costs nothing. Two awk forks per eligible container did.
+    local policy position fields
+    fields=${result#OK }
+    policy=${fields%% *}
+    position=${fields##* }
 
     local creds
     if ! creds=$(registry_resolve_creds "$cimage" "$ips_json" "$ns" "$ann" "$sa_name" "$cname"); then
@@ -557,10 +630,13 @@ scan_container() {
     fi
 
     local match_tag match_mode current_tag winner candidate
-    match_tag=$(annotation_get "$ann" match-tag "$cname")
-    match_mode=$(annotation_get "$ann" match-mode "$cname")
+    annotation_get "$ann" match-tag "$cname"
+    match_tag=$ANNOTATION_VALUE
+    annotation_get "$ann" match-mode "$cname"
+    match_mode=$ANNOTATION_VALUE
     match_mode=${match_mode:-glob}
-    current_tag=$(image_tag "$cimage")
+    image_tag "$cimage"
+    current_tag=$IMAGE_TAG
     winner=$current_tag
 
     while IFS= read -r candidate; do
@@ -601,7 +677,8 @@ scan_container() {
     fi
 
     local new_image repo
-    repo=$(image_repo "$cimage")
+    image_repo "$cimage"
+    repo=$IMAGE_REPO
     new_image="$repo:$winner"
     if update_apply "$kind" "$ns" "$name" "$clist" "$cname" "$new_image" "$current_tag" "$mf_json" "$ann"; then
         inventory_set_container_image "$kind" "$ns" "$name" "$clist" "$cname" "$new_image" \
@@ -636,7 +713,8 @@ scan_check_cronjob_trigger() {
     local ns=$1 name=$2 ann=$3 suspend=$4 updated=$5
     local from_tag=${6:-} to_tag=${7:-} repo=${8:-}
     local trigger
-    trigger=$(annotation_get "$ann" trigger-job-on-update)
+    annotation_get "$ann" trigger-job-on-update
+    trigger=$ANNOTATION_VALUE
     [ "$trigger" = "true" ] || return 0
 
     if [ "$suspend" != "true" ]; then
@@ -699,8 +777,12 @@ scan_tag_passes_filter() {
 #
 # managedFields is the one thing deliberately not cached. It changes whenever
 # anyone writes the object, so a cached copy could be hours stale and drive
-# the field-manager strategy to the wrong owner. It is fetched here, once per
-# workload actually due, rather than kept.
+# the field-manager strategy to the wrong owner.
+#
+# Nor is it fetched here. Only update_apply reads it, and only when a write is
+# actually about to happen, which almost no poll reaches: fetching it per due
+# workload spent a kubectl process on every one of them to throw the answer
+# away. update_apply fetches its own when handed nothing.
 scan_poll_due() {
     local _scan_apply=${1:-0} now=$2
     inventory_enabled || return 0
@@ -712,13 +794,10 @@ scan_poll_due() {
           _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
     registry_init
 
-    local entry kind ns name i mf_json
+    local entry kind ns name i
     for entry in "${INVENTORY_DUE[@]}"; do
         read -r kind ns name <<<"$entry"
         inventory_get "$kind" "$ns" "$name" || continue
-
-        mf_json=$(workload_managed_fields "$kind" "$ns" "$name" 2>/dev/null) || mf_json='[]'
-        [ -n "$mf_json" ] || mf_json='[]'
 
         local _workload_updated=0 \
               _workload_last_from="" _workload_last_to="" _workload_last_repo=""
@@ -728,7 +807,7 @@ scan_poll_due() {
                 "${INVENTORY_CONTAINER_LISTS[$i]}" \
                 "${INVENTORY_CONTAINER_NAMES[$i]}" "${INVENTORY_CONTAINER_IMAGES[$i]}" \
                 "$INVENTORY_ANNOTATIONS" "$INVENTORY_IMAGE_PULL_SECRETS" \
-                "$mf_json" "$INVENTORY_SERVICE_ACCOUNT"
+                "" "$INVENTORY_SERVICE_ACCOUNT"
         done
 
         if [ "$kind" = "CronJob" ] && [ "$_scan_apply" -eq 1 ]; then

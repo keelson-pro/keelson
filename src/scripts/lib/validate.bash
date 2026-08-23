@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Boot-time configuration validation.
 # Sourced; not directly executable.
 #
@@ -54,6 +57,30 @@ validate_env_non_negative_int() {
             return 1
             ;;
     esac
+}
+
+# validate_heartbeat_headroom
+# KEELSON_HEARTBEAT_MAX_AGE must allow at least two ticks.
+#
+# The loop writes the heartbeat once per tick, so an allowance equal to the
+# tick leaves no room at all: every probe then turns on whether the loop got
+# scheduled a few milliseconds early or late, and the kubelet kills a healthy
+# controller. Two ticks means one whole tick may be missed before liveness is
+# entitled to call the loop wedged.
+#
+# Silent when either value is not a positive integer: the loop above has
+# already reported that, and a second error about their ratio would only
+# bury it.
+validate_heartbeat_headroom() {
+    local tick=${KEELSON_TICK_INTERVAL:-} max=${KEELSON_HEARTBEAT_MAX_AGE:-} min
+    case "$tick" in ''|*[!0-9]*|0) return 0 ;; esac
+    case "$max" in ''|*[!0-9]*|0) return 0 ;; esac
+    min=$(( tick * 2 ))
+    [ "$max" -ge "$min" ] && return 0
+    log_error validate-heartbeat-max-age-too-tight \
+        tick="$tick" max-age="$max" minimum="$min" \
+        msg="Validation failed: KEELSON_HEARTBEAT_MAX_AGE is ${max}s against a KEELSON_TICK_INTERVAL of ${tick}s; it must be at least ${min}s (two ticks) or the liveness probe kills a healthy loop on scheduling jitter."
+    return 1
 }
 
 validate_env_kinds() {
@@ -147,7 +174,7 @@ validate_yq_v4() {
 validate_registries_auth_modes() {
     [ -r "$KEELSON_REGISTRIES_FILE" ] || return 0
     local modes mode errors=0
-    if ! modes=$(yq -p=yaml '.registries[].auth-mode // ""' "$KEELSON_REGISTRIES_FILE" 2>/dev/null | sort -u); then
+    if ! modes=$(yq -o=y -p=yaml '.registries[].auth-mode // ""' "$KEELSON_REGISTRIES_FILE" 2>/dev/null | sort -u); then
         log_error validate-registries-parse-failed file="$KEELSON_REGISTRIES_FILE" \
             msg="Validation failed: could not parse registries file '$KEELSON_REGISTRIES_FILE'."
         return 1
@@ -186,6 +213,7 @@ validate_filesystem() {
         return 1
     fi
     rm -f "$probe"
+    log_file_init
 }
 
 validate_config() {
@@ -205,7 +233,7 @@ validate_config() {
 
     validate_env_enum KEELSON_SCOPE "cluster namespace" || errors=$((errors+1))
     validate_env_enum KEELSON_CONFIG_MODE "keelson keel both" || errors=$((errors+1))
-    validate_env_enum KEELSON_LOG_LEVEL "debug info warn error" || errors=$((errors+1))
+    validate_env_enum KEELSON_LOG_LEVEL "DEBUG INFO WARN ERROR" || errors=$((errors+1))
     validate_env_enum KEELSON_LOG_FORMAT "plain json" || errors=$((errors+1))
     validate_env_enum KEELSON_LOG_MANAGED_WORKLOADS "true false" || errors=$((errors+1))
     validate_env_enum KEELSON_RESPECT_SA_PULL_SECRETS "true false" || errors=$((errors+1))
@@ -230,6 +258,8 @@ validate_config() {
                KEELSON_LOG_WARN_REPEAT_INTERVAL KEELSON_LOG_ERROR_REPEAT_INTERVAL; do
         validate_env_set "$var" && validate_env_non_negative_int "$var" || errors=$((errors+1))
     done
+
+    validate_heartbeat_headroom || errors=$((errors+1))
 
     validate_env_kinds || errors=$((errors+1))
 

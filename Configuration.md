@@ -19,7 +19,7 @@ Each row's left cell shows the env var on top and the matching Kaptain token bel
 |---|---|---|
 | `KEELSON_SCOPE`<br>`Keelson/Scope` | `cluster` | `cluster` watches every namespace; `namespace` watches only the one Keelson runs in. |
 | `KEELSON_CONFIG_MODE`<br>`Keelson/ConfigMode` | `keelson` | Which annotation prefix Keelson honours: `keelson` for `keelson.pro/`, `keel` for `keel.sh/` (drop-in mode), or `both` (accept either, reject workloads that mix prefixes). |
-| `KEELSON_LOG_LEVEL`<br>`Keelson/LogLevel` | `info` | `debug`, `info`, `warn`, `error`. |
+| `KEELSON_LOG_LEVEL`<br>`Keelson/LogLevel` | `INFO` | `DEBUG`, `INFO`, `WARN`, `ERROR`. |
 | `KEELSON_LOG_FORMAT`<br>`Keelson/LogFormat` | `plain` | `plain` or `json`. |
 | `KEELSON_LOG_MANAGED_WORKLOADS`<br>`Keelson/LogManagedWorkloads` | `true` | List every workload Keelson will act on, grouped by namespace, once as soon as the first scan has filled the cache. The header carries the ratio (`7 of 312 cached workloads`), which is how you tell an annotation that did not take from one that did. Read from the cache, not the cluster, so it costs nothing. Set `false` on clusters where the list would run to hundreds of lines. |
 | `KEELSON_RESPECT_SA_PULL_SECRETS`<br>`Keelson/RespectServiceAccountPullSecrets` | `false` | Set `true` to walk the workload's ServiceAccount `imagePullSecrets` after the Pod's own, matching what the kubelet sees post-admission. Costs one extra `get sa` per scan. |
@@ -36,7 +36,7 @@ Each row's left cell shows the env var on top and the matching Kaptain token bel
 | `KEELSON_RECONCILE_INTERVAL`<br>`Keelson/ReconcileInterval` | `60` | Seconds between reconcile scans: how often Keelson lists the cluster to refresh its workload cache and forget what has gone. A fallback and a safety net, not the thing that drives updates. Registry polling runs off each workload's own `next-due`, checked every `TickInterval`, so raising this costs cache freshness rather than update latency. Measured from the previous scan's start; long scans queue the next for the very next tick, never overlap. |
 | `KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT`<br>`Keelson/RegistryPollIntervalDefault` | `60` | Seconds between registry tag lookups **for a given workload**, overridable per workload with the `poll-schedule` annotation. Distinct from `PollInterval`, which is how often Keelson lists the cluster: listing is one call per kind however many workloads there are, while a registry lookup is one call per eligible container and is the rate-limited one. Raising this is the lever for cutting registry traffic: a workload nothing has touched costs no registry calls at all between polls. New workloads are given an offset inside their first interval, derived from their identity, so an estate cached in one pass does not fall due in lockstep afterwards. |
 | `KEELSON_FULL_REFRESH_INTERVAL`<br>`Keelson/FullRefreshInterval` | `86400` (24h) | Seconds between full refreshes. A refresh throws the local workload cache away and rebuilds it from the cluster, one kind per tick so no single pass runs long, then reconciles the ledger against what came back: entries for kinds no longer watched are dropped, and ledger keys whose workload no longer exists are removed. Belt and braces rather than the mechanism: watch events and the reconcile scan keep the cache current between refreshes, so this exists to correct drift nothing else can see, such as a hand-edited ConfigMap or a cache file that went bad. Makes no registry calls. |
-| `KEELSON_HEARTBEAT_MAX_AGE`<br>`Keelson/HeartbeatMaxAge` | `5` | Seconds before the kubelet's liveness probe treats the heartbeat as stale. Whole seconds here, but the comparison is made in microseconds at both ends, so the limit is exact rather than plus or minus a second. Keep close to `KEELSON_TICK_INTERVAL` — too generous masks a wedged loop, too tight false-positives on jitter. |
+| `KEELSON_HEARTBEAT_MAX_AGE`<br>`Keelson/HeartbeatMaxAge` | `5` | Seconds before the kubelet's liveness probe treats the heartbeat as stale. Whole seconds here, but the comparison is made in microseconds at both ends, so the limit is exact rather than plus or minus a second. Keep close to `KEELSON_TICK_INTERVAL` — too generous masks a wedged loop, too tight false-positives on jitter. The lower end of that is enforced: it must be **at least twice `KEELSON_TICK_INTERVAL`**, checked by `keelson-validate` at boot. The loop writes the heartbeat once per tick, so a smaller allowance leaves no room for scheduling jitter and the kubelet kills a healthy controller; two ticks means one whole tick may be missed before liveness is entitled to call the loop wedged. Raising `KEELSON_TICK_INTERVAL` therefore requires raising this with it. Nothing enforces the upper end — that one is on you. |
 
 ### Watcher supervision
 
@@ -63,6 +63,20 @@ The file log path is convention, not configuration: `/keelson/work/log/keelson.l
 
 A misconfigured variable here fails `keelson-validate`, so the Pod refuses to boot rather than running with surprising defaults.
 
+
+## Resources
+
+| Kaptain Token | Default | Applied as |
+|---|---|---|
+| `Keelson/Memory` | `120Mi` | request **and** limit |
+| `Keelson/CpuRequest` | `100m` | request only (no limit is set) |
+| `Keelson/EphemeralStorage` | `150Mi` | request **and** limit |
+
+Memory request equals limit so the allocation is guaranteed and a leak dies predictably rather than growing into the node. Steady state is 64-89 MiB, so the default leaves room for a scan burst without over-reserving.
+
+There is deliberately **no CPU limit**. The tick loop is idle most of every second and then forks hard during a scan, which is exactly the shape a CPU limit throttles worst: a throttled tick reads as a wedged loop and the liveness probe restarts a controller that was only slow. Anyone who needs a limit has a `LimitRange` that will impose one.
+
+Ephemeral storage is tight on purpose, and the budget is worth knowing because it is a sum of three things. The Pod's quota covers the `emptyDir`, the container's writable layer, **and** the node-level container log for stdout. At Kubernetes' own defaults the console log rotates at 10Mi across 5 files, so 50Mi; Keelson's own log file is `LogFileMaxBytes × (LogFileKeep + 1)`, so 60Mi at defaults, since the live file reaches its size before rotating; the cache, queue and status files are under 1Mi even for a few hundred workloads. That is 120Mi at full convergence, which for a long-lived pod is where it settles rather than a spike. 150Mi is the margin over that. Lower `LogFileMaxBytes` and `LogFileKeep` together if you want it smaller: they are the only half of the sum Keelson controls.
 
 ## Probe timings
 
@@ -108,7 +122,7 @@ For the happy path log only what actually changes or goes wrong or things that h
 
 The rate limiter hashes `level + event + sorted-kv-pairs` and drops a repeat hit on the same hash within its level's interval. **Unique events** (the ones using the `_always` variant in the code) bypass it: every applied update, every triggered job, every boot/shutdown is logged in full. If a bug ever causes one of these to repeat, the repetition is the signal — not something the limiter masks.
 
-In parallel with stdout/stderr, **every emission from the controller is also written to `/keelson/work/log/keelson.log`** in plain format, regardless of `KEELSON_LOG_LEVEL` or throttle state. `keelson-probe` is the one exception: it writes no file, only stderr, which is what the kubelet captures into the Pod event you read a probe failure from. It reads the controller's state rather than authoring the controller's trail, and on a liveness kill the container restarts and takes the `emptyDir` with it, so the file would not have survived to be read anyway. The file rotates when it grows past `KEELSON_LOG_FILE_MAX_BYTES` and keeps `KEELSON_LOG_FILE_KEEP` numbered backups (`.1, .2, …`). Many processes append to it (the controller loop, one watcher per watched kind, every scan child) and concurrent appends are safe, but the rename shuffle a rotation performs is not, so rotation has a single owner: the controller loop checks the size once per tick. Nothing else ever rotates, which means the file is only bounded while the controller is running. This is the verification trail: inspect it when info-level stdout isn't enough but full `debug` is too much. The file lives on the Pod's `emptyDir`, so it does not survive pod restarts (which is the intended baseline — a restart re-emits the lean info trail).
+In parallel with stdout/stderr, **every emission from the controller is also written to `/keelson/work/log/keelson.log`** in plain format, regardless of `KEELSON_LOG_LEVEL` or throttle state. `keelson-probe` is the one exception: it writes no file, only stderr, which is what the kubelet captures into the Pod event you read a probe failure from. It reads the controller's state rather than authoring the controller's trail, and on a liveness kill the container restarts and takes the `emptyDir` with it, so the file would not have survived to be read anyway. The file rotates when it grows past `KEELSON_LOG_FILE_MAX_BYTES` and keeps `KEELSON_LOG_FILE_KEEP` numbered backups (`.1, .2, …`). Many processes append to it (the controller loop, one watcher per watched kind, every scan child) and concurrent appends are safe, but the rename shuffle a rotation performs is not, so rotation has a single owner: the controller loop checks the size once per tick. Nothing else ever rotates, which means the file is only bounded while the controller is running. This is the verification trail: inspect it when INFO-level stdout isn't enough but full `DEBUG` is too much. The file lives on the Pod's `emptyDir`, so it does not survive pod restarts (which is the intended baseline — a restart re-emits the lean INFO trail).
 
 JSON format adds `ts` and `level` keys to every line; plain format prefixes each line with `<ISO-timestamp> <LEVEL>` followed by the event name and pairs.
 
@@ -167,6 +181,7 @@ metadata:
     keelson.pro/policy: minor              # default for every container
     keelson.pro/policy.web: major          # the "web" container gets major bumps
     keelson.pro/match-tag.db: '^pg-15\.'   # restrict tag set for "db" only
+    keelson.pro/match-mode.db: regex       # match-tag is a glob unless you say this
 ```
 
 The container-suffixed key wins when present; otherwise Keelson falls back to the workload-wide key. The same precedence applies under `KEELSON_CONFIG_MODE=keel` with `keel.sh/policy.<container>`.
@@ -207,7 +222,8 @@ moved elsewhere — usually to the GitOps or CI layer where it belongs.
   Run those steps from the workload's own lifecycle (initContainers, Jobs) or
   from CI.
 - **`keel.sh/maxAge`** — skip tags older than a duration. Express the
-  constraint through a `match-tag` regex or by tagging discipline upstream.
+  constraint through `match-tag` (with `match-mode: regex`) or by tagging
+  discipline upstream.
 - **`keel.sh/releaseNotes`** — surface release notes alongside notifications.
   Keelson has no notification sinks yet, so the value has nowhere to go.
 - **`keel.sh/pollSchedule` as a raw cron expression** — Keel accepts robfig

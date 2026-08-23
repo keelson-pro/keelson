@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Pod status files: the heartbeat and the watcher-PID map.
 # Sourced; not directly executable.
 #

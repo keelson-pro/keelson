@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 
 # Tests for lib/registry.bash. Network tooling (kubectl, skopeo, curl,
 # docker-credential-ecr-login) is provided via PATH-prepended shim scripts in

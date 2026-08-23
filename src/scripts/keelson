@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Keelson main entrypoint. Long-running: watch + periodic scan.
 # Logic lives in lib/; this file orchestrates.
 

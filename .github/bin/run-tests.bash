@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Lint and test the Keelson scripts.
 # Linting runs locally via shellcheck (small enough not to warrant a
 # container); a comment must never open with the tool's own name, or it
@@ -13,7 +16,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 IMAGE_BUILD_COMMAND="${IMAGE_BUILD_COMMAND:-podman}"
-TEST_IMAGE="${KEELSON_TEST_IMAGE:-ghcr.io/keelson-pro/keelson/keelson-test-image:1.2}"
+TEST_IMAGE="${KEELSON_TEST_IMAGE:-ghcr.io/keelson-pro/keelson/keelson-test-image:1.4}"
 
 # Derived, not hand-listed: a hand-listed set silently skips new files,
 # which is how keelson-probe and keelson-validate went unlinted.

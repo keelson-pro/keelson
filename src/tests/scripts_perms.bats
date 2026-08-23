@@ -1,4 +1,7 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Entry scripts must be executable; sourced libs must not be.
 
 setup() {
@@ -71,4 +74,25 @@ setup() {
             *) printf 'non-.bash file under lib/: %s\n' "$f" >&2; return 1 ;;
         esac
     done < <(find "${SCRIPT_DIR}/lib" -type f)
+}
+
+# yq's default output format is changing: with -p=json and no -o it currently
+# emits YAML "for backwards compatibility" and warns that it will not forever.
+# Under JSON output every string comes back quoted, so a namespace becomes
+# "default" and Keelson goes on running against names that no longer exist.
+# Most of these calls already suppress stderr for other reasons, so the
+# warning yq is shouting today is swallowed everywhere.
+
+@test "yq: every invocation states its output format" {
+    # An invocation is yq followed by a flag or a quoted expression, which
+    # excludes prose mentioning yq and lists that merely name the binary.
+    local offenders
+    offenders=$(grep -rnE "yq[[:space:]]+[-'\"]" "${SCRIPT_DIR}" \
+        | grep -v ':[0-9]*:[[:space:]]*#' \
+        | grep -v -- '--version' \
+        | grep -v -- '-o=' || true)
+    [ -z "$offenders" ] || {
+        printf 'yq calls relying on the default output format:\n%s\n' "$offenders"
+        return 1
+    }
 }

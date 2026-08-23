@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -115,6 +118,14 @@ spec:
               value: "${Keelson/LogFileMaxBytes}"
             - name: KEELSON_LOG_FILE_KEEP
               value: "${Keelson/LogFileKeep}"
+          resources:
+            requests:
+              memory: "${Keelson/Memory}"
+              cpu: "${Keelson/CpuRequest}"
+              ephemeral-storage: "${Keelson/EphemeralStorage}"
+            limits:
+              memory: "${Keelson/Memory}"
+              ephemeral-storage: "${Keelson/EphemeralStorage}"
           startupProbe:
             exec:
               command: ["keelson-probe", "startup"]

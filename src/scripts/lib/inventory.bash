@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Local workload cache: everything Keelson needs to poll a workload's image
 # repository and decide about it, plus when that is next due.
 # Sourced; not directly executable.

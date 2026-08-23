@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # One-shot scan. Default dry-run; --apply patches workloads in place.
 
 set -euo pipefail
@@ -45,6 +48,7 @@ USAGE
 }
 
 main() {
+    log_file_init
     local apply=0
     while [ $# -gt 0 ]; do
         case "$1" in
