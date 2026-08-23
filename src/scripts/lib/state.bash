@@ -178,32 +178,50 @@ state_load() {
             msg="State ConfigMap '$STATE_CONFIGMAP_NAME' created in '$STATE_NAMESPACE'."
         return 0
     fi
-    local keys key val
-    keys=$(printf '%s' "$cm_json" \
-        | yq -p=json -o=y '.data // {} | keys | .[]' 2>/dev/null)
-    while IFS= read -r key; do
-        [ -z "$key" ] && continue
-        val=$(printf '%s' "$cm_json" \
-            | yq -p=json -o=y '.data["'"$key"'"]' 2>/dev/null)
-        state_load_value "$key" "$val"
-    done <<< "$keys"
-}
+    # One yq for the whole ledger, not one per key and one more per field.
+    # Every scan, poll, queue-refresh and full-refresh child re-reads this, and
+    # the per-key form started a fresh Go runtime a hundred and fifty times to
+    # parse a few kilobytes: it was the controller's entire steady-state cost.
+    #
+    # "K|<key>" registers the key, "F|<key>|<field>|<value>" a field, so a key
+    # whose value is {} or null still registers with no fields.
+    #
+    # to_entries rather than -o=props, which escapes backslashes in values as
+    # well as dots in keys. The outer parentheses are load-bearing: without
+    # them `as $k` scopes to the first comma element only and every field line
+    # silently disappears.
+    local lines rest line rec k field val
+    lines=$(printf '%s' "$cm_json" | yq -p=json -o=y -r '
+        .data // {} | to_entries | .[] | .key as $k | (
+          ( "K|" + $k ),
+          ( .value | select(. != "null" and . != "") | from_json | to_entries | .[]
+              | "F|" + $k + "|" + .key + "|" + .value )
+        )' 2>/dev/null)
 
-# state_load_value <data-key> <json-object-string>
-# Parses one data value's fields into the cache.
-state_load_value() {
-    local data_key=$1 json=$2
-    STATE_KEYS["$data_key"]=1
-    [ -z "$json" ] && return 0
-    [ "$json" = "null" ] && return 0
-    local fields field val
-    fields=$(printf '%s' "$json" | yq -p=json -o=y 'keys | .[]' 2>/dev/null)
-    while IFS= read -r field; do
-        [ -z "$field" ] && continue
-        val=$(printf '%s' "$json" | yq -p=json -o=y '."'"$field"'"' 2>/dev/null)
-        [ "$val" = "null" ] && val=""
-        STATE_FIELDS["$data_key:$field"]="$val"
-    done <<< "$fields"
+    rest=$lines
+    while [ -n "$rest" ]; do
+        line=${rest%%$'\n'*}
+        if [ "$line" = "$rest" ]; then
+            rest=
+        else
+            rest=${rest#*$'\n'}
+        fi
+        case "$line" in
+            'K|'*)
+                STATE_KEYS["${line#K|}"]=1
+                ;;
+            'F|'*)
+                # Split on the first two bars only, so a value holding one
+                # survives. Keys and field names cannot: both are built here.
+                rec=${line#F|}
+                k=${rec%%|*}
+                rec=${rec#*|}
+                field=${rec%%|*}
+                val=${rec#*|}
+                STATE_FIELDS["$k:$field"]=$val
+                ;;
+        esac
+    done
 }
 
 # state_get <data-key> <field>

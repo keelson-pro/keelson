@@ -437,3 +437,99 @@ SH
     [ "$rc" -eq 1 ]
     [ "$STATE_NAMESPACE_FILE" = "$TMP_DIR/absent" ]
 }
+
+# --- state_load parsing ---
+#
+# The ledger is re-read by every scan, poll, queue-refresh and full-refresh
+# child, so how it parses is worth pinning independently of how it is stored.
+
+load_cm() {
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+case "\$1 \$2" in
+    "get configmap") cat <<'JSON'
+$1
+JSON
+        exit 0 ;;
+esac
+exit 0
+SH
+    STATE_CONFIGMAP_NAME=keelson-state
+    STATE_NAMESPACE=keelson-system
+    state_clear_cache
+    state_load
+}
+
+@test "state_load: a single key with a single field" {
+    load_cm '{"data":{"k1":"{\"next-due\":\"1787000060\"}"}}'
+    [ "$(state_get k1 next-due)" = "1787000060" ]
+    [ -n "${STATE_KEYS[k1]:-}" ]
+}
+
+@test "state_load: several keys each land separately" {
+    load_cm '{"data":{"k1":"{\"next-due\":\"111\"}","k2":"{\"next-due\":\"222\"}","k3":"{\"next-due\":\"333\"}"}}'
+    [ "$(state_get k1 next-due)" = "111" ]
+    [ "$(state_get k2 next-due)" = "222" ]
+    [ "$(state_get k3 next-due)" = "333" ]
+}
+
+@test "state_load: several fields under one key" {
+    load_cm '{"data":{"k1":"{\"triggered-job\":\"job-a\",\"triggered-at\":\"2026-05-19T10:00:00Z\"}"}}'
+    [ "$(state_get k1 triggered-job)" = "job-a" ]
+    [ "$(state_get k1 triggered-at)" = "2026-05-19T10:00:00Z" ]
+}
+
+@test "state_load: an empty object registers the key with no fields" {
+    load_cm '{"data":{"k1":"{}"}}'
+    [ -n "${STATE_KEYS[k1]:-}" ]
+    [ -z "$(state_get k1 next-due)" ]
+}
+
+@test "state_load: a null value registers the key with no fields" {
+    load_cm '{"data":{"k1":"null"}}'
+    [ -n "${STATE_KEYS[k1]:-}" ]
+    [ -z "$(state_get k1 next-due)" ]
+}
+
+@test "state_load: absent data section loads nothing and does not fail" {
+    load_cm '{"metadata":{"resourceVersion":"42"}}'
+    [ "${#STATE_KEYS[@]}" -eq 0 ]
+}
+
+@test "state_load: an empty data section loads nothing" {
+    load_cm '{"data":{}}'
+    [ "${#STATE_KEYS[@]}" -eq 0 ]
+}
+
+@test "state_load: a key containing dots survives intact" {
+    load_cm '{"data":{"j--CronJob--ns--my.app":"{\"next-due\":\"999\"}"}}'
+    [ "$(state_get 'j--CronJob--ns--my.app' next-due)" = "999" ]
+}
+
+@test "state_load: a backslash in a value is not doubled" {
+    load_cm '{"data":{"k1":"{\"note\":\"a\\\\b\"}"}}'
+    [ "$(state_get k1 note)" = 'a\b' ]
+}
+
+@test "state_load: an empty field value reads back empty" {
+    load_cm '{"data":{"k1":"{\"next-due\":\"\"}"}}'
+    [ -n "${STATE_KEYS[k1]:-}" ]
+    [ -z "$(state_get k1 next-due)" ]
+}
+
+@test "state_load: a value with a space survives" {
+    load_cm '{"data":{"k1":"{\"note\":\"two words\"}"}}'
+    [ "$(state_get k1 note)" = "two words" ]
+}
+
+@test "state_load: many keys all load" {
+    local d='' i
+    for i in $(seq 1 30); do
+        [ -n "$d" ] && d="$d,"
+        d="$d\"k$i\":\"{\\\"next-due\\\":\\\"$i\\\"}\""
+    done
+    load_cm "{\"data\":{$d}}"
+    [ "${#STATE_KEYS[@]}" -eq 30 ]
+    [ "$(state_get k1 next-due)" = "1" ]
+    [ "$(state_get k30 next-due)" = "30" ]
+}
