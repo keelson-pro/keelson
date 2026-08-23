@@ -568,6 +568,43 @@ scan_log_managed_workloads() {
     return 0
 }
 
+# scan_container_monitored <annotations> <list> <container>
+# True when this container is in scope for updates.
+#
+# initContainers gates the whole list; monitorContainers is a regex over the
+# name, empty meaning all, which is keel's shape and default. An unusable
+# regex is not a reason to fall back to monitoring everything: that would turn
+# a typo into an estate-wide update, so nothing is monitored and it says why.
+scan_container_monitored() {
+    local ann=$1 clist=$2 cname=$3 want re rc=0
+
+    # Init containers are out of scope unless a workload opts in, matching
+    # keel's default in every mode. Anything but a literal true is out, so a
+    # rejected value fails closed rather than quietly enabling them.
+    if [ "$clist" = "initContainers" ]; then
+        annotation_get "$ann" initContainers
+        want=$ANNOTATION_VALUE
+        [ "$want" = "true" ] || return 1
+    fi
+
+    annotation_get "$ann" monitorContainers
+    re=$ANNOTATION_VALUE
+    [ -n "$re" ] || return 0
+    case "$re" in REJECT:*) return 1 ;; esac
+
+    if [[ "$cname" =~ $re ]]; then
+        return 0
+    else
+        rc=$?
+    fi
+    if [ "$rc" -gt 1 ]; then
+        log_error annotation-monitor-containers-invalid pattern="$re" \
+            container="$cname" \
+            msg="monitorContainers pattern '$re' is not a usable regular expression; no container is monitored until it is fixed."
+    fi
+    return 1
+}
+
 # scan_is_keelson_managed <annotations>
 # True when the workload carries a policy annotation Keelson will act on,
 # workload-wide or per-container, under the prefix the config mode honours.
@@ -606,6 +643,14 @@ scan_is_keelson_managed() {
 scan_container() {
     local kind=$1 ns=$2 name=$3 clist=$4 cname=$5 cimage=$6 ann=$7 ips_json=$8 \
           mf_json=${9:-} sa_name=${10:-}
+
+    if ! scan_container_monitored "$ann" "$clist" "$cname"; then
+        log_debug skip-not-monitored \
+            kind="$kind" ns="$ns" name="$name" container="$cname" list="$clist" \
+            msg="Skipped $kind '$name'/$cname in '$ns': not selected for monitoring."
+        _scan_skip=$((_scan_skip + 1))
+        return 0
+    fi
 
     local result
     eligibility_check "$ann" "$cimage" "$cname" || true

@@ -175,6 +175,8 @@ annotation_keel_key() {
         trigger)      ANNOTATION_KEEL_KEY='trigger' ;;
         pollSchedule) ANNOTATION_KEEL_KEY='pollSchedule' ;;
         matchTag)     ANNOTATION_KEEL_KEY='matchTag' ;;
+        initContainers)    ANNOTATION_KEEL_KEY='initContainers' ;;
+        monitorContainers) ANNOTATION_KEEL_KEY='monitorContainers' ;;
         notify)       ANNOTATION_KEEL_KEY='notify' ;;
         *)            ANNOTATION_KEEL_KEY= ;;
     esac

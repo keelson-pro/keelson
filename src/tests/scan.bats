@@ -1044,7 +1044,8 @@ deployment_with_init_json() {
       "metadata": {
         "namespace": "default",
         "name": "app",
-        "annotations": {"keelson.pro/policy": "$policy"}
+        "annotations": {"keelson.pro/policy": "$policy",
+                        "keelson.pro/initContainers": "true"}
       },
       "spec": {
         "template": {
@@ -1115,7 +1116,7 @@ case "$1" in
     patch|apply) exit 0 ;;
 esac
 cat <<'JSON'
-{"items":[{"metadata":{"namespace":"default","name":"app","annotations":{"keelson.pro/policy":"minor"}},"spec":{"template":{"spec":{"initContainers":[{"name":"migrate","image":"ghcr.io/x/m:1.4.0"}],"containers":[{"name":"main","image":"ghcr.io/x/y:1.2.3"}]}}}}]}
+{"items":[{"metadata":{"namespace":"default","name":"app","annotations":{"keelson.pro/policy":"minor","keelson.pro/initContainers":"true"}},"spec":{"template":{"spec":{"initContainers":[{"name":"migrate","image":"ghcr.io/x/m:1.4.0"}],"containers":[{"name":"main","image":"ghcr.io/x/y:1.2.3"}]}}}}]}
 JSON
 SH
     scan_run 1 2>/dev/null
@@ -1133,6 +1134,7 @@ SH
         "name": "app",
         "annotations": {
           "keelson.pro/policy": "minor",
+          "keelson.pro/initContainers": "true",
           "keelson.pro/policy.migrate": "never"
         }
       },
@@ -1886,4 +1888,99 @@ JSON
     kubectl_returns "$(cronjob_two_containers ghcr.io/x/re:9.9 ghcr.io/x/wait:2.0)"
     KEELSON_WATCHED_KINDS=CronJob scan_run 1 1 2>/dev/null || true
     ! grep -q "create job" "$TMP_DIR/kubectl.log"
+}
+
+# --- which containers are in scope ---
+#
+# keel defaults initContainers to false and Keelson tracks them always, so the
+# default follows the contract the mode is honouring. monitorContainers is
+# keel's regex over container names, empty meaning all.
+
+@test "monitored: init containers are out of scope by default" {
+    KEELSON_CONFIG_MODE=keelson
+    ! scan_container_monitored 'keelson.pro/policy=minor' initContainers migrate
+}
+
+@test "monitored: the default is the same under keel mode" {
+    KEELSON_CONFIG_MODE=keel
+    ! scan_container_monitored 'keel.sh/policy=minor' initContainers migrate
+}
+
+@test "monitored: keel mode still tracks ordinary containers" {
+    KEELSON_CONFIG_MODE=keel
+    scan_container_monitored 'keel.sh/policy=minor' containers web
+}
+
+@test "monitored: keel mode honours an explicit opt-in" {
+    KEELSON_CONFIG_MODE=keel
+    scan_container_monitored 'keel.sh/policy=minor
+keel.sh/initContainers=true' initContainers migrate
+}
+
+@test "monitored: keelson mode honours an explicit opt-in" {
+    KEELSON_CONFIG_MODE=keelson
+    scan_container_monitored 'keelson.pro/policy=minor
+keelson.pro/initContainers=true' initContainers migrate
+}
+
+@test "monitored: a non-true value leaves them out of scope" {
+    KEELSON_CONFIG_MODE=keelson
+    ! scan_container_monitored 'keelson.pro/initContainers=yes' initContainers migrate
+    ! scan_container_monitored 'keelson.pro/initContainers=' initContainers migrate
+}
+
+@test "monitored: an empty monitorContainers means all" {
+    KEELSON_CONFIG_MODE=keelson
+    scan_container_monitored 'keelson.pro/policy=minor' containers anything
+}
+
+@test "monitored: the regex selects by container name" {
+    KEELSON_CONFIG_MODE=keelson
+    scan_container_monitored 'keelson.pro/monitorContainers=^web$' containers web
+    ! scan_container_monitored 'keelson.pro/monitorContainers=^web$' containers sidecar
+}
+
+@test "monitored: an unusable regex monitors nothing, and says so" {
+    KEELSON_CONFIG_MODE=keelson
+    run emit scan_container_monitored 'keelson.pro/monitorContainers=[unclosed' containers web
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a usable regular expression"* ]]
+}
+
+@test "monitored: an init container is never polled without an opt-in" {
+    inventory_init
+    kubectl_returns '{"items":[{"metadata":{"namespace":"default","name":"app",
+      "annotations":{"keelson.pro/policy":"minor"}},
+      "spec":{"template":{"spec":{
+        "initContainers":[{"name":"migrate","image":"ghcr.io/x/init:1.0.0"}],
+        "containers":[{"name":"web","image":"ghcr.io/x/y:1.2.3"}]}}}}]}'
+    skopeo_counting
+    scan_run 0 1 2>/dev/null
+    # Only the app container reaches a registry; the init container is skipped
+    # before eligibility, so it costs no network call at all.
+    [ "$(skopeo_call_count)" = "1" ]
+}
+
+@test "monitored: both are polled when init containers are in scope" {
+    inventory_init
+    kubectl_returns '{"items":[{"metadata":{"namespace":"default","name":"app",
+      "annotations":{"keelson.pro/policy":"minor","keelson.pro/initContainers":"true"}},
+      "spec":{"template":{"spec":{
+        "initContainers":[{"name":"migrate","image":"ghcr.io/x/init:1.0.0"}],
+        "containers":[{"name":"web","image":"ghcr.io/x/y:1.2.3"}]}}}}]}'
+    skopeo_counting
+    scan_run 0 1 2>/dev/null
+    [ "$(skopeo_call_count)" = "2" ]
+}
+
+@test "monitored: the regex keeps an unmatched container off the network" {
+    inventory_init
+    kubectl_returns '{"items":[{"metadata":{"namespace":"default","name":"app",
+      "annotations":{"keelson.pro/policy":"minor","keelson.pro/monitorContainers":"^web$"}},
+      "spec":{"template":{"spec":{
+        "containers":[{"name":"web","image":"ghcr.io/x/y:1.2.3"},
+                      {"name":"sidecar","image":"ghcr.io/x/s:1.2.3"}]}}}}]}'
+    skopeo_counting
+    scan_run 0 1 2>/dev/null
+    [ "$(skopeo_call_count)" = "1" ]
 }
