@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Logging primitives for Keelson. Source-only - do not execute.
 #
 # Two channels per emission:

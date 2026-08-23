@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 
 # Tests for lib/scan.bash orchestration. Network tooling (kubectl, skopeo) is
 # provided via PATH-prepended shim scripts in $TMP_BIN. Real yq is used.

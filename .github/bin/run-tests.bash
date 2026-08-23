@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Lint and test the Keelson scripts.
 # Linting runs locally via shellcheck (small enough not to warrant a
 # container); a comment must never open with the tool's own name, or it

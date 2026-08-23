@@ -1,4 +1,7 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Entry scripts must be executable; sourced libs must not be.
 
 setup() {

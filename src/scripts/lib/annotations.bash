@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Annotation lookup with KEELSON_CONFIG_MODE-aware dispatch.
 # Sourced; not directly executable.
 #

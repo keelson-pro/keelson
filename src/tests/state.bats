@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 
 # Tests for lib/state.bash. kubectl is shimmed via $TMP_BIN on PATH.
 # The state ConfigMap carries the CronJob always-once trigger ledger and

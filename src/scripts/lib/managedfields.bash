@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # managedFields owner detection for Keelson.
 # Sourced; not directly executable.
 #

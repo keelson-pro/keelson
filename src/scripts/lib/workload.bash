@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # kubectl helpers and per-kind path resolution.
 # Sourced; not directly executable.
 #

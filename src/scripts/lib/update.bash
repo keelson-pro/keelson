@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
+#
 # Apply-path primitives: build patch/apply documents, call kubectl, optionally
 # trigger a CronJob run on a successful update.
 # Sourced; not directly executable.

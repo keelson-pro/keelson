@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 
 # Watcher tests. kubectl is shimmed via $TMP_BIN on PATH.
 

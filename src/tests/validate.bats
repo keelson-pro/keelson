@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 
 # Tests for lib/validate.bash. Binaries are checked against PATH; we shim
 # missing ones in/out via $TMP_BIN to drive the pass/fail paths.
