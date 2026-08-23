@@ -36,8 +36,8 @@ Both are reported on the boot line: `Keelson <version> (package <package-version
 | `KEELSON_RESPECT_SA_PULL_SECRETS`<br>`Keelson/RespectServiceAccountPullSecrets` | `false` | Set `true` to walk the workload's ServiceAccount `imagePullSecrets` after the Pod's own, matching what the kubelet sees post-admission. Costs one extra `get sa` per scan. |
 | `KEELSON_WATCHED_KINDS`<br>`Keelson/WatchedKinds` | `Deployment StatefulSet DaemonSet CronJob` | Space-separated list. Anything not in this set is rejected by `keelson-validate`. ReplicaSets are intentionally excluded: a Deployment-owned ReplicaSet inherits its parent's annotations, so watching both would double-update; bare ReplicaSets are unsupported — convert to a Deployment. |
 | `KEELSON_STATE_CONFIGMAP`<br>`Keelson/StateConfigMap` | `keelson-state` | Name of the ConfigMap carrying what must survive a pod restart. Two kinds of key: `w--<kind>--<ns>--<name>` records that Keelson has seen a workload (`first-seen`, written once) and whether it is acting on it (`managed`, rewritten only when it changes); `j--<kind>--<ns>--<name>` records the per-CronJob always-once trigger. No schedule is stored — `next-due` is derived from a hash of the workload's identity, so it is the same on every cold start and needs no ledger to survive a restart. A poll therefore writes nothing here. |
-| `KEELSON_FIELD_MANAGER_STRATEGY_OWNED`<br>`Keelson/FieldManagerStrategyOwned` | `mimic` | Chooses between attributing the change to them (the detected Apply-op owner) or to us (`keelson`) when an Apply-op manager already owns the image field. `mimic` = SSA as their manager (no ownership churn, attribution to them). `patch` = strategic-merge patch as `keelson` (attribution to us, adds a Keelson Update entry). Per-workload override: annotation `keelson.pro/field-manager-strategy`. |
-| `KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED`<br>`Keelson/FieldManagerStrategyUnowned` | `patch` | Chooses the write method — patch or SSA — when no Apply-op manager owns the image field (Update-op ownership counts as unowned; Update entries don't participate in SSA conflict resolution). Attribution is always to us (`keelson`) in this row. `patch` = strategic-merge patch (adds a Keelson Update entry). `claim` = SSA (adds a Keelson Apply entry). Per-workload override: annotation `keelson.pro/field-manager-strategy`. |
+| `KEELSON_FIELD_MANAGER_STRATEGY_OWNED`<br>`Keelson/FieldManagerStrategyOwned` | `mimic` | Chooses between attributing the change to them (the detected Apply-op owner) or to us (`keelson`) when an Apply-op manager already owns the image field. `mimic` = SSA as their manager (no ownership churn, attribution to them). `patch` = strategic-merge patch as `keelson` (attribution to us, adds a Keelson Update entry). Per-workload override: annotation `keelson.pro/fieldManagerStrategy`. |
+| `KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED`<br>`Keelson/FieldManagerStrategyUnowned` | `patch` | Chooses the write method — patch or SSA — when no Apply-op manager owns the image field (Update-op ownership counts as unowned; Update entries don't participate in SSA conflict resolution). Attribution is always to us (`keelson`) in this row. `patch` = strategic-merge patch (adds a Keelson Update entry). `claim` = SSA (adds a Keelson Apply entry). Per-workload override: annotation `keelson.pro/fieldManagerStrategy`. |
 
 ### Tick loop and scan cadence
 
@@ -169,19 +169,32 @@ If a host has no entry, Keelson treats it as anonymous.
 
 Annotations live on the workload's `metadata.annotations`. Under the default `KEELSON_CONFIG_MODE=keelson` every key is prefixed `keelson.pro/`; under `keel` use the `keel.sh/` prefix and Keelson translates the value where it can.
 
+**Two spellings are accepted for every multi-word key.** camelCase is canonical and is what this document uses; the hyphenated form is equally valid on either prefix. Keel's own surface mixes the two, so a workload moving between the projects should not have to be rewritten:
+
+| Canonical | Also accepted |
+|---|---|
+| `matchTag` | `match-tag` |
+| `matchMode` | `match-mode` |
+| `pollSchedule` | `poll-schedule` |
+| `triggerJobOnUpdate` | `trigger-job-on-update` |
+| `fieldManagerStrategy` | `field-manager-strategy` |
+
+Setting **both spellings of the same key to the same value** logs a warning naming the older one, and Keelson carries on. Setting them to **different values** is an error and the workload is not managed — whichever Keelson picked would be somebody's surprise, so it picks neither. Both checks apply per scope, so a `.<container>` pair is caught the same way, and a container-suffixed key still beats a workload-wide one.
+
+
 | Key (logical) | Values | Purpose |
 |---|---|---|
 | `policy` | `major`, `minor`, `patch`, `all`, `glob:<pattern>`, `regexp:<pattern>` | Which version bumps trigger an update. Keel's `force` is rejected. |
-| `match-tag` | regex / glob | Restrict the tag set considered before policy applies. |
-| `match-mode` | `regex`, `glob` | Selects how `match-tag` is interpreted. |
+| `matchTag` | regex / glob | Restrict the tag set considered before policy applies. |
+| `matchMode` | `regex`, `glob` | Selects how `matchTag` is interpreted. |
 | `trigger` | `default`, `poll` | **Deferred: not read.** Keel's switch between webhook-driven and poll-driven updates. Keelson polls, and a registry webhook path is future work, so setting this changes nothing either way today. |
-| `poll-schedule` | duration: `30s`, `5m`, `2h45m`, `1.5h`, `1d`, bare seconds, or Keel's `@every 10m` / `@hourly` / `@daily` / `@weekly` | How often this workload's registry is polled for tags, overriding `KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT`. An unparseable value is ignored with a `poll-schedule-invalid` warning and the global default applies. A value below Keelson's one-second resolution is clamped to `1s` with a `poll-schedule-too-fast` warning, since that is far closer to the intent than the global default would be. A watch event on the workload makes Keelson re-read it, and anything a decision depends on having moved — image, annotations, service account, image pull secrets, `spec.suspend` — brings the next poll forward to immediately, regardless of the schedule. A write that touched none of them, which is most of what a watch delivers, leaves the schedule alone. |
+| `pollSchedule` | duration: `30s`, `5m`, `2h45m`, `1.5h`, `1d`, bare seconds, or Keel's `@every 10m` / `@hourly` / `@daily` / `@weekly` | How often this workload's registry is polled for tags, overriding `KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT`. An unparseable value is ignored with a `poll-schedule-invalid` warning and the global default applies. A value below Keelson's one-second resolution is clamped to `1s` with a `poll-schedule-too-fast` warning, since that is far closer to the intent than the global default would be. A watch event on the workload makes Keelson re-read it, and anything a decision depends on having moved — image, annotations, service account, image pull secrets, `spec.suspend` — brings the next poll forward to immediately, regardless of the schedule. A write that touched none of them, which is most of what a watch delivers, leaves the schedule alone. |
 | `credentials` | `respect-pod` (default), `central`, `ignore-pod` | Which credential path Keelson uses. `respect-pod` walks the workload's `imagePullSecrets` first, then falls through to central. `central` skips the Pod entirely. |
-| `trigger-job-on-update` | `true`, `false` | On a CronJob with `spec.suspend: true`, create a one-off Job whenever Keelson updates the image. It also fires **once** the first time Keelson polls a suspended, annotated CronJob even if there is nothing to update, so one that was already on its newest tag when Keelson took it over still runs rather than waiting for a future release. The state ConfigMap records that it has fired, so it does not repeat, and only the poll evaluates this: the reconcile scan, the full refresh and the queued re-read all run cache-only, because two of them overlapping would each read "never triggered" and each create a Job. The CronJob must stay suspended; otherwise the scheduler and Keelson would both fire. |
-| `field-manager-strategy` | `mimic`, `patch`, `claim` | Override the global `KEELSON_FIELD_MANAGER_STRATEGY_OWNED` / `_UNOWNED` default for this workload. Each value is a (write method, attribution) pair: `mimic` = SSA attributed to the detected Apply owner; `patch` = strategic-merge patch attributed to us (`keelson`); `claim` = SSA attributed to us. `mimic` requires an Apply-op field owner and is rejected (error, workload skipped) when the image field has none. `patch` and `claim` are always valid. Invalid values (typos) are rejected with an error and the workload is skipped this cycle. Keelson-only — no `keel.sh/` equivalent. |
+| `triggerJobOnUpdate` | `true`, `false` | On a CronJob with `spec.suspend: true`, create a one-off Job whenever Keelson updates the image. It also fires **once** the first time Keelson polls a suspended, annotated CronJob even if there is nothing to update, so one that was already on its newest tag when Keelson took it over still runs rather than waiting for a future release. The state ConfigMap records every container's image at the moment it fired, so the same update cannot repeat and a multi-container CronJob compares against all of them rather than whichever one happened to be written. A change made by anything other than Keelson does not fire a Job: it moves the baseline the next poll compares against, exactly as for any other workload. Only the poll evaluates this: the reconcile scan, the full refresh and the queued re-read all run cache-only, because two of them overlapping would each read "never triggered" and each create a Job. The CronJob must stay suspended; otherwise the scheduler and Keelson would both fire. |
+| `fieldManagerStrategy` | `mimic`, `patch`, `claim` | Override the global `KEELSON_FIELD_MANAGER_STRATEGY_OWNED` / `_UNOWNED` default for this workload. Each value is a (write method, attribution) pair: `mimic` = SSA attributed to the detected Apply owner; `patch` = strategic-merge patch attributed to us (`keelson`); `claim` = SSA attributed to us. `mimic` requires an Apply-op field owner and is rejected (error, workload skipped) when the image field has none. `patch` and `claim` are always valid. Invalid values (typos) are rejected with an error and the workload is skipped this cycle. Keelson-only — no `keel.sh/` equivalent. |
 | `notify` | sink name | **Deferred: not read.** Reserved for notification routing. |
 
-Workloads under `KEELSON_CONFIG_MODE=both` must pick **one** prefix. Mixing `keelson.pro/` and `keel.sh/` on the same workload triggers a `dual-prefix-conflict` rejection.
+A workload must carry **one** prefix, in every mode. Mixing `keelson.pro/` and `keel.sh/` triggers a `dual-prefix-conflict` rejection and Keelson does not manage it. This is not about ambiguity: a `keel.sh/` annotation is evidence that keel itself may be running, and two controllers writing the same image field is worse than either doing nothing. Presence of both prefixes is the signal, not a clash on one key — `keelson.pro/policy` alongside `keel.sh/pollSchedule` is enough. Migrating between the two means removing the old annotations as you add the new ones.
 
 ### Per-container overrides
 
@@ -192,8 +205,8 @@ metadata:
   annotations:
     keelson.pro/policy: minor              # default for every container
     keelson.pro/policy.web: major          # the "web" container gets major bumps
-    keelson.pro/match-tag.db: '^pg-15\.'   # restrict tag set for "db" only
-    keelson.pro/match-mode.db: regex       # match-tag is a glob unless you say this
+    keelson.pro/matchTag.db: '^pg-15\.'    # restrict tag set for "db" only
+    keelson.pro/matchMode.db: regex        # matchTag is a glob unless you say this
 ```
 
 The container-suffixed key wins when present; otherwise Keelson falls back to the workload-wide key. The same precedence applies under `KEELSON_CONFIG_MODE=keel` with `keel.sh/policy.<container>`.

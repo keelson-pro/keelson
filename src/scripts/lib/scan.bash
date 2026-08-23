@@ -451,7 +451,7 @@ scan_cache_workload() {
     state_record_workload "$kind" "$ns" "$name" "$managed"
 
     local interval=$_scan_interval sched
-    annotation_get "$annotations" poll-schedule
+    annotation_get "$annotations" pollSchedule
     sched=$ANNOTATION_VALUE
     if [ -n "$sched" ]; then
         if clock_parse_duration "$sched"; then
@@ -659,9 +659,9 @@ scan_container() {
     fi
 
     local match_tag match_mode current_tag winner candidate
-    annotation_get "$ann" match-tag "$cname"
+    annotation_get "$ann" matchTag "$cname"
     match_tag=$ANNOTATION_VALUE
-    annotation_get "$ann" match-mode "$cname"
+    annotation_get "$ann" matchMode "$cname"
     match_mode=$ANNOTATION_VALUE
     match_mode=${match_mode:-glob}
     image_tag "$cimage"
@@ -742,7 +742,7 @@ scan_check_cronjob_trigger() {
     local ns=$1 name=$2 ann=$3 suspend=$4 updated=$5
     local from_tag=${6:-} to_tag=${7:-} repo=${8:-}
     local trigger
-    annotation_get "$ann" trigger-job-on-update
+    annotation_get "$ann" triggerJobOnUpdate
     trigger=$ANNOTATION_VALUE
     [ "$trigger" = "true" ] || return 0
 

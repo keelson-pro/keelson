@@ -20,6 +20,7 @@
 ANNOTATION_VALUE=
 ANNOTATION_RAW=
 ANNOTATION_KEEL_KEY=
+ANNOTATION_ALT_KEY=
 
 # annotation_get <annotation-lines> <logical-key> [<container-name>]
 #                -> ANNOTATION_VALUE
@@ -31,32 +32,59 @@ ANNOTATION_KEEL_KEY=
 #   "REJECT:<reason>"  - caller treats as a skip with that reason. Currently:
 #     keel-policy-force-unsupported  - keel value not honoured by keelson
 #     dual-prefix-conflict           - workload mixes keelson.pro/ and keel.sh/
-#                                      under config-mode=both (pick one prefix
-#                                      per workload, not both).
+#                                      annotations. Rejected in every mode: a
+#                                      keel.sh/ annotation is evidence keel may
+#                                      be running, and two controllers writing
+#                                      one image field is worse than neither.
 annotation_get() {
     local lines=$1 key=$2 container=${3:-}
     local mode=${KEELSON_CONFIG_MODE:?KEELSON_CONFIG_MODE required}
 
-    local keelson_val="" keel_val="" keel_key
+    case "$mode" in
+        keelson|keel|both) ;;
+        *) return 2 ;;
+    esac
+
+    # Both prefixes on one workload, in any mode. Ignoring the other one is
+    # only safe if nothing is acting on it, and a keel.sh/ annotation is
+    # evidence that keel may well be running too. Two controllers writing the
+    # same image field is worse than either doing nothing, so neither does.
+    if annotation_has_prefix "$lines" "keelson.pro/" \
+            && annotation_has_prefix "$lines" "keel.sh/"; then
+        ANNOTATION_VALUE='REJECT:dual-prefix-conflict'
+        return 0
+    fi
+
+    local keelson_val="" keel_val="" keel_key alt
+    annotation_alt_key "$key"
+    alt=$ANNOTATION_ALT_KEY
+
     if [ -n "$container" ]; then
-        annotation_lookup_raw "$lines" "keelson.pro/$key.$container"
+        annotation_pick "$lines" "keelson.pro/$key.$container" \
+            "${alt:+keelson.pro/$alt.$container}"
         keelson_val=$ANNOTATION_RAW
     fi
     if [ -z "$keelson_val" ]; then
-        annotation_lookup_raw "$lines" "keelson.pro/$key"
+        annotation_pick "$lines" "keelson.pro/$key" "${alt:+keelson.pro/$alt}"
         keelson_val=$ANNOTATION_RAW
     fi
+    case "$keelson_val" in REJECT:*) ANNOTATION_VALUE=$keelson_val; return 0 ;; esac
+
     annotation_keel_key "$key"
     keel_key=$ANNOTATION_KEEL_KEY
     if [ -n "$keel_key" ]; then
+        annotation_alt_key "$keel_key"
+        alt=$ANNOTATION_ALT_KEY
         if [ -n "$container" ]; then
-            annotation_lookup_raw "$lines" "keel.sh/$keel_key.$container"
+            annotation_pick "$lines" "keel.sh/$keel_key.$container" \
+                "${alt:+keel.sh/$alt.$container}"
             keel_val=$ANNOTATION_RAW
         fi
         if [ -z "$keel_val" ]; then
-            annotation_lookup_raw "$lines" "keel.sh/$keel_key"
+            annotation_pick "$lines" "keel.sh/$keel_key" "${alt:+keel.sh/$alt}"
             keel_val=$ANNOTATION_RAW
         fi
+        case "$keel_val" in REJECT:*) ANNOTATION_VALUE=$keel_val; return 0 ;; esac
     fi
 
     ANNOTATION_VALUE=
@@ -68,19 +96,11 @@ annotation_get() {
             annotation_translate_keel_value "$key" "$keel_val"
             ;;
         both)
-            if annotation_has_prefix "$lines" "keelson.pro/" \
-                    && annotation_has_prefix "$lines" "keel.sh/"; then
-                ANNOTATION_VALUE='REJECT:dual-prefix-conflict'
-                return 0
-            fi
             if [ -n "$keelson_val" ]; then
                 ANNOTATION_VALUE=$keelson_val
             else
                 annotation_translate_keel_value "$key" "$keel_val"
             fi
-            ;;
-        *)
-            return 2
             ;;
     esac
 }
@@ -99,17 +119,64 @@ annotation_has_prefix() {
     return 1
 }
 
+# annotation_alt_key <key>  -> ANNOTATION_ALT_KEY
+# The hyphenated spelling of a camelCase key, empty when there is no second
+# spelling. camelCase is canonical; the hyphenated form is accepted because
+# keel's own surface mixes the two and a workload moving between them should
+# not have to be rewritten.
+annotation_alt_key() {
+    case "$1" in
+        matchTag)             ANNOTATION_ALT_KEY='match-tag' ;;
+        matchMode)            ANNOTATION_ALT_KEY='match-mode' ;;
+        pollSchedule)         ANNOTATION_ALT_KEY='poll-schedule' ;;
+        triggerJobOnUpdate)   ANNOTATION_ALT_KEY='trigger-job-on-update' ;;
+        fieldManagerStrategy) ANNOTATION_ALT_KEY='field-manager-strategy' ;;
+        *)                    ANNOTATION_ALT_KEY= ;;
+    esac
+}
+
+# annotation_pick <lines> <key> <alt-key>  -> ANNOTATION_RAW
+# One scope, both spellings. Empty <alt-key> means the key has only one.
+#
+# Both spellings on the same workload with different values is a rejection,
+# not a precedence puzzle: whichever we picked would be someone's surprise.
+# The same value twice is merely untidy, so it warns and carries on.
+annotation_pick() {
+    local lines=$1 key=$2 alt=$3 primary secondary
+    annotation_lookup_raw "$lines" "$key"
+    primary=$ANNOTATION_RAW
+    if [ -z "$alt" ]; then
+        ANNOTATION_RAW=$primary
+        return 0
+    fi
+    annotation_lookup_raw "$lines" "$alt"
+    secondary=$ANNOTATION_RAW
+    if [ -n "$primary" ] && [ -n "$secondary" ]; then
+        if [ "$primary" != "$secondary" ]; then
+            log_error annotation-spelling-conflict key="$key" alt="$alt" \
+                value="$primary" alt-value="$secondary" \
+                msg="Both '$key' and '$alt' are set with different values ('$primary' and '$secondary'); pick one spelling."
+            ANNOTATION_RAW='REJECT:annotation-spelling-conflict'
+            return 0
+        fi
+        log_warn annotation-spelling-duplicate key="$key" alt="$alt" \
+            msg="Both '$key' and '$alt' are set to the same value; '$alt' is the older spelling and can be removed."
+    fi
+    [ -n "$primary" ] && ANNOTATION_RAW=$primary
+    return 0
+}
+
 # annotation_keel_key <logical-key>  -> ANNOTATION_KEEL_KEY
 # Maps a keelson-side logical key to the corresponding keel.sh short key.
 # Empty result = no keel equivalent (the key is keelson-only).
 annotation_keel_key() {
     case "$1" in
-        policy)        ANNOTATION_KEEL_KEY='policy' ;;
-        trigger)       ANNOTATION_KEEL_KEY='trigger' ;;
-        poll-schedule) ANNOTATION_KEEL_KEY='pollSchedule' ;;
-        match-tag)     ANNOTATION_KEEL_KEY='match-tag' ;;
-        notify)        ANNOTATION_KEEL_KEY='notify' ;;
-        *)             ANNOTATION_KEEL_KEY= ;;
+        policy)       ANNOTATION_KEEL_KEY='policy' ;;
+        trigger)      ANNOTATION_KEEL_KEY='trigger' ;;
+        pollSchedule) ANNOTATION_KEEL_KEY='pollSchedule' ;;
+        matchTag)     ANNOTATION_KEEL_KEY='matchTag' ;;
+        notify)       ANNOTATION_KEEL_KEY='notify' ;;
+        *)            ANNOTATION_KEEL_KEY= ;;
     esac
 }
 
