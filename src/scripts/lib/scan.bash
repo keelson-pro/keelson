@@ -412,7 +412,7 @@ scan_workload() {
     fi
 
     # Only when this pass polled. The trigger's always-once rule fires on
-    # "no prior triggered-job recorded", and every cache-refresh path -- the
+    # "no prior firing recorded", and every cache-refresh path -- the
     # reconcile scan, the full refresh, the queued re-read -- runs in its own
     # child with its own copy of the ledger, so two of them overlapping would
     # each read "never triggered" and each create a Job. The paths that poll
@@ -737,7 +737,7 @@ scan_container() {
 #
 # Then trigger when EITHER:
 #   - this scan updated a container in the workload, or
-#   - no prior triggered-job is recorded (first-observation always-once).
+#   - nothing has ever been recorded for it (first-observation always-once).
 scan_check_cronjob_trigger() {
     local ns=$1 name=$2 ann=$3 suspend=$4 updated=$5
     local from_tag=${6:-} to_tag=${7:-} repo=${8:-}
@@ -753,10 +753,20 @@ scan_check_cronjob_trigger() {
         return 0
     fi
 
+    # The image set as it stands after this pass: update_apply records what it
+    # applied against the cache record, so reading it back is the one place
+    # that sees the post-update truth for every container at once.
+    scan_trigger_image_set "$ns" "$name"
+
+    # Never fired: the bootstrap run, so a suspended CronJob adopted on its
+    # newest tag still proves it runs rather than waiting for a future release.
+    # Otherwise only our own update fires it, and only when it actually moved
+    # an image: someone else's change is a new baseline, not an event.
     local prior
-    prior=$(state_get_trigger_field CronJob "$ns" "$name" triggered-job)
-    if [ "$updated" -ne 1 ] && [ -n "$prior" ]; then
-        return 0
+    prior=$(state_get_trigger_field CronJob "$ns" "$name" triggered-at)
+    if [ -n "$prior" ]; then
+        [ "$updated" -eq 1 ] || return 0
+        scan_trigger_set_changed "$ns" "$name" || return 0
     fi
 
     if update_trigger_cronjob "$ns" "$name" "$from_tag" "$to_tag" "$repo"; then
@@ -768,16 +778,65 @@ scan_check_cronjob_trigger() {
     fi
 }
 
+# scan_trigger_image_set <ns> <name>  -> SCAN_TRIGGER_IMAGE_SET
+# Every container's image, one "<list>/<name>=<image>" per line, from the cache
+# record. Init containers included: Keelson updates them like any other, and an
+# init container left a release behind is the skew this exists to prevent.
+SCAN_TRIGGER_IMAGE_SET=
+scan_trigger_image_set() {
+    local i
+    SCAN_TRIGGER_IMAGE_SET=
+    inventory_get CronJob "$1" "$2" || return 0
+    for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do
+        SCAN_TRIGGER_IMAGE_SET+="${INVENTORY_CONTAINER_LISTS[$i]}/${INVENTORY_CONTAINER_NAMES[$i]}=${INVENTORY_CONTAINER_IMAGES[$i]}"$'\n'
+    done
+}
+
+# scan_trigger_set_changed <ns> <name>
+# True when SCAN_TRIGGER_IMAGE_SET differs from what was recorded at the last
+# firing. Compared container by container rather than as one string: the cache
+# yields inventory order and STATE_FIELDS is an unordered associative array, so
+# a string comparison would need a sort, and a sort is a fork on a path that
+# now has none.
+scan_trigger_set_changed() {
+    local key line rest slot recorded n=0
+    key=$(state_trigger_key CronJob "$1" "$2")
+    rest=$SCAN_TRIGGER_IMAGE_SET
+    while [ -n "$rest" ]; do
+        line=${rest%%$'\n'*}
+        if [ "$line" = "$rest" ]; then rest=; else rest=${rest#*$'\n'}; fi
+        [ -n "$line" ] || continue
+        n=$(( n + 1 ))
+        slot="$key:${line%%=*}"
+        recorded=${STATE_FIELDS[$slot]-}
+        [ "$recorded" = "${line#*=}" ] || return 0
+    done
+    # A container dropped since the last firing is a change too, and matching
+    # every current one would otherwise miss it.
+    local field c=0
+    for field in ${STATE_FIELDS[@]+"${!STATE_FIELDS[@]}"}; do
+        case "$field" in
+            "$key:containers/"*|"$key:initContainers/"*) c=$(( c + 1 )) ;;
+        esac
+    done
+    [ "$c" -ne "$n" ]
+}
+
 scan_record_trigger_success() {
     local kind=$1 ns=$2 name=$3
-    local now
-    now=$(state_now)
-    state_set_trigger_field "$kind" "$ns" "$name" triggered-at "$now"
-    # The job name is generated inside update_trigger_cronjob; we record the
-    # most recent invocation timestamp here. The Job creation log carries
-    # the generated name for forensic lookup. A future improvement could
-    # plumb the name back if a single canonical record per-CronJob is needed.
-    state_set_trigger_field "$kind" "$ns" "$name" triggered-job "$now"
+    state_set_trigger_field "$kind" "$ns" "$name" triggered-at "$(state_now)"
+    # Every container's image, not a timestamp in a field named triggered-job.
+    # A CronJob can have several, and recording one of them left the others
+    # undefined: updating container A then container B would compare against
+    # whichever happened to be written.
+    local line rest
+    rest=$SCAN_TRIGGER_IMAGE_SET
+    while [ -n "$rest" ]; do
+        line=${rest%%$'\n'*}
+        if [ "$line" = "$rest" ]; then rest=; else rest=${rest#*$'\n'}; fi
+        [ -n "$line" ] || continue
+        state_set_trigger_field "$kind" "$ns" "$name" "${line%%=*}" "${line#*=}"
+    done
 }
 
 scan_tag_passes_filter() {

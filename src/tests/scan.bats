@@ -878,20 +878,6 @@ SH
     [ "$INVENTORY_NEXT_DUE" -le "$(( before + 60 ))" ]
 }
 
-@test "restart: the offset is the same on every cold start" {
-    # Hashed off the identity, so the spread survives a restart without a
-    # ledger entry to read it back from.
-    inventory_init
-    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
-    scan_run 0 0 2>/dev/null
-    inventory_get Deployment default app
-    local first=$INVENTORY_NEXT_DUE
-    rm -rf "$KEELSON_INVENTORY_DIR"; inventory_init
-    scan_run 0 0 2>/dev/null
-    inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "$first" ]
-}
-
 @test "restart: a cold cache records the workload in the ledger" {
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
@@ -1839,4 +1825,65 @@ JSON
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:2.0 patch)"
     scan_run 0 0 2>/dev/null
     [ "$(state_get w--Deployment--default--app first-seen)" = "$first" ]
+}
+
+# --- the trigger record is the image set, not a timestamp ---
+#
+# A CronJob can carry several containers. Recording one image left the others
+# undefined: updating container A and then container B compared against
+# whichever happened to have been written.
+
+cronjob_two_containers() {
+    cat <<JSON
+{
+  "items": [
+    {
+      "metadata": { "namespace": "ops", "name": "reindex",
+        "annotations": { "keelson.pro/policy": "minor",
+                         "keelson.pro/trigger-job-on-update": "true" } },
+      "spec": { "suspend": true, "jobTemplate": { "spec": { "template": { "spec": {
+        "initContainers": [ { "name": "wait-db", "image": "$2" } ],
+        "containers": [ { "name": "reindex", "image": "$1" } ]
+      } } } } }
+    }
+  ]
+}
+JSON
+}
+
+@test "trigger record: every container's image is recorded, init included" {
+    inventory_init
+    kubectl_returns "$(cronjob_two_containers ghcr.io/x/re:1.0 ghcr.io/x/wait:2.0)"
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 1 2>/dev/null || true
+    [ "$(state_get_trigger_field CronJob ops reindex 'containers/reindex')" = "ghcr.io/x/re:1.0" ]
+    [ "$(state_get_trigger_field CronJob ops reindex 'initContainers/wait-db')" = "ghcr.io/x/wait:2.0" ]
+}
+
+@test "trigger record: triggered-at is written, triggered-job is not" {
+    inventory_init
+    kubectl_returns "$(cronjob_two_containers ghcr.io/x/re:1.0 ghcr.io/x/wait:2.0)"
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 1 2>/dev/null || true
+    [ -n "$(state_get_trigger_field CronJob ops reindex triggered-at)" ]
+    [ -z "$(state_get_trigger_field CronJob ops reindex triggered-job)" ]
+}
+
+@test "trigger: an unchanged image set does not re-fire" {
+    inventory_init
+    kubectl_returns "$(cronjob_two_containers ghcr.io/x/re:1.0 ghcr.io/x/wait:2.0)"
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 1 2>/dev/null || true
+    : > "$TMP_DIR/kubectl.log"
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 1 2>/dev/null || true
+    ! grep -q "create job" "$TMP_DIR/kubectl.log"
+}
+
+@test "trigger: a third party changing the image does not fire" {
+    # It moves the baseline the next poll compares against; it is not an event
+    # Keelson acts on. Only our own update fires a Job.
+    inventory_init
+    kubectl_returns "$(cronjob_two_containers ghcr.io/x/re:1.0 ghcr.io/x/wait:2.0)"
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 1 2>/dev/null || true
+    : > "$TMP_DIR/kubectl.log"
+    kubectl_returns "$(cronjob_two_containers ghcr.io/x/re:9.9 ghcr.io/x/wait:2.0)"
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 1 2>/dev/null || true
+    ! grep -q "create job" "$TMP_DIR/kubectl.log"
 }

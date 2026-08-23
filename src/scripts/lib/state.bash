@@ -24,9 +24,11 @@
 # a ConfigMap write on every poll.
 #
 # Per-workload trigger fields:
-#   triggered-job, triggered-at    last manual Job, when (the scan reads
-#                                  triggered-job to gate the always-once
-#                                  trigger; triggered-at is informational)
+#   triggered-at                   when a Job was last fired; its presence is
+#                                  what gates the always-once bootstrap run
+#   containers/<name>,             every container's image at that moment, so
+#   initContainers/<name>          a multi-container CronJob compares against
+#                                  all of them rather than one arbitrary image
 #
 # Cache:
 #   STATE_FIELDS["<data-key>:<field>"] = string
