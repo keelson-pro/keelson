@@ -681,6 +681,7 @@ SH
 }
 
 @test "inventory: an evicted workload is forgotten in the ledger too" {
+    local due=$(( $(date -u +%s) + 30 ))
     # Otherwise a CronJob's trigger entry outlives the CronJob and the state
     # ConfigMap only ever grows.
     inventory_init
@@ -824,11 +825,12 @@ SH
 }
 
 @test "resync: an annotation change makes the workload due now" {
+    local due=$(( $(date -u +%s) + 30 ))
     # The watch stream cannot see these at all, so only the scan can.
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
     scan_run 0 0 2>/dev/null
-    inventory_set_next_due Deployment default app 4242424242
+    inventory_set_next_due Deployment default app "$due"
 
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 patch)"
     scan_run 0 0 2>/dev/null
@@ -840,11 +842,12 @@ SH
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
     scan_run 0 0 2>/dev/null
-    inventory_set_next_due Deployment default app 4242424242
+    local due=$(( $(date -u +%s) + 30 ))
+    inventory_set_next_due Deployment default app "$due"
 
     scan_run 0 0 2>/dev/null
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "4242424242" ]
+    [ "$INVENTORY_NEXT_DUE" = "$due" ]
 }
 
 @test "resync: it says so, so an operator knows the watch missed something" {
@@ -865,10 +868,11 @@ SH
 @test "restart: a new cache entry resumes a persisted next-due" {
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
-    state_set_next_due Deployment default app 4242424242
+    local due=$(( $(date -u +%s) + 30 ))
+    state_set_next_due Deployment default app "$due"
     scan_run 0 0 2>/dev/null
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "4242424242" ]
+    [ "$INVENTORY_NEXT_DUE" = "$due" ]
 }
 
 @test "restart: with nothing persisted it takes a fresh offset and records it" {
@@ -952,6 +956,7 @@ SH
 }
 
 @test "queue refresh: a changed annotation brings the poll forward" {
+    local due=$(( $(date -u +%s) + 30 ))
     # The case the whole re-read exists for: nothing about the image moved,
     # but the decision Keelson would make did.
     inventory_init
@@ -960,7 +965,7 @@ SH
     queue_enqueue Deployment default app
     scan_refresh_queued 0 2>/dev/null
     inventory_get Deployment default app
-    inventory_set_next_due Deployment default app 9999999999
+    inventory_set_next_due Deployment default app "$due"
 
     kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' major)"
     queue_enqueue Deployment default app
@@ -971,6 +976,7 @@ SH
 }
 
 @test "queue refresh: an unchanged workload keeps its schedule" {
+    local due=$(( $(date -u +%s) + 30 ))
     # Status churn is most of what a watch delivers and must cost nothing
     # beyond the read itself.
     inventory_init
@@ -978,12 +984,12 @@ SH
     kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' minor)"
     queue_enqueue Deployment default app
     scan_refresh_queued 0 2>/dev/null
-    inventory_set_next_due Deployment default app 9999999999
+    inventory_set_next_due Deployment default app "$due"
 
     queue_enqueue Deployment default app
     scan_refresh_queued 0 2>/dev/null
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "9999999999" ]
+    [ "$INVENTORY_NEXT_DUE" = "$due" ]
 }
 
 @test "queue refresh: a workload that has gone is left for the delete event" {
@@ -1066,15 +1072,16 @@ JSON
 }
 
 @test "init containers: a reschedule does not lose which list a container is in" {
+    local due=$(( $(date -u +%s) + 30 ))
     # Dropping the list here would change the fingerprint, and a record that
     # fingerprints differently after a plain reschedule resyncs forever.
     inventory_init
     kubectl_returns "$(deployment_with_init_json ghcr.io/x/y:1.2.3 ghcr.io/x/m:1.4.0)"
     scan_run 0 0 2>/dev/null
-    inventory_set_next_due Deployment default app 4242424242
+    inventory_set_next_due Deployment default app "$due"
     scan_run 0 0 2>/dev/null
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "4242424242" ]
+    [ "$INVENTORY_NEXT_DUE" = "$due" ]
     [ "${INVENTORY_CONTAINER_LISTS[1]}" = "initContainers" ]
 }
 
@@ -1335,6 +1342,7 @@ SH
 }
 
 @test "own update: the re-read that follows it does not resync" {
+    local due=$(( $(date -u +%s) + 30 ))
     # Keelson's patch fires a watch event like anyone else's. Without the
     # record being updated, the re-read reports a change and asks the registry
     # a question it has just answered.
@@ -1346,7 +1354,7 @@ SH
 printf '{"Tags":["1.2.3","1.3.0"]}'
 SH
     scan_run 1 2>/dev/null
-    inventory_set_next_due Deployment default app 9999999999
+    inventory_set_next_due Deployment default app "$due"
 
     # The cluster now serves what we just applied, as it would to the re-read.
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.3.0 minor)"
@@ -1354,7 +1362,7 @@ SH
     run emit scan_refresh_queued 1
     [[ "$output" != *"scan-resync"* ]]
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "9999999999" ]
+    [ "$INVENTORY_NEXT_DUE" = "$due" ]
 }
 
 # --- annotations Keelson does not read must not drive its decisions ---
@@ -1387,26 +1395,28 @@ JSON
 }
 
 @test "resync: someone else's annotation changing is not a decision change" {
+    local due=$(( $(date -u +%s) + 30 ))
     # Patching a Deployment makes its own controller bump
     # deployment.kubernetes.io/revision, so Keelson's own update read back as
     # a change and asked the registry a question it had just answered.
     inventory_init
     kubectl_returns "$(deployment_with_foreign_annotation ghcr.io/x/y:1.2.3 minor 1)"
     scan_run 0 0 2>/dev/null
-    inventory_set_next_due Deployment default app 9999999999
+    inventory_set_next_due Deployment default app "$due"
 
     kubectl_returns "$(deployment_with_foreign_annotation ghcr.io/x/y:1.2.3 minor 2)"
     run emit scan_run 0 0
     [[ "$output" != *"scan-resync"* ]]
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "9999999999" ]
+    [ "$INVENTORY_NEXT_DUE" = "$due" ]
 }
 
 @test "resync: a Keelson annotation changing still is one" {
+    local due=$(( $(date -u +%s) + 30 ))
     inventory_init
     kubectl_returns "$(deployment_with_foreign_annotation ghcr.io/x/y:1.2.3 minor 1)"
     scan_run 0 0 2>/dev/null
-    inventory_set_next_due Deployment default app 9999999999
+    inventory_set_next_due Deployment default app "$due"
 
     kubectl_returns "$(deployment_with_foreign_annotation ghcr.io/x/y:1.2.3 major 1)"
     run emit scan_run 0 0
@@ -1682,4 +1692,67 @@ CRONJOB_LIST='{"items":[
     scan_extract_workload "$EXTRACT_LIST" Deployment 0
     [[ "$SCAN_WL_ANNOTATIONS" != *"containers "* ]]
     [[ "$SCAN_WL_CONTAINER_PAIRS" != *"keelson.pro/"* ]]
+}
+
+# --- an implausible next-due is corrupt, not a schedule ---
+#
+# No writer can put next-due beyond now + interval. Anything further out is
+# corrupt, and nothing corrects it on its own: inventory_due never selects a
+# far-future entry, so the workload is silently never polled again, across
+# restarts. Seen in the wild with 49 of 50 entries sat 69 days out.
+
+@test "clamp: a far-future cached next-due is recomputed" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 4242424242
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" -le "$(( $(date -u +%s) + 60 ))" ]
+}
+
+@test "clamp: a far-future persisted next-due is recomputed" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    state_set_next_due Deployment default app 4242424242
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" -le "$(( $(date -u +%s) + 60 ))" ]
+}
+
+@test "clamp: the corrected value is written back to the ledger" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    state_set_next_due Deployment default app 4242424242
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$(state_get_next_due Deployment default app)" = "$INVENTORY_NEXT_DUE" ]
+}
+
+@test "clamp: it warns, because it should never happen" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    state_set_next_due Deployment default app 4242424242
+    run emit scan_run 0 0
+    [[ "$output" == *"next-due-implausible"* ]]
+}
+
+@test "clamp: exactly one interval out is left alone" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    local due=$(( $(date -u +%s) + 60 ))
+    inventory_set_next_due Deployment default app "$due"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "$due" ]
+}
+
+@test "clamp: a non-numeric next-due is corrupt too" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    state_set_next_due Deployment default app "not-a-number"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" -le "$(( $(date -u +%s) + 60 ))" ]
 }

@@ -500,6 +500,33 @@ scan_cache_workload() {
         fi
     fi
 
+    # Whatever it came from, next-due cannot legitimately be beyond one
+    # interval out: inventory_first_due is now + (hash % interval),
+    # inventory_mark_polled is exactly now + interval, a resync is now.
+    # Further out than that, or not a number at all, is corrupt - and nothing
+    # would ever correct it, because inventory_due does not select a
+    # far-future entry, so inventory_mark_polled never runs on it. The
+    # workload is simply never polled again, silently, across restarts.
+    local implausible=0
+    case "$next_due" in
+        ''|*[!0-9]*) implausible=1 ;;
+        *)
+            # An if, not a && chain: a false test would leave the case
+            # returning 1, and set -e kills the pass before it writes back.
+            if [ "$next_due" -gt $(( _scan_now + interval )) ]; then
+                implausible=1
+            fi
+            ;;
+    esac
+    if [ "$implausible" -eq 1 ]; then
+        log_warn next-due-implausible kind="$kind" ns="$ns" name="$name" \
+            next-due="$next_due" interval="$interval" \
+            msg="$kind '$name' in '$ns' had a next-due of '$next_due', which is not within one ${interval}s interval of now; recomputing it."
+        inventory_first_due "$kind" "$ns" "$name" "$interval" "$_scan_now"
+        next_due=$INVENTORY_FIRST_DUE
+        state_set_next_due "$kind" "$ns" "$name" "$next_due"
+    fi
+
     inventory_put "$kind" "$ns" "$name" "$next_due" "$interval" "$suspend" \
         "$sa" "$ips" "$annotations" "$containers"
 }
