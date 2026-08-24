@@ -32,11 +32,18 @@ setup() {
     [ "$ELIGIBILITY_RESULT" = "OK patch 4" ]
 }
 
-@test "eligible: numeric N policy" {
+@test "eligible: part-N policy" {
+    rc=0
+    eligibility_check "keelson.pro/policy=part-2" "ghcr.io/x/y:1.2.3" || rc=$?
+    [ "$rc" -eq 0 ]
+    [ "$ELIGIBILITY_RESULT" = "OK part-2 2" ]
+}
+
+@test "skip: a bare number is not a policy" {
     rc=0
     eligibility_check "keelson.pro/policy=2" "ghcr.io/x/y:1.2.3" || rc=$?
-    [ "$rc" -eq 0 ]
-    [ "$ELIGIBILITY_RESULT" = "OK 2 2" ]
+    [ "$rc" -eq 1 ]
+    [ "$ELIGIBILITY_RESULT" = "SKIP invalid-policy" ]
 }
 
 @test "eligible: all is alias for major" {
@@ -126,9 +133,11 @@ setup() {
     [ "$ELIGIBILITY_RESULT" = "SKIP policy-position-incompatible-with-tag" ]
 }
 
-@test "skip: numeric N out of range" {
+@test "skip: part-N past the end of the tag" {
+    # A valid policy name that this particular tag cannot satisfy, which is a
+    # different answer from a policy Keelson does not understand at all.
     rc=0
-    eligibility_check "keelson.pro/policy=5" "nginx:1.2.3" || rc=$?
+    eligibility_check "keelson.pro/policy=part-5" "nginx:1.2.3" || rc=$?
     [ "$rc" -eq 1 ]
     [ "$ELIGIBILITY_RESULT" = "SKIP policy-position-incompatible-with-tag" ]
 }
