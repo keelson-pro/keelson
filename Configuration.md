@@ -186,7 +186,7 @@ Setting **both spellings of the same key to the same value** logs a warning nami
 
 | Key (logical) | Values | Purpose |
 |---|---|---|
-| `policy` | `major`, `minor`, `patch`, `all`, `glob:<pattern>`, `regexp:<pattern>` | Which version bumps trigger an update. Keel's `force` is rejected. |
+| `policy` | `major`, `minor`, `patch`, `all`, `glob:<pattern>`, `regexp:<pattern>` | Which part of the tag may change; everything to its left must match exactly. `major` is the first part, `minor` the second, `patch` the last **whatever the length** — none of them assume three, so a five-part release like `1.15.1.36.1` works as naturally as `1.2.3`. `minor` needs at least two parts; a single-part tag has no second one and is skipped with `policy-position-incompatible-with-tag`. `all` is identical to `major`. Keel's `force` is rejected. |
 | `matchTag` | regex / glob | Restrict the tag set considered before policy applies. |
 | `matchMode` | `regex`, `glob` | Selects how `matchTag` is interpreted. |
 | `trigger` | `default`, `poll` | **Deferred: not read.** Keel's switch between webhook-driven and poll-driven updates. Keelson polls, and a registry webhook path is future work, so setting this changes nothing either way today. |

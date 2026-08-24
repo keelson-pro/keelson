@@ -11,8 +11,13 @@
 #
 # Public API:
 #   policy_resolve_position <policy> <tag>
-#       Print the 1-indexed position. Exit 0 ok. Exit 2 invalid for
-#       this tag (e.g. minor on non-3-segment). Exit 3 'never' or empty.
+#       Print the 1-indexed position. Exit 0 ok. Exit 2 invalid for this tag
+#       (e.g. minor on a single-part tag, which has no second part). Exit 3
+#       'never' or empty.
+#
+# major is the first part, minor the second, patch the last whatever its
+# index. None of them assume three: a five-part release still has a first, a
+# second and a last.
 #   tag_is_newer <current-tag> <candidate-tag> <position>
 #       Exit 0 iff candidate is strictly newer under <position>.
 
@@ -31,7 +36,12 @@ policy_resolve_position() {
             return 0
             ;;
         minor)
-            if [ "$n" -ne 3 ]; then
+            # The second part of however many there are, not the middle of
+            # exactly three. A version longer than semver still has a second
+            # part and it is the one minor means; demanding three rejected
+            # 1.0 and 1.2.3.4 alike, and a rejected tag is a container that
+            # silently never updates.
+            if [ "$n" -lt 2 ]; then
                 return 2
             fi
             printf '2\n'

@@ -102,16 +102,26 @@ setup() {
     [ "$ELIGIBILITY_RESULT" = "SKIP tag-has-non-numeric-segment" ]
 }
 
-@test "skip: minor policy on 4-segment tag" {
+@test "eligible: minor policy on a 4-segment tag" {
+    # minor is the second part of however many there are, so a tag longer
+    # than semver is eligible rather than silently never updating.
     rc=0
     eligibility_check "keelson.pro/policy=minor" "nginx:1.2.3.4" || rc=$?
-    [ "$rc" -eq 1 ]
-    [ "$ELIGIBILITY_RESULT" = "SKIP policy-position-incompatible-with-tag" ]
+    [ "$rc" -eq 0 ]
+    [ "$ELIGIBILITY_RESULT" = "OK minor 2" ]
 }
 
-@test "skip: minor policy on 2-segment tag" {
+@test "eligible: minor policy on a 2-segment tag" {
     rc=0
     eligibility_check "keelson.pro/policy=minor" "nginx:1.2" || rc=$?
+    [ "$rc" -eq 0 ]
+    [ "$ELIGIBILITY_RESULT" = "OK minor 2" ]
+}
+
+@test "skip: minor policy on a 1-segment tag" {
+    # No second part to change, so there is nothing for minor to mean.
+    rc=0
+    eligibility_check "keelson.pro/policy=minor" "nginx:7" || rc=$?
     [ "$rc" -eq 1 ]
     [ "$ELIGIBILITY_RESULT" = "SKIP policy-position-incompatible-with-tag" ]
 }

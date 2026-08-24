@@ -28,14 +28,55 @@ setup() {
     [ "$output" = "2" ]
 }
 
-@test "policy_resolve_position: minor on 2-segment is invalid" {
+@test "policy_resolve_position: minor on 2-segment -> 2" {
+    # The second part of however many there are, not the middle of exactly
+    # three: a two-part tag has a second part and it is the one minor means.
     run policy_resolve_position minor 1.2
+    [ "$status" -eq 0 ]
+    [ "$output" = "2" ]
+}
+
+@test "policy_resolve_position: minor on 4-segment -> 2" {
+    run policy_resolve_position minor 1.2.3.4
+    [ "$status" -eq 0 ]
+    [ "$output" = "2" ]
+}
+
+@test "policy_resolve_position: minor on 5-segment -> 2" {
+    # keelson-package releases are five parts, so this is a real shape.
+    run policy_resolve_position minor 1.15.1.36.1
+    [ "$status" -eq 0 ]
+    [ "$output" = "2" ]
+}
+
+@test "policy_resolve_position: minor on a 1-segment tag is invalid" {
+    # There is no second part to change.
+    run policy_resolve_position minor 7
     [ "$status" -eq 2 ]
 }
 
-@test "policy_resolve_position: minor on 4-segment is invalid" {
-    run policy_resolve_position minor 1.2.3.4
-    [ "$status" -eq 2 ]
+@test "policy_resolve_position: minor ignores a v prefix" {
+    run policy_resolve_position minor v1.2.3
+    [ "$status" -eq 0 ]
+    [ "$output" = "2" ]
+}
+
+@test "policy_resolve_position: major is the first part whatever the length" {
+    run policy_resolve_position major 1.15.1.36.1
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
+    run policy_resolve_position major 7
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
+}
+
+@test "policy_resolve_position: patch is the last part whatever the length" {
+    run policy_resolve_position patch 1.15.1.36.1
+    [ "$status" -eq 0 ]
+    [ "$output" = "5" ]
+    run policy_resolve_position patch 7
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
 }
 
 @test "policy_resolve_position: patch -> last index for 3-segment" {
