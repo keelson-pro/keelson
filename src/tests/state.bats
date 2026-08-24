@@ -42,7 +42,7 @@ install_shim() {
 install_default_kubectl() {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
-case "$1 $2" in
+case "$1 ${2:-}" in
     "get configmap")
         if [ -f "$TMP_DIR/cm.json" ]; then
             cat "$TMP_DIR/cm.json"
@@ -50,7 +50,9 @@ case "$1 $2" in
         fi
         exit 1
         ;;
-    "create configmap")
+    "apply "*)
+        # Keep the manifest so tests can assert what was created with it.
+        cat > "$TMP_DIR/cm-applied.json"
         printf '{"data":{}}' > "$TMP_DIR/cm.json"
         exit 0
         ;;
@@ -117,7 +119,7 @@ SH
 @test "state_init: loads existing ConfigMap trigger data into cache" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
-case "$1 $2" in
+case "$1 ${2:-}" in
     "get configmap")
         cat <<'JSON'
 {"metadata":{"resourceVersion":"42"},"data":{"j--CronJob--default--cron":"{\"triggered-job\":\"2026-05-19T10:00:00Z\",\"triggered-at\":\"2026-05-19T10:00:00Z\"}"}}
@@ -175,7 +177,7 @@ SH
 @test "state_flush: no dirty keys -> no kubectl call" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
-case "$1 $2" in
+case "$1 ${2:-}" in
     "get configmap") printf '{"data":{}}'; exit 0 ;;
     "patch configmap") echo "patched" >>"$TMP_DIR/kubectl.log"; exit 0 ;;
 esac
@@ -210,7 +212,7 @@ SH
 @test "state_flush: kubectl failure logs state-flush-failed and keeps dirty" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
-case "$1 $2" in
+case "$1 ${2:-}" in
     "get configmap") printf '{"data":{}}'; exit 0 ;;
     "patch configmap") exit 1 ;;
 esac
@@ -549,4 +551,124 @@ SH
     [ "${#STATE_KEYS[@]}" -eq 30 ]
     [ "$(state_get k1 next-due)" = "1" ]
     [ "$(state_get k30 next-due)" = "30" ]
+}
+
+# --- provenance on the ledger itself ---
+#
+# The image tag, the label and the env can all disagree about which build is
+# running. This cannot: it is written by the build that wrote the record.
+
+@test "provenance: creation stamps who made it and when" {
+    install_default_kubectl
+    KEELSON_VERSION=1.42 KEELSON_PACKAGE_VERSION=1.15.1.36.1 state_init
+    local m
+    m=$(cat "$TMP_DIR/cm-applied.json")
+    [[ "$m" == *'"keelson.pro/createdByVersion":"1.42"'* ]]
+    [[ "$m" == *'"keelson.pro/createdByPackage":"1.15.1.36.1"'* ]]
+    [[ "$m" == *'"keelson.pro/createdAt":"20'* ]]
+}
+
+@test "provenance: creation also stamps the updated trio" {
+    install_default_kubectl
+    KEELSON_VERSION=1.42 KEELSON_PACKAGE_VERSION=1.15.1.36.1 state_init
+    local m
+    m=$(cat "$TMP_DIR/cm-applied.json")
+    [[ "$m" == *'"keelson.pro/updatedByVersion":"1.42"'* ]]
+    [[ "$m" == *'"keelson.pro/updatedAt":"20'* ]]
+}
+
+@test "provenance: a flush stamps updated, never created" {
+    install_default_kubectl
+    state_init
+    STATE_CONFIGMAP_NAME=keelson-state
+    STATE_NAMESPACE=keelson-system
+    KEELSON_VERSION=1.43 KEELSON_PACKAGE_VERSION=1.16.0.0.1 \
+        state_set_trigger_field CronJob ops backup triggered-at now
+    local patch
+    KEELSON_VERSION=1.43 KEELSON_PACKAGE_VERSION=1.16.0.0.1 patch=$(state_build_patch)
+    [[ "$patch" == *'"keelson.pro/updatedByVersion":"1.43"'* ]]
+    [[ "$patch" == *'"keelson.pro/updatedByPackage":"1.16.0.0.1"'* ]]
+    [[ "$patch" != *"createdAt"* ]]
+    [[ "$patch" != *"createdBy"* ]]
+}
+
+@test "provenance: the data payload is unaffected" {
+    install_default_kubectl
+    state_init
+    state_set_trigger_field CronJob ops backup triggered-at now
+    local patch
+    patch=$(state_build_patch)
+    [[ "$patch" == *'"data":{'* ]]
+    [[ "$patch" == *'j--CronJob--ops--backup'* ]]
+}
+
+@test "provenance: a missing version is recorded as unknown, not empty" {
+    install_default_kubectl
+    unset KEELSON_VERSION KEELSON_PACKAGE_VERSION
+    state_init
+    [[ "$(cat "$TMP_DIR/cm-applied.json")" == *'"keelson.pro/createdByVersion":"unknown"'* ]]
+}
+
+@test "provenance: the ledger is created server-side under our field manager" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMP_DIR/kubectl.args"
+case "$1" in
+    get)   exit 1 ;;
+    apply) cat >/dev/null; exit 0 ;;
+esac
+exit 0
+SH
+    state_init || true
+    grep -q -- '--server-side' "$TMP_DIR/kubectl.args"
+    grep -q -- '--field-manager=keelson' "$TMP_DIR/kubectl.args"
+}
+
+@test "provenance: conflicts are forced" {
+    # The ledger is wholly Keelson's. If something else has taken a field we
+    # take it back rather than stopping: a conflict is not a reason to give up
+    # on keeping correct state.
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMP_DIR/kubectl.args"
+case "$1" in
+    get)   exit 1 ;;
+    apply) cat >/dev/null; exit 0 ;;
+esac
+exit 0
+SH
+    state_init || true
+    grep -q -- '--force-conflicts' "$TMP_DIR/kubectl.args"
+}
+
+@test "provenance: a failed create is reported, not silent" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+    apply) cat >/dev/null ;;
+esac
+exit 1
+SH
+    run emit state_init
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Could not create state ConfigMap"* ]]
+}
+
+@test "provenance: a flush keeps the same field manager as the create" {
+    install_default_kubectl
+    state_init
+    state_set_trigger_field CronJob ops backup triggered-at now
+    state_flush
+    grep -q -- '--field-manager=keelson' "$TMP_DIR/kubectl.log"
+}
+
+@test "provenance: the flush is a merge patch, never an apply" {
+    # Apply removes fields we own and omit, and the flush sends only the dirty
+    # keys. It would erase the rest of the ledger.
+    install_default_kubectl
+    state_init
+    state_set_trigger_field CronJob ops backup triggered-at now
+    state_flush
+    grep -q -- '--type=merge' "$TMP_DIR/kubectl.log"
+    ! grep -q -- '--server-side' "$TMP_DIR/kubectl.log"
 }

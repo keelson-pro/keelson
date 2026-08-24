@@ -181,8 +181,12 @@ state_load() {
     local cm_json
     if ! cm_json=$(kubectl get configmap "$STATE_CONFIGMAP_NAME" \
             -n "$STATE_NAMESPACE" -o json 2>/dev/null); then
-        if ! kubectl create configmap "$STATE_CONFIGMAP_NAME" \
-                -n "$STATE_NAMESPACE" >/dev/null 2>&1; then
+        # apply rather than create: kubectl create configmap has no way to
+        # set annotations, and the alternative is a second call to annotate a
+        # ConfigMap that has just been made. Recording which build made it
+        # answers the question a corrupt ledger otherwise cannot -- the image
+        # tag, the label and the env can disagree, this cannot.
+        if ! state_apply_new_configmap; then
             log_error state-configmap-create-failed \
                 configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
                 msg="Could not create state ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE'."
@@ -310,6 +314,36 @@ state_render_data_value() {
 
 # state_build_patch
 # Builds the strategic-merge patch body for state_flush.
+# state_provenance_annotations <created|updated>
+# The three annotations for one half of the record, as JSON object entries.
+# createdAt and its pair are written once by the apply below; a merge patch
+# would overwrite them, so the flush only ever writes the updated three.
+state_provenance_annotations() {
+    local w=$1
+    printf '"keelson.pro/%sAt":"%s","keelson.pro/%sByVersion":"%s","keelson.pro/%sByPackage":"%s"' \
+        "$w" "$(state_now)" \
+        "$w" "$(state_json_escape "${KEELSON_VERSION:-unknown}")" \
+        "$w" "$(state_json_escape "${KEELSON_PACKAGE_VERSION:-unknown}")"
+}
+
+# state_apply_new_configmap
+# Creates the ledger with its provenance already on it, in one call.
+#
+# Server-side, under the same field manager Keelson claims workloads with, so
+# one identity covers everything it owns. --force-conflicts because this
+# ConfigMap is Keelson's, wholly: if something else has taken a field, we take
+# it back and carry on. There is nothing here to negotiate over, and a
+# conflict is not a reason to stop keeping correct state.
+state_apply_new_configmap() {
+    printf '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"%s","namespace":"%s","annotations":{%s,%s}}}' \
+        "$(state_json_escape "$STATE_CONFIGMAP_NAME")" \
+        "$(state_json_escape "$STATE_NAMESPACE")" \
+        "$(state_provenance_annotations created)" \
+        "$(state_provenance_annotations updated)" \
+        | kubectl apply --server-side --field-manager=keelson \
+            --force-conflicts -f - >/dev/null 2>&1
+}
+
 state_build_patch() {
     local entries="" first=1 key value
     for key in "${!STATE_DIRTY[@]}"; do
@@ -326,7 +360,11 @@ state_build_patch() {
         value=$(state_render_data_value "$key")
         entries="$entries\"$(state_json_escape "$key")\":\"$(state_json_escape "$value")\""
     done
-    printf '{"data":{%s}}' "$entries"
+    # The provenance rides on a write that was happening anyway, so it costs
+    # no extra call. Diagnostic only: nothing reads it, and it must never be
+    # the reason a state write fails.
+    printf '{"metadata":{"annotations":{%s}},"data":{%s}}' \
+        "$(state_provenance_annotations updated)" "$entries"
 }
 
 # state_flush
@@ -339,8 +377,17 @@ state_flush() {
     fi
     local patch
     patch=$(state_build_patch)
+    # Same field manager the ledger was created under, so ownership stays with
+    # keelson rather than passing to kubectl's default on the first write.
+    #
+    # A merge patch, not a server-side apply. Apply is declarative: fields we
+    # own and omit are removed, and this sends only the dirty keys. Sending the
+    # whole ledger instead would be tidier, but state_load failing is a warn
+    # the child carries on from, and applying a full state from an empty cache
+    # would erase the CronJob always-once gate and re-fire Jobs that already
+    # ran. A merge patch can only ever change what it names.
     if kubectl patch configmap "$STATE_CONFIGMAP_NAME" \
-            -n "$STATE_NAMESPACE" --type=merge \
+            -n "$STATE_NAMESPACE" --type=merge --field-manager=keelson \
             --patch "$patch" >/dev/null 2>&1; then
         local count=${#STATE_DIRTY[@]}
         STATE_DIRTY=()
