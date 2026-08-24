@@ -916,6 +916,26 @@ scan_tag_passes_filter() {
 # actually about to happen, which almost no poll reaches: fetching it per due
 # workload spent a kubectl process on every one of them to throw the answer
 # away. update_apply fetches its own when handed nothing.
+# scan_sum_tally <file>
+# Adds up what the poll's children reported and leaves it in the _scan_*
+# counters the summary reads. Each child is a subshell, so its counts die with
+# it; without this the summary reports zero however much work was done.
+scan_sum_tally() {
+    local f=$1 t w u nc s e
+    [ -r "$f" ] || return 0
+    while read -r t w u nc s e; do
+        [ -n "$e" ] || continue
+        _scan_total=$(( _scan_total + t ))
+        _scan_would_update=$(( _scan_would_update + w ))
+        _scan_updated=$(( _scan_updated + u ))
+        _scan_no_change=$(( _scan_no_change + nc ))
+        _scan_skip=$(( _scan_skip + s ))
+        _scan_error=$(( _scan_error + e ))
+    done < "$f"
+    rm -f "$f" 2>/dev/null || true
+    return 0
+}
+
 scan_poll_due() {
     local _scan_apply=${1:-0} now=$2
     inventory_enabled || return 0
@@ -927,32 +947,64 @@ scan_poll_due() {
           _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
     registry_init
 
-    local entry kind ns name i
+    # One workload per child, at most KEELSON_REGISTRY_POLL_CONCURRENCY at a
+    # time. A registry check is about two seconds of waiting for roughly sixty
+    # milliseconds of work, so the serial loop spent almost all of its time
+    # doing nothing while an estate waited behind it.
+    #
+    # Safe to run concurrently because the write paths were already made so:
+    # inventory_put renames a BASHPID-named temp, and state mutations go to a
+    # BASHPID-named spool the tick loop drains. Nothing here writes the
+    # ConfigMap, and no two children touch the same workload.
+    local conc=${KEELSON_REGISTRY_POLL_CONCURRENCY:?KEELSON_REGISTRY_POLL_CONCURRENCY required}
+    local tally=${KEELSON_POLL_TALLY_FILE:-/keelson/work/poll-tally}
+    : > "$tally" 2>/dev/null || true
+
+    local entry kind ns name i inflight=0
     for entry in "${INVENTORY_DUE[@]}"; do
-        read -r kind ns name <<<"$entry"
-        inventory_get "$kind" "$ns" "$name" || continue
+        (
+            read -r kind ns name <<<"$entry"
+            inventory_get "$kind" "$ns" "$name" || exit 0
 
-        local _workload_updated=0 \
-              _workload_last_from="" _workload_last_to="" _workload_last_repo=""
-        for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do
-            _scan_total=$((_scan_total + 1))
-            scan_container "$kind" "$ns" "$name" \
-                "${INVENTORY_CONTAINER_LISTS[$i]}" \
-                "${INVENTORY_CONTAINER_NAMES[$i]}" "${INVENTORY_CONTAINER_IMAGES[$i]}" \
-                "$INVENTORY_ANNOTATIONS" "$INVENTORY_IMAGE_PULL_SECRETS" \
-                "" "$INVENTORY_SERVICE_ACCOUNT"
-        done
+            local _workload_updated=0 \
+                  _workload_last_from="" _workload_last_to="" _workload_last_repo=""
+            for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do
+                _scan_total=$((_scan_total + 1))
+                scan_container "$kind" "$ns" "$name" \
+                    "${INVENTORY_CONTAINER_LISTS[$i]}" \
+                    "${INVENTORY_CONTAINER_NAMES[$i]}" "${INVENTORY_CONTAINER_IMAGES[$i]}" \
+                    "$INVENTORY_ANNOTATIONS" "$INVENTORY_IMAGE_PULL_SECRETS" \
+                    "" "$INVENTORY_SERVICE_ACCOUNT"
+            done
 
-        if [ "$kind" = "CronJob" ] && [ "$_scan_apply" -eq 1 ]; then
-            scan_check_cronjob_trigger "$ns" "$name" "$INVENTORY_ANNOTATIONS" \
-                "$INVENTORY_SUSPEND" "$_workload_updated" \
-                "$_workload_last_from" "$_workload_last_to" "$_workload_last_repo"
+            if [ "$kind" = "CronJob" ] && [ "$_scan_apply" -eq 1 ]; then
+                scan_check_cronjob_trigger "$ns" "$name" "$INVENTORY_ANNOTATIONS" \
+                    "$INVENTORY_SUSPEND" "$_workload_updated" \
+                    "$_workload_last_from" "$_workload_last_to" "$_workload_last_repo"
+            fi
+
+            inventory_mark_polled "$kind" "$ns" "$name" "$now" \
+                || log_warn inventory-not-rescheduled kind="$kind" ns="$ns" name="$name" \
+                    msg="Could not push $kind '$name' in '$ns' out to its next poll; it left the cache between being read as due and being polled."
+
+            state_spool_commit || true
+            # Counters are locals, so they die with this child. Appended for
+            # the parent to add up, or the summary would report zero however
+            # much work was done. One short line, so the append is atomic.
+            printf '%d %d %d %d %d %d\n' "$_scan_total" "$_scan_would_update" \
+                "$_scan_updated" "$_scan_no_change" "$_scan_skip" "$_scan_error" \
+                >>"$tally" 2>/dev/null || true
+        ) &
+        inflight=$(( inflight + 1 ))
+        if [ "$inflight" -ge "$conc" ]; then
+            # A child exiting non-zero must not take the poll down with it.
+            wait -n 2>/dev/null || true
+            inflight=$(( inflight - 1 ))
         fi
-
-        inventory_mark_polled "$kind" "$ns" "$name" "$now" \
-            || log_warn inventory-not-rescheduled kind="$kind" ns="$ns" name="$name" \
-                msg="Could not push $kind '$name' in '$ns' out to its next poll; it left the cache between being read as due and being polled."
     done
+    wait
+
+    scan_sum_tally "$tally"
 
     log_debug poll-summary \
         workloads="${#INVENTORY_DUE[@]}" \

@@ -84,6 +84,8 @@ spec:
               value: "${Keelson/RegistryPollIntervalDefault}"
             - name: KEELSON_FIRST_POLL_DELAY_MAX
               value: "${Keelson/FirstPollDelayMax}"
+            - name: KEELSON_REGISTRY_POLL_CONCURRENCY
+              value: "${Keelson/RegistryPollConcurrency}"
             - name: KEELSON_FULL_REFRESH_INTERVAL
               value: "${Keelson/FullRefreshInterval}"
             - name: KEELSON_TICK_INTERVAL

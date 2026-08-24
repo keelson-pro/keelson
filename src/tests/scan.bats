@@ -63,7 +63,10 @@ setup() {
 
     KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
     KEELSON_FIRST_POLL_DELAY_MAX=300
-    export KEELSON_FIRST_POLL_DELAY_MAX
+    KEELSON_REGISTRY_POLL_CONCURRENCY=2
+    KEELSON_POLL_TALLY_FILE="$TMP_DIR/poll-tally"
+    export KEELSON_POLL_TALLY_FILE
+    export KEELSON_FIRST_POLL_DELAY_MAX KEELSON_REGISTRY_POLL_CONCURRENCY
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
     KEELSON_RECONCILE_INTERVAL=60
     export KEELSON_RECONCILE_INTERVAL
@@ -1985,4 +1988,91 @@ keelson.pro/initContainers=true' initContainers migrate
     skopeo_counting
     scan_run 0 1 2>/dev/null
     [ "$(skopeo_call_count)" = "1" ]
+}
+
+# --- the poll runs registry checks concurrently ---
+#
+# A registry check is about two seconds of waiting for sixty milliseconds of
+# work, so a serial loop spent nearly all its time doing nothing.
+
+poll_fixture_n() {
+    local n=$1 items="" i
+    for (( i = 1; i <= n; i++ )); do
+        [ -n "$items" ] && items="$items,"
+        items="$items{\"metadata\":{\"namespace\":\"default\",\"name\":\"app$i\",
+          \"annotations\":{\"keelson.pro/policy\":\"minor\"}},
+          \"spec\":{\"template\":{\"spec\":{\"containers\":[
+            {\"name\":\"main\",\"image\":\"ghcr.io/x/y$i:1.2.3\"}]}}}}"
+    done
+    printf '{"items":[%s]}' "$items"
+}
+
+# skopeo that records overlap: how many were running at once.
+install_overlap_skopeo() {
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+d="$TMP_DIR/inflight"; mkdir -p "$d"
+touch "$d/$$"
+n=$(ls "$d" | wc -l | tr -d ' ')
+echo "$n" >> "$TMP_DIR/overlap"
+sleep 0.3
+rm -f "$d/$$"
+printf '{"Tags":["1.2.3"]}'
+SH
+}
+
+@test "poll concurrency: more than one registry check runs at a time" {
+    inventory_init
+    kubectl_returns "$(poll_fixture_n 6)"
+    scan_run 0 0 2>/dev/null
+    install_overlap_skopeo
+    KEELSON_REGISTRY_POLL_CONCURRENCY=3 scan_poll_due 0 "$LATE" 2>/dev/null
+    local peak
+    peak=$(sort -n "$TMP_DIR/overlap" | tail -1)
+    [ "$peak" -gt 1 ]
+}
+
+@test "poll concurrency: never more at once than configured" {
+    inventory_init
+    kubectl_returns "$(poll_fixture_n 6)"
+    scan_run 0 0 2>/dev/null
+    install_overlap_skopeo
+    KEELSON_REGISTRY_POLL_CONCURRENCY=2 scan_poll_due 0 "$LATE" 2>/dev/null
+    local peak
+    peak=$(sort -n "$TMP_DIR/overlap" | tail -1)
+    [ "$peak" -le 2 ]
+}
+
+@test "poll concurrency: one at a time is still allowed" {
+    inventory_init
+    kubectl_returns "$(poll_fixture_n 4)"
+    scan_run 0 0 2>/dev/null
+    install_overlap_skopeo
+    KEELSON_REGISTRY_POLL_CONCURRENCY=1 scan_poll_due 0 "$LATE" 2>/dev/null
+    local peak
+    peak=$(sort -n "$TMP_DIR/overlap" | tail -1)
+    [ "$peak" -eq 1 ]
+}
+
+@test "poll concurrency: every workload is still polled" {
+    inventory_init
+    kubectl_returns "$(poll_fixture_n 6)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    KEELSON_REGISTRY_POLL_CONCURRENCY=3 scan_poll_due 0 "$LATE" 2>/dev/null
+    [ "$(skopeo_call_count)" = "6" ]
+}
+
+@test "poll concurrency: the summary counts work done in the children" {
+    # The counters are locals, so they die with each child. Without adding up
+    # what they report the summary says zero however much was done.
+    inventory_init
+    kubectl_returns "$(poll_fixture_n 5)"
+    scan_run 0 0 2>/dev/null
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3"]}'
+SH
+    run emit scan_poll_due 0 "$LATE"
+    [[ "$output" == *'"resources":"5"'* ]]
 }
