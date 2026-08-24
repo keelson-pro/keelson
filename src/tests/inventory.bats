@@ -257,6 +257,29 @@ put_simple() {
     [ "${#INVENTORY_DUE[@]}" -eq 0 ]
 }
 
+@test "due: a record holding the four fields past its head is still found" {
+    printf 'annotation=keelson.pro/policy=minor\nannotation=a=1\nannotation=b=2\nannotation=c=3\nkind=Deployment\nnamespace=default\nname=web\nnext-due=1000\ninterval=60\n' \
+        > "$KEELSON_INVENTORY_DIR/Deployment--default--web"
+    inventory_due 2000
+    [ "${#INVENTORY_DUE[@]}" -eq 1 ]
+    [ "${INVENTORY_DUE[0]}" = "Deployment default web" ]
+}
+
+@test "due: a record with no kind anywhere in it is skipped" {
+    printf 'annotation=a=1\nannotation=b=2\nannotation=c=3\nannotation=d=4\nnext-due=1000\n' \
+        > "$KEELSON_INVENTORY_DIR/Deployment--default--junk"
+    inventory_due 2000
+    [ "${#INVENTORY_DUE[@]}" -eq 0 ]
+}
+
+@test "list: a record holding its identity past its head is still listed" {
+    printf 'annotation=a=1\nannotation=b=2\nannotation=c=3\nannotation=d=4\nkind=CronJob\nnamespace=ops\nname=backup\nnext-due=1000\n' \
+        > "$KEELSON_INVENTORY_DIR/CronJob--ops--backup"
+    inventory_list
+    [ "${#INVENTORY_ALL[@]}" -eq 1 ]
+    [ "${INVENTORY_ALL[0]}" = "CronJob ops backup" ]
+}
+
 @test "set_next_due reschedules and preserves the record" {
     put_simple 1000 60
     inventory_set_next_due Deployment default web 4000

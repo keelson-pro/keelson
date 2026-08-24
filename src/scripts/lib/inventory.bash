@@ -76,6 +76,11 @@ INVENTORY_FINGERPRINT=
 INVENTORY_COMPUTED_FINGERPRINT=
 INVENTORY_HASH=0
 INVENTORY_FIRST_DUE=0
+INVENTORY_HEAD_KIND=
+INVENTORY_HEAD_NAMESPACE=
+INVENTORY_HEAD_NAME=
+INVENTORY_HEAD_NEXT_DUE=0
+declare -ga INVENTORY_HEAD_LINES=()
 declare -ga INVENTORY_CONTAINER_LISTS=()
 declare -ga INVENTORY_CONTAINER_NAMES=()
 declare -ga INVENTORY_CONTAINER_IMAGES=()
@@ -361,28 +366,64 @@ inventory_evict_unwatched() {
     return 0
 }
 
+# inventory_read_head <path>
+# Sets INVENTORY_HEAD_KIND, _NAMESPACE, _NAME and _NEXT_DUE from a record,
+# reading as little of it as it can. Returns 1 if there is no kind, which is
+# how a half-written or foreign file reads.
+#
+# inventory_put writes those four fields first, so four lines is normally the
+# whole answer and the annotations, containers and fingerprint below them are
+# never read at all. They are taken by position, but only once the head has
+# been confirmed to hold them in that order; anything else is read and parsed
+# in full, so nothing here depends on that write order staying as it is.
+#
+# Worth the care because inventory_due asks this of every record on every
+# tick, and reading whole records was over half the cost of that pass.
+inventory_read_head() {
+    local line key value
+    mapfile -n 4 -t INVENTORY_HEAD_LINES < "$1" 2>/dev/null || return 1
+    if [[ ${INVENTORY_HEAD_LINES[0]} == kind=* \
+            && ${INVENTORY_HEAD_LINES[1]} == namespace=* \
+            && ${INVENTORY_HEAD_LINES[2]} == name=* \
+            && ${INVENTORY_HEAD_LINES[3]} == next-due=* ]]; then
+        INVENTORY_HEAD_KIND=${INVENTORY_HEAD_LINES[0]#kind=}
+        INVENTORY_HEAD_NAMESPACE=${INVENTORY_HEAD_LINES[1]#namespace=}
+        INVENTORY_HEAD_NAME=${INVENTORY_HEAD_LINES[2]#name=}
+        INVENTORY_HEAD_NEXT_DUE=${INVENTORY_HEAD_LINES[3]#next-due=}
+        return 0
+    fi
+
+    INVENTORY_HEAD_KIND=
+    INVENTORY_HEAD_NAMESPACE=
+    INVENTORY_HEAD_NAME=
+    INVENTORY_HEAD_NEXT_DUE=0
+    mapfile -t INVENTORY_HEAD_LINES < "$1" 2>/dev/null || return 1
+    for line in "${INVENTORY_HEAD_LINES[@]}"; do
+        key=${line%%=*}
+        value=${line#*=}
+        case "$key" in
+            kind)      INVENTORY_HEAD_KIND=$value ;;
+            namespace) INVENTORY_HEAD_NAMESPACE=$value ;;
+            name)      INVENTORY_HEAD_NAME=$value ;;
+            next-due)  INVENTORY_HEAD_NEXT_DUE=$value ;;
+        esac
+    done
+    [ -n "$INVENTORY_HEAD_KIND" ]
+}
+
 # inventory_due <now>
 # Populates INVENTORY_DUE with "<kind> <ns> <name>" for every workload whose
 # next-due has arrived. This is what the tick asks each second; a quiet
 # cluster on long schedules does no registry work at all in between.
 inventory_due() {
-    local now=$1 f key value kind ns name due
+    local now=$1 f
     INVENTORY_DUE=()
     shopt -s nullglob
     for f in "$KEELSON_INVENTORY_DIR"/*; do
         case "$f" in *.tmp) continue ;; esac
-        kind=; ns=; name=; due=0
-        while IFS='=' read -r key value; do
-            case "$key" in
-                kind)      kind=$value ;;
-                namespace) ns=$value ;;
-                name)      name=$value ;;
-                next-due)  due=$value ;;
-            esac
-        done < "$f"
-        [ -n "$kind" ] || continue
-        [ "$now" -ge "$due" ] 2>/dev/null || continue
-        INVENTORY_DUE+=("$kind $ns $name")
+        inventory_read_head "$f" || continue
+        [ "$now" -ge "$INVENTORY_HEAD_NEXT_DUE" ] 2>/dev/null || continue
+        INVENTORY_DUE+=("$INVENTORY_HEAD_KIND $INVENTORY_HEAD_NAMESPACE $INVENTORY_HEAD_NAME")
     done
     shopt -u nullglob
     return 0
@@ -393,21 +434,13 @@ inventory_due() {
 # due or not. Used by the reconcile pass to spot entries the cluster no
 # longer has.
 inventory_list() {
-    local f key value kind ns name
+    local f
     INVENTORY_ALL=()
     shopt -s nullglob
     for f in "$KEELSON_INVENTORY_DIR"/*; do
         case "$f" in *.tmp) continue ;; esac
-        kind=; ns=; name=
-        while IFS='=' read -r key value; do
-            case "$key" in
-                kind)      kind=$value ;;
-                namespace) ns=$value ;;
-                name)      name=$value ;;
-            esac
-        done < "$f"
-        [ -n "$kind" ] || continue
-        INVENTORY_ALL+=("$kind $ns $name")
+        inventory_read_head "$f" || continue
+        INVENTORY_ALL+=("$INVENTORY_HEAD_KIND $INVENTORY_HEAD_NAMESPACE $INVENTORY_HEAD_NAME")
     done
     shopt -u nullglob
     return 0
