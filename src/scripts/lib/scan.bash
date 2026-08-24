@@ -30,6 +30,10 @@ SCAN_WL_CONTAINER_PAIRS=
 SCAN_WL_IPS_JSON=
 SCAN_WL_SA_NAME=
 
+# Set by scan_extract_kind, consumed by scan_each_workload.
+SCAN_KIND_RECORDS=
+SCAN_KIND_COUNT=0
+
 # scan_run <apply> [poll-all]
 #
 # poll-all defaults to 1: a scan scans, which is what a one-shot
@@ -146,13 +150,8 @@ scan_refresh_kind() {
 
     inventory_evict_kind "$kind"
 
-    count=$(printf '%s' "$list_json" | yq -p=json -o=y '.items | length // 0')
-    if [ -z "$count" ] || [ "$count" = "null" ]; then
-        count=0
-    fi
-    for ((i=0; i<count; i++)); do
-        scan_workload "$list_json" "$kind" "$i"
-    done
+    scan_each_workload "$list_json" "$kind"
+    count=$SCAN_KIND_COUNT
 
     log_info_always inventory-refreshed kind="$kind" workloads="$count" \
         managed="$_scan_managed" \
@@ -235,9 +234,45 @@ scan_refresh_workload() {
             msg="Could not re-read $kind '$name' in '$ns'; leaving its cache record as it was."
         return 0
     fi
-    count=$(printf '%s' "$obj_json" | yq -p=json -o=y '.items | length // 0')
-    [ "$count" = "1" ] || return 0
-    scan_workload "$obj_json" "$kind" 0
+    # No length query: the extraction reports what it found, and a workload
+    # that has gone yields no records at all.
+    scan_each_workload "$obj_json" "$kind"
+}
+
+# scan_each_workload <list-json> <kind>
+# Extracts every workload in a kubectl List with one yq, then hands each to
+# scan_workload. Sets SCAN_KIND_COUNT to how many were seen.
+#
+# One extraction per kind rather than per workload. Extracting per workload
+# re-parsed the whole list document every time, which on fifty workloads was
+# ~850 forks and ~3 CPU-seconds every reconcile -- a constant cost whether the
+# estate was asleep or saturated, and two thirds of all CPU. It is the same
+# shape that was removed from state_load one layer down.
+scan_each_workload() {
+    local list_json=$1 kind=$2
+    SCAN_KIND_COUNT=0
+    scan_extract_kind "$list_json" "$kind" || return 0
+    [ -n "$SCAN_KIND_RECORDS" ] || return 0
+
+    # Records are separated by a W| line, so the records themselves say how
+    # many there are and the separate length query goes away with the rest.
+    local rest=$SCAN_KIND_RECORDS block
+    rest=${rest#*W|$'\n'}
+    while [ -n "$rest" ]; do
+        case "$rest" in
+            *$'\n'W\|$'\n'*)
+                block=${rest%%$'\n'W|$'\n'*}
+                rest=${rest#*$'\n'W|$'\n'}
+                ;;
+            *)
+                block=$rest
+                rest=
+                ;;
+        esac
+        SCAN_KIND_COUNT=$(( SCAN_KIND_COUNT + 1 ))
+        scan_workload "$block" "$kind"
+    done
+    return 0
 }
 
 scan_kind() {
@@ -250,14 +285,16 @@ scan_kind() {
     fi
     # Only a kind we actually listed is a candidate for eviction below.
     SCAN_LISTED["$kind"]=1
-    count=$(printf '%s' "$list_json" | yq -p=json -o=y '.items | length // 0')
-    if [ -z "$count" ] || [ "$count" = "null" ]; then
-        count=0
-    fi
-    [ "$count" -eq 0 ] && return 0
-    for ((i=0; i<count; i++)); do
-        scan_workload "$list_json" "$kind" "$i"
-    done
+
+    # One yq for the whole kind, not one per workload. Extracting per workload
+    # re-parsed the entire list document every time, which on fifty workloads
+    # was ~850 forks and ~3 CPU-seconds every reconcile -- a constant cost
+    # whether the estate was asleep or saturated, and two thirds of all CPU.
+    # It is the same shape that was removed from state_load one layer down.
+    #
+    # No separate count call either: the records themselves say how many there
+    # are, so the length query goes with it.
+    scan_each_workload "$list_json" "$kind"
 }
 
 # scan_extract_workload <list-json> <kind> <index>
@@ -267,10 +304,11 @@ scan_kind() {
 # One function so the reads have one place to be counted: this runs once per
 # workload per scan, and a cluster of fifty makes whatever it costs the
 # dominant cost of a pass.
-scan_extract_workload() {
-    local list_json=$1 kind=$2 i=$3
-    local base suspend_expr='' out rest line in_annotations=0
+scan_extract_kind() {
+    local list_json=$1 kind=$2
+    local base suspend_expr=''
 
+    SCAN_KIND_RECORDS=
     base=$(workload_pod_spec_path "$kind") || return 1
 
     # Only CronJob carries suspend, and "no such field" has to stay
@@ -278,15 +316,6 @@ scan_extract_workload() {
     if [ "$kind" = "CronJob" ]; then
         suspend_expr='"suspend=" + ($w.spec.suspend // false | @json),'
     fi
-
-    SCAN_WL_NS=
-    SCAN_WL_NAME=
-    SCAN_WL_ANNOTATIONS=
-    SCAN_WL_MANAGED_FIELDS=
-    SCAN_WL_SUSPEND=
-    SCAN_WL_CONTAINER_PAIRS=
-    SCAN_WL_IPS_JSON=
-    SCAN_WL_SA_NAME=
 
     # -r keeps every scalar raw, so a serviceAccountName of "sa: weird" or a
     # match-tag of "*-rc" arrives as written rather than YAML-quoted.
@@ -308,8 +337,15 @@ scan_extract_workload() {
     # filter and those reach the fingerprint, where any change reads as "a
     # decision input moved" and forces a resync poll that can only return what
     # the schedule would have.
-    out=$(printf '%s' "$list_json" | yq -p=json -o=y -r "
-        .items[$i] as \$w | (
+    #
+    # sub("\n"; " ") on the value is what makes one document per kind safe.
+    # Per workload, a newline in an annotation could only corrupt that
+    # workload's own annotations; in a shared stream it could forge a W|
+    # separator and split one record into two. A newline means nothing in any
+    # key Keelson reads, so flattening it costs nothing and closes that.
+    SCAN_KIND_RECORDS=$(printf '%s' "$list_json" | yq -p=json -o=y -r "
+        .items[] as \$w | (
+        \"W|\",
         \"ns=\" + \$w.metadata.namespace,
         \"name=\" + \$w.metadata.name,
         \"sa=\" + (\$w${base}.serviceAccountName // \"default\"),
@@ -323,8 +359,25 @@ scan_extract_workload() {
         \"annotations=\",
         (\$w.metadata.annotations // {} | to_entries | .[]
             | select(.key | test(\"^(keelson\\.pro|keel\\.sh)/\"))
-            | .key + \"=\" + .value)
+            | .key + \"=\" + (.value | sub(\"\n\"; \" \")))
         )")
+}
+
+# scan_extract_workload <record-block>
+# Fills SCAN_WL_* from one workload's block of the kind-wide extraction.
+# Pure string work: no yq, no fork, no subshell.
+scan_extract_workload() {
+    local out=$1
+    local rest line in_annotations=0
+
+    SCAN_WL_NS=
+    SCAN_WL_NAME=
+    SCAN_WL_ANNOTATIONS=
+    SCAN_WL_MANAGED_FIELDS=
+    SCAN_WL_SUSPEND=
+    SCAN_WL_CONTAINER_PAIRS=
+    SCAN_WL_IPS_JSON=
+    SCAN_WL_SA_NAME=
 
     # Everything past the annotations= sentinel is annotation text, matched
     # against no key at all. An annotation value holding a newline can then
@@ -367,11 +420,11 @@ scan_extract_workload() {
 }
 
 scan_workload() {
-    local list_json=$1 kind=$2 i=$3
+    local record=$1 kind=$2
     local ns name annotations container_pairs \
           ips_json mf_json suspend sa_name
 
-    scan_extract_workload "$list_json" "$kind" "$i"
+    scan_extract_workload "$record"
     ns=$SCAN_WL_NS
     name=$SCAN_WL_NAME
     annotations=$SCAN_WL_ANNOTATIONS
