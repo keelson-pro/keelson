@@ -13,6 +13,9 @@ setup() {
     export KEELSON_CONFIG_MODE
 }
 
+# Warnings and errors go to stderr; fold them in so `run` can see them.
+emit() { "$@" 2>&1; }
+
 KEELSON_LINES='keelson.pro/policy=minor
 keelson.pro/match-tag=^1\.
 keelson.pro/match-mode=regex'
@@ -48,8 +51,8 @@ ${KEEL_LINES}"
     [ "$ANNOTATION_VALUE" = "major" ]
 }
 
-@test "keel mode: maps poll-schedule to keel.sh/pollSchedule" {
-    KEELSON_CONFIG_MODE=keel annotation_get "$KEEL_LINES" poll-schedule
+@test "keel mode: maps pollSchedule to keel.sh/pollSchedule" {
+    KEELSON_CONFIG_MODE=keel annotation_get "$KEEL_LINES" pollSchedule
     [ "$ANNOTATION_VALUE" = "15m" ]
 }
 
@@ -64,7 +67,7 @@ ${KEEL_LINES}"
 }
 
 @test "keel mode: key with no keel equivalent returns empty" {
-    KEELSON_CONFIG_MODE=keel annotation_get "$KEELSON_LINES" match-mode
+    KEELSON_CONFIG_MODE=keel annotation_get "$KEELSON_LINES" matchMode
     [ -z "$ANNOTATION_VALUE" ]
 }
 
@@ -102,7 +105,7 @@ keel.sh/policy=minor" policy
 # --- value/key edge cases ---
 
 @test "value containing '=' is preserved" {
-    annotation_get "keelson.pro/match-tag=^a=b$" match-tag
+    annotation_get "keelson.pro/match-tag=^a=b$" matchTag
     [ "$ANNOTATION_VALUE" = "^a=b$" ]
 }
 
@@ -238,4 +241,128 @@ keel.sh/policy=all' 'keel.sh/'
 @test "has-prefix: a prefix only inside a value does not count" {
     run annotation_has_prefix 'keelson.pro/notify=migrate off keel.sh/' 'keel.sh/'
     [ "$status" -eq 1 ]
+}
+
+# --- both spellings of the same key ---
+#
+# camelCase is canonical, the hyphenated form is accepted. Carrying both with
+# different values is not a precedence puzzle to be resolved quietly: whichever
+# was picked would be somebody's surprise, so the workload is not managed.
+
+@test "spelling: the canonical form is read" {
+    annotation_get 'keelson.pro/matchTag=^1\.' matchTag
+    [ "$ANNOTATION_VALUE" = '^1\.' ]
+}
+
+@test "spelling: the hyphenated form is read too" {
+    annotation_get 'keelson.pro/match-tag=^1\.' matchTag
+    [ "$ANNOTATION_VALUE" = '^1\.' ]
+}
+
+@test "spelling: both with the same value is accepted" {
+    annotation_get 'keelson.pro/matchTag=^1\.
+keelson.pro/match-tag=^1\.' matchTag
+    [ "$ANNOTATION_VALUE" = '^1\.' ]
+}
+
+@test "spelling: both with the same value warns about the older one" {
+    run emit annotation_get 'keelson.pro/matchTag=^1\.
+keelson.pro/match-tag=^1\.' matchTag
+    [[ "$output" == *"older spelling"* ]]
+}
+
+@test "spelling: both with different values is rejected" {
+    annotation_get 'keelson.pro/matchTag=^1\.
+keelson.pro/match-tag=^2\.' matchTag
+    [ "$ANNOTATION_VALUE" = 'REJECT:annotation-spelling-conflict' ]
+}
+
+@test "spelling: a conflict says both keys and both values" {
+    run emit annotation_get 'keelson.pro/matchTag=^1\.
+keelson.pro/match-tag=^2\.' matchTag
+    [[ "$output" == *"pick one spelling"* ]]
+    [[ "$output" == *'^1\.'* ]]
+    [[ "$output" == *'^2\.'* ]]
+}
+
+@test "spelling: a conflict is an error, not a crash" {
+    local rc=0
+    annotation_get 'keelson.pro/matchTag=a
+keelson.pro/match-tag=b' matchTag || rc=$?
+    [ "$rc" -eq 0 ]
+}
+
+@test "spelling: a per-container conflict is caught too" {
+    annotation_get 'keelson.pro/matchTag.web=a
+keelson.pro/match-tag.web=b' matchTag web
+    [ "$ANNOTATION_VALUE" = 'REJECT:annotation-spelling-conflict' ]
+}
+
+@test "spelling: a container override beats a workload-wide pair" {
+    annotation_get 'keelson.pro/matchTag=^1\.
+keelson.pro/match-tag=^2\.
+keelson.pro/matchTag.web=^3\.' matchTag web
+    [ "$ANNOTATION_VALUE" = '^3\.' ]
+}
+
+@test "spelling: policy has no second spelling, so no pair to conflict" {
+    annotation_get 'keelson.pro/policy=minor' policy
+    [ "$ANNOTATION_VALUE" = "minor" ]
+}
+
+@test "spelling: the keel side accepts both as well" {
+    KEELSON_CONFIG_MODE=keel annotation_get 'keel.sh/poll-schedule=15m' pollSchedule
+    [ "$ANNOTATION_VALUE" = "15m" ]
+}
+
+@test "spelling: a keel-side conflict is rejected" {
+    KEELSON_CONFIG_MODE=keel annotation_get 'keel.sh/pollSchedule=15m
+keel.sh/poll-schedule=30m' pollSchedule
+    [ "$ANNOTATION_VALUE" = 'REJECT:annotation-spelling-conflict' ]
+}
+
+# --- a workload carrying both prefixes ---
+#
+# Not an operator-confusion problem: a keel.sh/ annotation is evidence keel may
+# be running, and two controllers writing one image field is worse than either
+# doing nothing. So neither does, whatever mode Keelson is in.
+
+@test "dual prefix: rejected under config-mode=keelson" {
+    annotation_get "$BOTH_LINES" policy
+    [ "$ANNOTATION_VALUE" = "REJECT:dual-prefix-conflict" ]
+}
+
+@test "dual prefix: rejected under config-mode=keel" {
+    KEELSON_CONFIG_MODE=keel annotation_get "$BOTH_LINES" policy
+    [ "$ANNOTATION_VALUE" = "REJECT:dual-prefix-conflict" ]
+}
+
+@test "dual prefix: unrelated keys on the two prefixes still conflict" {
+    # Presence of the prefixes is the signal, not a clash on one key: keel
+    # acting on any annotation is enough for both of us to be writing.
+    annotation_get 'keelson.pro/policy=minor
+keel.sh/pollSchedule=15m' policy
+    [ "$ANNOTATION_VALUE" = "REJECT:dual-prefix-conflict" ]
+}
+
+@test "dual prefix: one prefix alone is fine in keelson mode" {
+    annotation_get "$KEELSON_LINES" policy
+    [ "$ANNOTATION_VALUE" = "minor" ]
+}
+
+@test "dual prefix: one prefix alone is fine in keel mode" {
+    KEELSON_CONFIG_MODE=keel annotation_get "$KEEL_LINES" policy
+    [ "$ANNOTATION_VALUE" = "major" ]
+}
+
+@test "dual prefix: it is a skip, not a crash" {
+    local rc=0
+    annotation_get "$BOTH_LINES" policy || rc=$?
+    [ "$rc" -eq 0 ]
+}
+
+@test "dual prefix: an invalid mode is still reported as such" {
+    local rc=0
+    KEELSON_CONFIG_MODE=junk annotation_get "$BOTH_LINES" policy || rc=$?
+    [ "$rc" -eq 2 ]
 }

@@ -33,7 +33,7 @@ SCAN_WL_SA_NAME=
 # scan_run <apply> [poll-all]
 #
 # poll-all defaults to 1: a scan scans, which is what a one-shot
-# keelson-boot-scan wants. The controller passes 0, because its scan only
+# keelson-user-recheck wants. The controller passes 0, because its scan only
 # refreshes the cache and evicts; registry work is driven off next-due by the
 # tick, so a workload's cadence is its own rather than the scan's.
 scan_run() {
@@ -412,7 +412,7 @@ scan_workload() {
     fi
 
     # Only when this pass polled. The trigger's always-once rule fires on
-    # "no prior triggered-job recorded", and every cache-refresh path -- the
+    # "no prior firing recorded", and every cache-refresh path -- the
     # reconcile scan, the full refresh, the queued re-read -- runs in its own
     # child with its own copy of the ledger, so two of them overlapping would
     # each read "never triggered" and each create a Job. The paths that poll
@@ -439,12 +439,19 @@ scan_cache_workload() {
     inventory_enabled || return 0
 
     SCAN_SEEN["$kind $ns $name"]=1
+    local managed=false
     if scan_is_keelson_managed "$annotations"; then
+        managed=true
         _scan_managed=$(( _scan_managed + 1 ))
     fi
+    # Every pass, not just the first sighting: annotations are edited on
+    # workloads that are already cached, and that is the flip worth recording.
+    # Both fields are compared before writing, so an unchanged workload costs
+    # nothing.
+    state_record_workload "$kind" "$ns" "$name" "$managed"
 
     local interval=$_scan_interval sched
-    annotation_get "$annotations" poll-schedule
+    annotation_get "$annotations" pollSchedule
     sched=$ANNOTATION_VALUE
     if [ -n "$sched" ]; then
         if clock_parse_duration "$sched"; then
@@ -472,7 +479,7 @@ scan_cache_workload() {
     # A workload already cached keeps its place in the cycle; a new one gets
     # an offset inside its first interval, so workloads cached in the same
     # pass do not all fall due together forever after.
-    local next_due persisted
+    local next_due
     if inventory_get "$kind" "$ns" "$name"; then
         next_due=$INVENTORY_NEXT_DUE
         if [ "$INVENTORY_FINGERPRINT" != "$computed_fingerprint" ]; then
@@ -487,17 +494,39 @@ scan_cache_workload() {
                 msg="$kind '$name' in '$ns' changed; polling it now rather than waiting for its schedule."
         fi
     else
-        # A restart empties the cache but not the ledger, so a workload
-        # resumes its schedule rather than falling due immediately along with
-        # everything else.
-        persisted=$(state_get_next_due "$kind" "$ns" "$name")
-        if [ -n "$persisted" ]; then
-            next_due=$persisted
-        else
-            inventory_first_due "$kind" "$ns" "$name" "$interval" "$_scan_now"
-            next_due=$INVENTORY_FIRST_DUE
-            state_set_next_due "$kind" "$ns" "$name" "$next_due"
-        fi
+        # Derived, never persisted. The offset is hashed off the identity, so
+        # it is the same on every cold start and spreads the estate across the
+        # window without a ledger to write, read or corrupt. All persisting it
+        # ever bought was resuming the exact phase of a cycle, at the price of
+        # a ConfigMap write per poll.
+        inventory_first_due "$kind" "$ns" "$name" "$interval" "$_scan_now"
+        next_due=$INVENTORY_FIRST_DUE
+    fi
+
+    # Whatever it came from, next-due cannot legitimately be beyond one
+    # interval out: inventory_first_due is now + (hash % interval),
+    # inventory_mark_polled is exactly now + interval, a resync is now.
+    # Further out than that, or not a number at all, is corrupt - and nothing
+    # would ever correct it, because inventory_due does not select a
+    # far-future entry, so inventory_mark_polled never runs on it. The
+    # workload is simply never polled again, silently, across restarts.
+    local implausible=0
+    case "$next_due" in
+        ''|*[!0-9]*) implausible=1 ;;
+        *)
+            # An if, not a && chain: a false test would leave the case
+            # returning 1, and set -e kills the pass before it writes back.
+            if [ "$next_due" -gt $(( _scan_now + interval )) ]; then
+                implausible=1
+            fi
+            ;;
+    esac
+    if [ "$implausible" -eq 1 ]; then
+        log_warn next-due-implausible kind="$kind" ns="$ns" name="$name" \
+            next-due="$next_due" interval="$interval" \
+            msg="$kind '$name' in '$ns' had a next-due of '$next_due', which is not within one ${interval}s interval of now; recomputing it."
+        inventory_first_due "$kind" "$ns" "$name" "$interval" "$_scan_now"
+        next_due=$INVENTORY_FIRST_DUE
     fi
 
     inventory_put "$kind" "$ns" "$name" "$next_due" "$interval" "$suspend" \
@@ -539,6 +568,43 @@ scan_log_managed_workloads() {
     return 0
 }
 
+# scan_container_monitored <annotations> <list> <container>
+# True when this container is in scope for updates.
+#
+# initContainers gates the whole list; monitorContainers is a regex over the
+# name, empty meaning all, which is keel's shape and default. An unusable
+# regex is not a reason to fall back to monitoring everything: that would turn
+# a typo into an estate-wide update, so nothing is monitored and it says why.
+scan_container_monitored() {
+    local ann=$1 clist=$2 cname=$3 want re rc=0
+
+    # Init containers are out of scope unless a workload opts in, matching
+    # keel's default in every mode. Anything but a literal true is out, so a
+    # rejected value fails closed rather than quietly enabling them.
+    if [ "$clist" = "initContainers" ]; then
+        annotation_get "$ann" initContainers
+        want=$ANNOTATION_VALUE
+        [ "$want" = "true" ] || return 1
+    fi
+
+    annotation_get "$ann" monitorContainers
+    re=$ANNOTATION_VALUE
+    [ -n "$re" ] || return 0
+    case "$re" in REJECT:*) return 1 ;; esac
+
+    if [[ "$cname" =~ $re ]]; then
+        return 0
+    else
+        rc=$?
+    fi
+    if [ "$rc" -gt 1 ]; then
+        log_error annotation-monitor-containers-invalid pattern="$re" \
+            container="$cname" \
+            msg="monitorContainers pattern '$re' is not a usable regular expression; no container is monitored until it is fixed."
+    fi
+    return 1
+}
+
 # scan_is_keelson_managed <annotations>
 # True when the workload carries a policy annotation Keelson will act on,
 # workload-wide or per-container, under the prefix the config mode honours.
@@ -577,6 +643,14 @@ scan_is_keelson_managed() {
 scan_container() {
     local kind=$1 ns=$2 name=$3 clist=$4 cname=$5 cimage=$6 ann=$7 ips_json=$8 \
           mf_json=${9:-} sa_name=${10:-}
+
+    if ! scan_container_monitored "$ann" "$clist" "$cname"; then
+        log_debug skip-not-monitored \
+            kind="$kind" ns="$ns" name="$name" container="$cname" list="$clist" \
+            msg="Skipped $kind '$name'/$cname in '$ns': not selected for monitoring."
+        _scan_skip=$((_scan_skip + 1))
+        return 0
+    fi
 
     local result
     eligibility_check "$ann" "$cimage" "$cname" || true
@@ -630,9 +704,9 @@ scan_container() {
     fi
 
     local match_tag match_mode current_tag winner candidate
-    annotation_get "$ann" match-tag "$cname"
+    annotation_get "$ann" matchTag "$cname"
     match_tag=$ANNOTATION_VALUE
-    annotation_get "$ann" match-mode "$cname"
+    annotation_get "$ann" matchMode "$cname"
     match_mode=$ANNOTATION_VALUE
     match_mode=${match_mode:-glob}
     image_tag "$cimage"
@@ -708,12 +782,12 @@ scan_container() {
 #
 # Then trigger when EITHER:
 #   - this scan updated a container in the workload, or
-#   - no prior triggered-job is recorded (first-observation always-once).
+#   - nothing has ever been recorded for it (first-observation always-once).
 scan_check_cronjob_trigger() {
     local ns=$1 name=$2 ann=$3 suspend=$4 updated=$5
     local from_tag=${6:-} to_tag=${7:-} repo=${8:-}
     local trigger
-    annotation_get "$ann" trigger-job-on-update
+    annotation_get "$ann" triggerJobOnUpdate
     trigger=$ANNOTATION_VALUE
     [ "$trigger" = "true" ] || return 0
 
@@ -724,10 +798,20 @@ scan_check_cronjob_trigger() {
         return 0
     fi
 
+    # The image set as it stands after this pass: update_apply records what it
+    # applied against the cache record, so reading it back is the one place
+    # that sees the post-update truth for every container at once.
+    scan_trigger_image_set "$ns" "$name"
+
+    # Never fired: the bootstrap run, so a suspended CronJob adopted on its
+    # newest tag still proves it runs rather than waiting for a future release.
+    # Otherwise only our own update fires it, and only when it actually moved
+    # an image: someone else's change is a new baseline, not an event.
     local prior
-    prior=$(state_get_trigger_field CronJob "$ns" "$name" triggered-job)
-    if [ "$updated" -ne 1 ] && [ -n "$prior" ]; then
-        return 0
+    prior=$(state_get_trigger_field CronJob "$ns" "$name" triggered-at)
+    if [ -n "$prior" ]; then
+        [ "$updated" -eq 1 ] || return 0
+        scan_trigger_set_changed "$ns" "$name" || return 0
     fi
 
     if update_trigger_cronjob "$ns" "$name" "$from_tag" "$to_tag" "$repo"; then
@@ -739,16 +823,65 @@ scan_check_cronjob_trigger() {
     fi
 }
 
+# scan_trigger_image_set <ns> <name>  -> SCAN_TRIGGER_IMAGE_SET
+# Every container's image, one "<list>/<name>=<image>" per line, from the cache
+# record. Init containers included: Keelson updates them like any other, and an
+# init container left a release behind is the skew this exists to prevent.
+SCAN_TRIGGER_IMAGE_SET=
+scan_trigger_image_set() {
+    local i
+    SCAN_TRIGGER_IMAGE_SET=
+    inventory_get CronJob "$1" "$2" || return 0
+    for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do
+        SCAN_TRIGGER_IMAGE_SET+="${INVENTORY_CONTAINER_LISTS[$i]}/${INVENTORY_CONTAINER_NAMES[$i]}=${INVENTORY_CONTAINER_IMAGES[$i]}"$'\n'
+    done
+}
+
+# scan_trigger_set_changed <ns> <name>
+# True when SCAN_TRIGGER_IMAGE_SET differs from what was recorded at the last
+# firing. Compared container by container rather than as one string: the cache
+# yields inventory order and STATE_FIELDS is an unordered associative array, so
+# a string comparison would need a sort, and a sort is a fork on a path that
+# now has none.
+scan_trigger_set_changed() {
+    local key line rest slot recorded n=0
+    key=$(state_trigger_key CronJob "$1" "$2")
+    rest=$SCAN_TRIGGER_IMAGE_SET
+    while [ -n "$rest" ]; do
+        line=${rest%%$'\n'*}
+        if [ "$line" = "$rest" ]; then rest=; else rest=${rest#*$'\n'}; fi
+        [ -n "$line" ] || continue
+        n=$(( n + 1 ))
+        slot="$key:${line%%=*}"
+        recorded=${STATE_FIELDS[$slot]-}
+        [ "$recorded" = "${line#*=}" ] || return 0
+    done
+    # A container dropped since the last firing is a change too, and matching
+    # every current one would otherwise miss it.
+    local field c=0
+    for field in ${STATE_FIELDS[@]+"${!STATE_FIELDS[@]}"}; do
+        case "$field" in
+            "$key:containers/"*|"$key:initContainers/"*) c=$(( c + 1 )) ;;
+        esac
+    done
+    [ "$c" -ne "$n" ]
+}
+
 scan_record_trigger_success() {
     local kind=$1 ns=$2 name=$3
-    local now
-    now=$(state_now)
-    state_set_trigger_field "$kind" "$ns" "$name" triggered-at "$now"
-    # The job name is generated inside update_trigger_cronjob; we record the
-    # most recent invocation timestamp here. The Job creation log carries
-    # the generated name for forensic lookup. A future improvement could
-    # plumb the name back if a single canonical record per-CronJob is needed.
-    state_set_trigger_field "$kind" "$ns" "$name" triggered-job "$now"
+    state_set_trigger_field "$kind" "$ns" "$name" triggered-at "$(state_now)"
+    # Every container's image, not a timestamp in a field named triggered-job.
+    # A CronJob can have several, and recording one of them left the others
+    # undefined: updating container A then container B would compare against
+    # whichever happened to be written.
+    local line rest
+    rest=$SCAN_TRIGGER_IMAGE_SET
+    while [ -n "$rest" ]; do
+        line=${rest%%$'\n'*}
+        if [ "$line" = "$rest" ]; then rest=; else rest=${rest#*$'\n'}; fi
+        [ -n "$line" ] || continue
+        state_set_trigger_field "$kind" "$ns" "$name" "${line%%=*}" "${line#*=}"
+    done
 }
 
 scan_tag_passes_filter() {
@@ -783,6 +916,26 @@ scan_tag_passes_filter() {
 # actually about to happen, which almost no poll reaches: fetching it per due
 # workload spent a kubectl process on every one of them to throw the answer
 # away. update_apply fetches its own when handed nothing.
+# scan_sum_tally <file>
+# Adds up what the poll's children reported and leaves it in the _scan_*
+# counters the summary reads. Each child is a subshell, so its counts die with
+# it; without this the summary reports zero however much work was done.
+scan_sum_tally() {
+    local f=$1 t w u nc s e
+    [ -r "$f" ] || return 0
+    while read -r t w u nc s e; do
+        [ -n "$e" ] || continue
+        _scan_total=$(( _scan_total + t ))
+        _scan_would_update=$(( _scan_would_update + w ))
+        _scan_updated=$(( _scan_updated + u ))
+        _scan_no_change=$(( _scan_no_change + nc ))
+        _scan_skip=$(( _scan_skip + s ))
+        _scan_error=$(( _scan_error + e ))
+    done < "$f"
+    rm -f "$f" 2>/dev/null || true
+    return 0
+}
+
 scan_poll_due() {
     local _scan_apply=${1:-0} now=$2
     inventory_enabled || return 0
@@ -794,34 +947,64 @@ scan_poll_due() {
           _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
     registry_init
 
-    local entry kind ns name i
+    # One workload per child, at most KEELSON_REGISTRY_POLL_CONCURRENCY at a
+    # time. A registry check is about two seconds of waiting for roughly sixty
+    # milliseconds of work, so the serial loop spent almost all of its time
+    # doing nothing while an estate waited behind it.
+    #
+    # Safe to run concurrently because the write paths were already made so:
+    # inventory_put renames a BASHPID-named temp, and state mutations go to a
+    # BASHPID-named spool the tick loop drains. Nothing here writes the
+    # ConfigMap, and no two children touch the same workload.
+    local conc=${KEELSON_REGISTRY_POLL_CONCURRENCY:?KEELSON_REGISTRY_POLL_CONCURRENCY required}
+    local tally=${KEELSON_POLL_TALLY_FILE:-/keelson/work/poll-tally}
+    : > "$tally" 2>/dev/null || true
+
+    local entry kind ns name i inflight=0
     for entry in "${INVENTORY_DUE[@]}"; do
-        read -r kind ns name <<<"$entry"
-        inventory_get "$kind" "$ns" "$name" || continue
+        (
+            read -r kind ns name <<<"$entry"
+            inventory_get "$kind" "$ns" "$name" || exit 0
 
-        local _workload_updated=0 \
-              _workload_last_from="" _workload_last_to="" _workload_last_repo=""
-        for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do
-            _scan_total=$((_scan_total + 1))
-            scan_container "$kind" "$ns" "$name" \
-                "${INVENTORY_CONTAINER_LISTS[$i]}" \
-                "${INVENTORY_CONTAINER_NAMES[$i]}" "${INVENTORY_CONTAINER_IMAGES[$i]}" \
-                "$INVENTORY_ANNOTATIONS" "$INVENTORY_IMAGE_PULL_SECRETS" \
-                "" "$INVENTORY_SERVICE_ACCOUNT"
-        done
+            local _workload_updated=0 \
+                  _workload_last_from="" _workload_last_to="" _workload_last_repo=""
+            for (( i = 0; i < ${#INVENTORY_CONTAINER_NAMES[@]}; i++ )); do
+                _scan_total=$((_scan_total + 1))
+                scan_container "$kind" "$ns" "$name" \
+                    "${INVENTORY_CONTAINER_LISTS[$i]}" \
+                    "${INVENTORY_CONTAINER_NAMES[$i]}" "${INVENTORY_CONTAINER_IMAGES[$i]}" \
+                    "$INVENTORY_ANNOTATIONS" "$INVENTORY_IMAGE_PULL_SECRETS" \
+                    "" "$INVENTORY_SERVICE_ACCOUNT"
+            done
 
-        if [ "$kind" = "CronJob" ] && [ "$_scan_apply" -eq 1 ]; then
-            scan_check_cronjob_trigger "$ns" "$name" "$INVENTORY_ANNOTATIONS" \
-                "$INVENTORY_SUSPEND" "$_workload_updated" \
-                "$_workload_last_from" "$_workload_last_to" "$_workload_last_repo"
+            if [ "$kind" = "CronJob" ] && [ "$_scan_apply" -eq 1 ]; then
+                scan_check_cronjob_trigger "$ns" "$name" "$INVENTORY_ANNOTATIONS" \
+                    "$INVENTORY_SUSPEND" "$_workload_updated" \
+                    "$_workload_last_from" "$_workload_last_to" "$_workload_last_repo"
+            fi
+
+            inventory_mark_polled "$kind" "$ns" "$name" "$now" \
+                || log_warn inventory-not-rescheduled kind="$kind" ns="$ns" name="$name" \
+                    msg="Could not push $kind '$name' in '$ns' out to its next poll; it left the cache between being read as due and being polled."
+
+            state_spool_commit || true
+            # Counters are locals, so they die with this child. Appended for
+            # the parent to add up, or the summary would report zero however
+            # much work was done. One short line, so the append is atomic.
+            printf '%d %d %d %d %d %d\n' "$_scan_total" "$_scan_would_update" \
+                "$_scan_updated" "$_scan_no_change" "$_scan_skip" "$_scan_error" \
+                >>"$tally" 2>/dev/null || true
+        ) &
+        inflight=$(( inflight + 1 ))
+        if [ "$inflight" -ge "$conc" ]; then
+            # A child exiting non-zero must not take the poll down with it.
+            wait -n 2>/dev/null || true
+            inflight=$(( inflight - 1 ))
         fi
-
-        inventory_mark_polled "$kind" "$ns" "$name" "$now" \
-            || log_warn inventory-not-rescheduled kind="$kind" ns="$ns" name="$name" \
-                msg="Could not push $kind '$name' in '$ns' out to its next poll; it left the cache between being read as due and being polled."
-        inventory_get "$kind" "$ns" "$name" \
-            && state_set_next_due "$kind" "$ns" "$name" "$INVENTORY_NEXT_DUE"
     done
+    wait
+
+    scan_sum_tally "$tally"
 
     log_debug poll-summary \
         workloads="${#INVENTORY_DUE[@]}" \

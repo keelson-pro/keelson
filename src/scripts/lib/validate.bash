@@ -224,7 +224,10 @@ validate_config() {
     validate_utc_clock || errors=$((errors+1))
     validate_decimal_point || errors=$((errors+1))
 
-    for var in KEELSON_SCOPE KEELSON_CONFIG_MODE KEELSON_LOG_LEVEL KEELSON_LOG_FORMAT \
+    # Both versions are baked into the image by the keelson-package build, not
+    # set by the operator, so a missing one means the image was built wrong.
+    for var in KEELSON_VERSION KEELSON_PACKAGE_VERSION \
+               KEELSON_SCOPE KEELSON_CONFIG_MODE KEELSON_LOG_LEVEL KEELSON_LOG_FORMAT \
                KEELSON_LOG_MANAGED_WORKLOADS \
                KEELSON_RESPECT_SA_PULL_SECRETS KEELSON_STATE_CONFIGMAP \
                KEELSON_FIELD_MANAGER_STRATEGY_OWNED KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED; do
@@ -245,6 +248,7 @@ validate_config() {
     fi
 
     for var in KEELSON_RECONCILE_INTERVAL KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT \
+               KEELSON_FIRST_POLL_DELAY_MAX KEELSON_REGISTRY_POLL_CONCURRENCY \
                KEELSON_FULL_REFRESH_INTERVAL KEELSON_TICK_INTERVAL \
                KEELSON_HEARTBEAT_MAX_AGE KEELSON_WATCHER_RESPAWN_BACKOFF_MAX KEELSON_WATCHER_RESPAWN_HEALTHY_RESET \
                KEELSON_WATCHER_RECONNECT_INITIAL KEELSON_WATCHER_RECONNECT_MAX \

@@ -11,10 +11,48 @@
 #
 # Public API:
 #   policy_resolve_position <policy> <tag>
-#       Print the 1-indexed position. Exit 0 ok. Exit 2 invalid for
-#       this tag (e.g. minor on non-3-segment). Exit 3 'never' or empty.
+#       Print the 1-indexed position. Exit 0 ok. Exit 2 invalid for this tag
+#       (e.g. minor on a single-part tag, which has no second part). Exit 3
+#       'never' or empty.
+#
+# major is the first part, minor the second, patch the last whatever its
+# index. None of them assume three: a five-part release still has a first, a
+# second and a last.
 #   tag_is_newer <current-tag> <candidate-tag> <position>
 #       Exit 0 iff candidate is strictly newer under <position>.
+
+# policy_name_valid <policy>
+# Whether the policy is one Keelson understands at all, without reference to
+# any tag. Whether it then fits a particular tag is policy_resolve_position's
+# question.
+#
+# Here rather than in eligibility.bash so the set of policy names is stated
+# once: it was in both, and adding part-N to one and not the other made every
+# part-N annotation invalid while resolving perfectly well.
+policy_name_valid() {
+    case "$1" in
+        major|minor|patch|all|never) return 0 ;;
+        part-[0-9]*)
+            local part=${1#part-}
+            case "$part" in
+                # Digits all the way: the pattern above only promises the
+                # first one, so part-1x still arrives here.
+                *[!0-9]*) return 1 ;;
+                # No leading zero, which also rules out part-0. Bash reads a
+                # leading zero as octal in arithmetic, so part-010 would mean
+                # part 8, and part-08 is not a number at all -- both were
+                # accepted, quietly, with the wrong answer.
+                0*) return 1 ;;
+            esac
+            # Longer than any tag could possibly be, and past what bash
+            # arithmetic represents the comparison below errors and the value
+            # clamps to max int, so an impossible position gets accepted.
+            [ "${#part}" -le 9 ] || return 1
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
 
 policy_resolve_position() {
     local policy=$1 tag=$2
@@ -31,7 +69,12 @@ policy_resolve_position() {
             return 0
             ;;
         minor)
-            if [ "$n" -ne 3 ]; then
+            # The second part of however many there are, not the middle of
+            # exactly three. A version longer than semver still has a second
+            # part and it is the one minor means; demanding three rejected
+            # 1.0 and 1.2.3.4 alike, and a rejected tag is a container that
+            # silently never updates.
+            if [ "$n" -lt 2 ]; then
                 return 2
             fi
             printf '2\n'
@@ -41,15 +84,26 @@ policy_resolve_position() {
             printf '%d\n' "$n"
             return 0
             ;;
-        *[!0-9]*)
-            return 2
-            ;;
-        *)
-            if [ "$policy" -lt 1 ] || [ "$policy" -gt "$n" ]; then
+        part-[0-9]*)
+            # Any part by number, for the ones no shorthand reaches: major,
+            # minor and patch are the first, second and last, so a five-part
+            # release has two in the middle with no other way to name them.
+            #
+            # Spelled out rather than a bare number, which this accepted
+            # before and never documented: "3" reads as a count, a version or
+            # a part depending on who is looking.
+            # Validated there, not here: the rules are fiddly enough that a
+            # second copy drifted once already.
+            policy_name_valid "$policy" || return 2
+            local part=${policy#part-}
+            if [ "$part" -gt "$n" ]; then
                 return 2
             fi
-            printf '%d\n' "$policy"
+            printf '%d\n' "$part"
             return 0
+            ;;
+        *)
+            return 2
             ;;
     esac
 }

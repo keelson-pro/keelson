@@ -18,6 +18,7 @@ setup() {
     KEELSON_STATUS_DIR="$TMP_DIR/status"
     HEARTBEAT_FILE="$KEELSON_STATUS_DIR/heartbeat"
     WATCHERS_FILE="$KEELSON_STATUS_DIR/watchers"
+    status_init
 }
 
 emit() { "$@" 2>&1; }
@@ -268,4 +269,27 @@ emit() { "$@" 2>&1; }
     status_write_watchers self=$$
     run status_all_watchers_alive
     [ "$status" -eq 0 ]
+}
+
+# --- the directory is made once, not per write ---
+
+@test "status_init: creates the status directory" {
+    rm -rf "$KEELSON_STATUS_DIR"
+    status_init
+    [ -d "$KEELSON_STATUS_DIR" ]
+}
+
+@test "status_init: is idempotent" {
+    status_init
+    status_init
+    [ -d "$KEELSON_STATUS_DIR" ]
+}
+
+@test "the writers do not create the directory themselves" {
+    # The heartbeat is written every tick. A mkdir -p here would be a process
+    # per tick, forever, for a directory made at boot that cannot go away.
+    rm -rf "$KEELSON_STATUS_DIR"
+    clock_read
+    status_write_heartbeat "$CLOCK_NOW_US" 2>/dev/null || true
+    [ ! -d "$KEELSON_STATUS_DIR" ]
 }

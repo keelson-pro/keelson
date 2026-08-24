@@ -32,11 +32,18 @@ setup() {
     [ "$ELIGIBILITY_RESULT" = "OK patch 4" ]
 }
 
-@test "eligible: numeric N policy" {
+@test "eligible: part-N policy" {
+    rc=0
+    eligibility_check "keelson.pro/policy=part-2" "ghcr.io/x/y:1.2.3" || rc=$?
+    [ "$rc" -eq 0 ]
+    [ "$ELIGIBILITY_RESULT" = "OK part-2 2" ]
+}
+
+@test "skip: a bare number is not a policy" {
     rc=0
     eligibility_check "keelson.pro/policy=2" "ghcr.io/x/y:1.2.3" || rc=$?
-    [ "$rc" -eq 0 ]
-    [ "$ELIGIBILITY_RESULT" = "OK 2 2" ]
+    [ "$rc" -eq 1 ]
+    [ "$ELIGIBILITY_RESULT" = "SKIP invalid-policy" ]
 }
 
 @test "eligible: all is alias for major" {
@@ -102,23 +109,35 @@ setup() {
     [ "$ELIGIBILITY_RESULT" = "SKIP tag-has-non-numeric-segment" ]
 }
 
-@test "skip: minor policy on 4-segment tag" {
+@test "eligible: minor policy on a 4-segment tag" {
+    # minor is the second part of however many there are, so a tag longer
+    # than semver is eligible rather than silently never updating.
     rc=0
     eligibility_check "keelson.pro/policy=minor" "nginx:1.2.3.4" || rc=$?
-    [ "$rc" -eq 1 ]
-    [ "$ELIGIBILITY_RESULT" = "SKIP policy-position-incompatible-with-tag" ]
+    [ "$rc" -eq 0 ]
+    [ "$ELIGIBILITY_RESULT" = "OK minor 2" ]
 }
 
-@test "skip: minor policy on 2-segment tag" {
+@test "eligible: minor policy on a 2-segment tag" {
     rc=0
     eligibility_check "keelson.pro/policy=minor" "nginx:1.2" || rc=$?
+    [ "$rc" -eq 0 ]
+    [ "$ELIGIBILITY_RESULT" = "OK minor 2" ]
+}
+
+@test "skip: minor policy on a 1-segment tag" {
+    # No second part to change, so there is nothing for minor to mean.
+    rc=0
+    eligibility_check "keelson.pro/policy=minor" "nginx:7" || rc=$?
     [ "$rc" -eq 1 ]
     [ "$ELIGIBILITY_RESULT" = "SKIP policy-position-incompatible-with-tag" ]
 }
 
-@test "skip: numeric N out of range" {
+@test "skip: part-N past the end of the tag" {
+    # A valid policy name that this particular tag cannot satisfy, which is a
+    # different answer from a policy Keelson does not understand at all.
     rc=0
-    eligibility_check "keelson.pro/policy=5" "nginx:1.2.3" || rc=$?
+    eligibility_check "keelson.pro/policy=part-5" "nginx:1.2.3" || rc=$?
     [ "$rc" -eq 1 ]
     [ "$ELIGIBILITY_RESULT" = "SKIP policy-position-incompatible-with-tag" ]
 }

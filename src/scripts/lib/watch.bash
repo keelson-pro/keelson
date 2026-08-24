@@ -60,7 +60,6 @@ watch_run_kind() {
     local iter=0 opened held rc fails=0 err detail errfile rcfile
     errfile="${KEELSON_STATUS_DIR}/watcher-${kind}.stderr"
     rcfile="${KEELSON_STATUS_DIR}/watcher-${kind}.rc"
-    mkdir -p "$KEELSON_STATUS_DIR" 2>/dev/null || true
     status_write_watcher_health "$kind" 0 ""
     while [ "$max_iter" -eq 0 ] || [ "$iter" -lt "$max_iter" ]; do
         log_debug watch-start kind="$kind" \

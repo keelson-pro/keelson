@@ -42,10 +42,14 @@ setup() {
     HEARTBEAT_FILE="$KEELSON_STATUS_DIR/heartbeat"
     WATCHERS_FILE="$KEELSON_STATUS_DIR/watchers"
     queue_init
+    status_init
 
     # Stub the heavy collaborators.
     scan_run() { printf '%s\n' "$1" >>"$TMP_DIR/scan.calls"; }
     scan_poll_due() { printf '%s\n' "$2" >>"$TMP_DIR/poll.calls"; }
+    # Something due by default so the tick spawns its poll child; the tests
+    # about the gate override this.
+    inventory_due() { printf '%s\n' "$1" >>"$TMP_DIR/due.calls"; INVENTORY_DUE=("Deployment default app"); }
     scan_refresh_kind() { printf '%s\n' "$2" >>"$TMP_DIR/refresh.calls"; }
     scan_refresh_queued() { printf '%s\n' "$1" >>"$TMP_DIR/queue.calls"; }
     inventory_evict_unwatched() { printf 'evict-unwatched\n' >>"$TMP_DIR/refresh.calls"; }
@@ -53,6 +57,8 @@ setup() {
     state_flush() { printf 'flush\n' >>"$TMP_DIR/state.calls"; }
     state_clear_cache() { printf 'clear\n' >>"$TMP_DIR/state.calls"; }
     state_load() { printf 'load\n' >>"$TMP_DIR/state.calls"; }
+    state_spool_commit() { printf 'commit\n' >>"$TMP_DIR/state.calls"; }
+    state_drain_spool() { printf 'drain\n' >>"$TMP_DIR/state.calls"; return 1; }
     watch_run_kind() { sleep 10; }
 
     sleep() { :; }
@@ -81,11 +87,13 @@ emit() { "$@" 2>&1; }
 
 # --- loop_start_queue_refresh ---
 
-@test "queue refresh: the child loads and flushes state" {
-    loop_start_queue_refresh 1
-    wait "$LOOP_QUEUE_PID"
-    grep -q "load" "$TMP_DIR/state.calls"
-    grep -q "flush" "$TMP_DIR/state.calls"
+@test "queue refresh: the child spools rather than writing" {
+    rm -f "$TMP_DIR/state.calls"
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_QUEUE_PID" -gt 0 ] && wait "$LOOP_QUEUE_PID" 2>/dev/null || true
+    grep -q commit "$TMP_DIR/state.calls"
+    ! grep -q '^flush$' "$TMP_DIR/state.calls"
 }
 
 @test "queue refresh: dry-run passes apply=0 and does not flush" {
@@ -359,16 +367,16 @@ emit() { "$@" 2>&1; }
     [ -f "$TMP_DIR/poll.calls" ]
 }
 
-@test "loop_run: the poll child loads and flushes state" {
-    # It is a subshell, so anything it records (a CronJob trigger, a new
-    # next-due) is lost unless it flushes, and without loading first the
-    # trigger gate reads empty and re-fires a Job that already ran.
+@test "loop_run: the poll child spools rather than writing" {
+    # A child is a subshell and the parent is the only writer: an apply sends
+    # the whole ledger, so two children writing would each drop the other's
+    # changes and a lost CronJob record re-fires a Job that already ran.
     rm -f "$TMP_DIR/state.calls"
     scan_run() { :; }
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
-    grep -q load "$TMP_DIR/state.calls"
-    grep -q flush "$TMP_DIR/state.calls"
+    grep -q commit "$TMP_DIR/state.calls"
+    ! grep -q '^load$' "$TMP_DIR/state.calls"
 }
 
 @test "loop_run: the poll is passed the tick's own clock" {
@@ -488,4 +496,82 @@ emit() { "$@" 2>&1; }
     scan_log_managed_workloads() { printf 'called\n' >>"$TMP_DIR/managed.calls"; return 0; }
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     [ ! -f "$TMP_DIR/managed.calls" ]
+}
+
+# --- the poll child is gated on something actually being due ---
+#
+# The child cannot discover the queue is empty without first loading the
+# ledger from the ConfigMap, and that load was the controller's entire idle
+# cost. The queue path has had this gate since it was written; the poll path
+# had not.
+
+@test "loop_run: nothing due spawns no poll child" {
+    inventory_due() { INVENTORY_DUE=(); }
+    rm -f "$TMP_DIR/poll.calls"
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
+    [ ! -f "$TMP_DIR/poll.calls" ]
+}
+
+@test "loop_run: nothing due leaves the poll pid unset" {
+    inventory_due() { INVENTORY_DUE=(); }
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_POLL_PID" -eq 0 ]
+}
+
+@test "loop_run: something due still spawns the poll child" {
+    inventory_due() { INVENTORY_DUE=("Deployment default app"); }
+    rm -f "$TMP_DIR/poll.calls"
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
+    [ -f "$TMP_DIR/poll.calls" ]
+}
+
+@test "loop_run: the due check runs every tick" {
+    rm -f "$TMP_DIR/due.calls"
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=3 loop_run
+    [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
+    [ "$(wc -l < "$TMP_DIR/due.calls" | tr -d ' ')" -eq 3 ]
+}
+
+@test "loop_run: the due check is asked with the tick's own clock" {
+    rm -f "$TMP_DIR/due.calls"
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
+    clock_read
+    local asked
+    asked=$(head -n 1 "$TMP_DIR/due.calls")
+    [ "$asked" -gt 0 ]
+    [ "$asked" -le "$(( CLOCK_NOW_US / 1000000 ))" ]
+}
+
+@test "loop_run: the poll child gets the same clock the due check used" {
+    rm -f "$TMP_DIR/due.calls" "$TMP_DIR/poll.calls"
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
+    [ "$(head -n 1 "$TMP_DIR/due.calls")" = "$(head -n 1 "$TMP_DIR/poll.calls")" ]
+}
+
+# --- the size check is throttled, the rotation is not ---
+
+@test "loop_run: the size check does not run on every tick" {
+    local calls="$TMP_DIR/rotate.calls"
+    log_file_rotate_if_needed() { printf 'check\n' >>"$calls"; }
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=5 loop_run
+    [ "$(wc -l < "$calls" | tr -d ' ')" -eq 1 ]
+}
+
+@test "loop_run: the first tick still checks" {
+    local calls="$TMP_DIR/rotate.calls"
+    log_file_rotate_if_needed() { printf 'check\n' >>"$calls"; }
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ -f "$calls" ]
 }

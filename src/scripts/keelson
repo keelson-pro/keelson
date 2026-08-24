@@ -119,9 +119,10 @@ main() {
 
     state_own_namespace || true
     log_info_always boot \
-        version="${KEELSON_VERSION:-0.0.0-DEV-VERSION}" \
+        version="$KEELSON_VERSION" \
+        package-version="$KEELSON_PACKAGE_VERSION" \
         ns="${STATE_NAMESPACE:-unknown}" \
-        msg="Keelson ${KEELSON_VERSION:-0.0.0-DEV-VERSION} booting in ns '${STATE_NAMESPACE:-unknown}'."
+        msg="Keelson $KEELSON_VERSION (package $KEELSON_PACKAGE_VERSION) booting in ns '${STATE_NAMESPACE:-unknown}'."
     log_boot_config
 
     trap 'shutdown SIGTERM' TERM
@@ -129,6 +130,8 @@ main() {
 
     queue_init
     inventory_init
+    status_init
+    state_spool_init
     if ! state_init; then
         log_warn state-init-failed \
             configmap="${KEELSON_STATE_CONFIGMAP:-keelson-state}" \

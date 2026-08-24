@@ -95,10 +95,8 @@ eligibility_check() {
 # Recognise syntactically valid policy words. "never" handled by caller; this
 # helper exists to distinguish "junk policy string" from "valid policy that
 # doesn't fit this tag's segment count" (both produce status 2 in policy.bash).
+# Delegated so the set of policy names lives in one place. Keeping a second
+# copy here meant part-N resolved correctly and was still rejected as invalid.
 eligibility_policy_syntax_ok() {
-    case "$1" in
-        major|minor|patch|all|never) return 0 ;;
-        ''|*[!0-9]*) return 1 ;;
-        *) return 0 ;;
-    esac
+    policy_name_valid "$1"
 }

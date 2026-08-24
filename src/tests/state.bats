@@ -19,6 +19,8 @@ setup() {
     printf 'keelson-system' > "$KEELSON_SA_NAMESPACE_FILE"
     KEELSON_STATE_CONFIGMAP=keelson-state
     export KEELSON_SA_NAMESPACE_FILE KEELSON_STATE_CONFIGMAP
+    KEELSON_FIRST_POLL_DELAY_MAX=300
+    export KEELSON_FIRST_POLL_DELAY_MAX
     unset KEELSON_STATE_NAMESPACE
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
@@ -26,6 +28,11 @@ setup() {
     source "$SCRIPT_DIR/lib/log.bash"
     # shellcheck source=../scripts/lib/state.bash
     source "$SCRIPT_DIR/lib/state.bash"
+
+    # After sourcing: the default points at /keelson/work, which tests must
+    # not touch.
+    KEELSON_STATE_SPOOL_DIR="$TMP_DIR/state-spool"
+    state_spool_init
 }
 
 emit() { "$@" 2>&1; }
@@ -40,7 +47,7 @@ install_shim() {
 install_default_kubectl() {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
-case "$1 $2" in
+case "$1 ${2:-}" in
     "get configmap")
         if [ -f "$TMP_DIR/cm.json" ]; then
             cat "$TMP_DIR/cm.json"
@@ -48,8 +55,12 @@ case "$1 $2" in
         fi
         exit 1
         ;;
-    "create configmap")
-        printf '{"data":{}}' > "$TMP_DIR/cm.json"
+    "apply "*)
+        # Behave as the server does: the manifest becomes the object, so a
+        # later load sees exactly what was written. Kept for assertions too.
+        printf '%s\n' "$*" >>"$TMP_DIR/kubectl.log"
+        cat > "$TMP_DIR/cm-applied.json"
+        cp "$TMP_DIR/cm-applied.json" "$TMP_DIR/cm.json"
         exit 0
         ;;
     "patch configmap")
@@ -115,7 +126,7 @@ SH
 @test "state_init: loads existing ConfigMap trigger data into cache" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
-case "$1 $2" in
+case "$1 ${2:-}" in
     "get configmap")
         cat <<'JSON'
 {"metadata":{"resourceVersion":"42"},"data":{"j--CronJob--default--cron":"{\"triggered-job\":\"2026-05-19T10:00:00Z\",\"triggered-at\":\"2026-05-19T10:00:00Z\"}"}}
@@ -173,7 +184,7 @@ SH
 @test "state_flush: no dirty keys -> no kubectl call" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
-case "$1 $2" in
+case "$1 ${2:-}" in
     "get configmap") printf '{"data":{}}'; exit 0 ;;
     "patch configmap") echo "patched" >>"$TMP_DIR/kubectl.log"; exit 0 ;;
 esac
@@ -184,17 +195,16 @@ SH
     [ ! -f "$TMP_DIR/kubectl.log" ]
 }
 
-@test "state_flush: dirty keys -> kubectl patch with merge patch" {
+@test "state_flush: dirty keys are written by a server-side apply" {
     install_default_kubectl
     state_init
     state_set_trigger_field CronJob default cron triggered-job cron-keelson-1
     state_set_trigger_field CronJob default cron triggered-at 2026-05-19T10:00:00Z
     run emit state_flush
     [ "$status" -eq 0 ]
-    [[ "$(cat "$TMP_DIR/kubectl.log")" == *"patch configmap keelson-state"* ]]
-    [[ "$(cat "$TMP_DIR/kubectl.log")" == *"--type=merge"* ]]
-    grep -q '"j--CronJob--default--cron"' "$TMP_DIR/patch.json"
-    grep -q 'triggered-job' "$TMP_DIR/patch.json"
+    [[ "$(cat "$TMP_DIR/kubectl.log")" == *"--server-side"* ]]
+    grep -q '"j--CronJob--default--cron"' "$TMP_DIR/cm-applied.json"
+    grep -q 'triggered-job' "$TMP_DIR/cm-applied.json"
 }
 
 @test "state_flush: success clears the dirty set" {
@@ -208,9 +218,9 @@ SH
 @test "state_flush: kubectl failure logs state-flush-failed and keeps dirty" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
-case "$1 $2" in
+case "$1 ${2:-}" in
     "get configmap") printf '{"data":{}}'; exit 0 ;;
-    "patch configmap") exit 1 ;;
+    "apply --server-side") cat >/dev/null; exit 1 ;;
 esac
 exit 0
 SH
@@ -228,18 +238,18 @@ SH
     state_set_trigger_field CronJob default cron triggered-job v
     state_set_trigger_field CronJob default cron triggered-at ""
     state_flush
-    ! grep -q "triggered-at" "$TMP_DIR/patch.json"
-    grep -q "triggered-job" "$TMP_DIR/patch.json"
+    ! grep -q "triggered-at" "$TMP_DIR/cm-applied.json"
+    grep -q "triggered-job" "$TMP_DIR/cm-applied.json"
 }
 
-@test "state_flush: patch round-trips through yq to original value" {
+@test "state_flush: the written value round-trips through yq unchanged" {
     install_default_kubectl
     state_init
     state_set_trigger_field CronJob default cron triggered-job 'has "quote" and \slash'
     state_flush
     local inner round_tripped
     inner=$(yq -p=json -r '.data["j--CronJob--default--cron"]' \
-        "$TMP_DIR/patch.json")
+        "$TMP_DIR/cm-applied.json")
     round_tripped=$(printf '%s' "$inner" | yq -p=json -r '."triggered-job"')
     [ "$round_tripped" = 'has "quote" and \slash' ]
 }
@@ -250,14 +260,16 @@ SH
 # workload and the ConfigMap only grew. At roughly 1 MiB per object that
 # eventually fails as a mystery rather than as a bug.
 
-@test "forget: renders an unquoted null, which is what removes a merge key" {
+@test "forget: a forgotten key is simply absent from the manifest" {
+    # Apply removes what it omits, so there is no null to render and no
+    # deletion set to keep in step with the writes.
     state_set_trigger_field CronJob ops backup triggered-job 111
-    STATE_DIRTY=(); STATE_DELETED=()
+    STATE_DIRTY=()
     state_forget "$(state_trigger_key CronJob ops backup)"
-    local patch
-    patch=$(state_build_patch)
-    [[ "$patch" == *'"j--CronJob--ops--backup":null'* ]]
-    [[ "$patch" != *'"null"'* ]]
+    local m
+    m=$(state_build_manifest)
+    [[ "$m" != *"j--CronJob--ops--backup"* ]]
+    [[ "$m" != *"null"* ]]
 }
 
 @test "forget: the key's fields are gone" {
@@ -270,31 +282,32 @@ SH
 @test "forget: a deleted key does not resurrect from its old fields" {
     state_set_trigger_field CronJob ops backup triggered-job 111
     state_forget "$(state_trigger_key CronJob ops backup)"
-    local patch
-    patch=$(state_build_patch)
-    [[ "$patch" != *"111"* ]]
+    local m
+    m=$(state_build_manifest)
+    [[ "$m" != *"111"* ]]
 }
 
-@test "forget: deletions and writes go in the same patch" {
-    STATE_DIRTY=(); STATE_DELETED=()
+@test "forget: one write both drops the gone key and keeps the rest" {
+    STATE_DIRTY=()
     state_set_trigger_field CronJob ops keep triggered-job 700
     state_set_trigger_field CronJob ops gone triggered-job 800
     state_forget "$(state_trigger_key CronJob ops gone)"
-    local patch
-    patch=$(state_build_patch)
-    [[ "$patch" == *'"j--CronJob--ops--gone":null'* ]]
-    [[ "$patch" == *"700"* ]]
+    local m
+    m=$(state_build_manifest)
+    [[ "$m" != *"j--CronJob--ops--gone"* ]]
+    [[ "$m" == *"700"* ]]
 }
 
-@test "forget: a successful flush clears the deletion set" {
+@test "forget: a successful write clears the dirty set" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
+cat >/dev/null
 exit 0
 SH
+    STATE_LOADED=1
     state_set_trigger_field CronJob ops backup triggered-job 111
     state_forget "$(state_trigger_key CronJob ops backup)"
     state_flush
-    [ "${#STATE_DELETED[@]}" -eq 0 ]
     [ "${#STATE_DIRTY[@]}" -eq 0 ]
 }
 
@@ -304,16 +317,17 @@ SH
     [ "${#STATE_DELETED[@]}" -eq 0 ]
 }
 
-@test "forget: a failed flush keeps the deletion for the next attempt" {
+@test "forget: a failed write keeps it dirty for the next attempt" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
+cat >/dev/null
 exit 1
 SH
+    STATE_LOADED=1
     state_set_trigger_field CronJob ops backup triggered-job 111
     state_forget "$(state_trigger_key CronJob ops backup)"
     run state_flush
     [ "$status" -eq 1 ]
-    [ -n "${STATE_DELETED[j--CronJob--ops--backup]:-}" ]
     [ -n "${STATE_DIRTY[j--CronJob--ops--backup]:-}" ]
 }
 
@@ -335,51 +349,66 @@ SH
 # --- per-workload schedule ---
 #
 # The cache is derived and rebuilt from the cluster on any restart, but a
-# schedule is not derivable. Without persisting it, a restart makes every
-# workload due at once and every repository gets polled the moment the pod
-# comes back.
+# The schedule itself is derived, not stored: inventory_first_due hashes the
+# identity, so a cold start spreads the estate without a ledger. What the
+# ledger records is that Keelson has seen the workload at all, written once.
 
-@test "next-due: round-trips through the ledger" {
-    state_set_next_due Deployment default web 1786868000
-    [ "$(state_get_next_due Deployment default web)" = "1786868000" ]
+@test "record: a workload gets a first-seen stamp" {
+    state_record_workload Deployment default web
+    [ -n "$(state_get w--Deployment--default--web first-seen)" ]
 }
 
-@test "next-due: unknown workload reads empty" {
-    [ -z "$(state_get_next_due Deployment default nope)" ]
+@test "record: an unrecorded workload reads empty" {
+    [ -z "$(state_get w--Deployment--default--nope first-seen)" ]
 }
 
-@test "next-due: uses its own key, leaving the trigger ledger alone" {
+@test "record: written once, never rewritten" {
+    # A restart must not churn the ConfigMap re-stamping what it already knows.
+    state_record_workload Deployment default web
+    local first
+    first=$(state_get w--Deployment--default--web first-seen)
+    STATE_DIRTY=()
+    state_record_workload Deployment default web
+    [ "$(state_get w--Deployment--default--web first-seen)" = "$first" ]
+    [ -z "${STATE_DIRTY[w--Deployment--default--web]:-}" ]
+}
+
+@test "record: carries no next-due, the schedule is derived" {
+    state_record_workload Deployment default web
+    [ -z "$(state_get w--Deployment--default--web next-due)" ]
+}
+
+@test "record: uses its own key, leaving the trigger ledger alone" {
     state_set_trigger_field CronJob ops backup triggered-job 111
-    state_set_next_due CronJob ops backup 222
+    state_record_workload CronJob ops backup
     [ "$(state_get_trigger_field CronJob ops backup triggered-job)" = "111" ]
-    [ "$(state_get_next_due CronJob ops backup)" = "222" ]
-    [ -n "${STATE_KEYS[s--CronJob--ops--backup]:-}" ]
+    [ -n "${STATE_KEYS[w--CronJob--ops--backup]:-}" ]
     [ -n "${STATE_KEYS[j--CronJob--ops--backup]:-}" ]
 }
 
-@test "next-due: marks the key dirty for the next flush" {
+@test "record: marks the key dirty for the next flush" {
     STATE_DIRTY=()
-    state_set_next_due Deployment default web 500
-    [ -n "${STATE_DIRTY[s--Deployment--default--web]:-}" ]
+    state_record_workload Deployment default web
+    [ -n "${STATE_DIRTY[w--Deployment--default--web]:-}" ]
 }
 
 @test "forget_workload: drops both of a workload's keys" {
     state_set_trigger_field CronJob ops backup triggered-job 111
-    state_set_next_due CronJob ops backup 222
+    state_record_workload CronJob ops backup
     state_forget_workload CronJob ops backup
-    [ -z "$(state_get_next_due CronJob ops backup)" ]
+    [ -z "$(state_get w--CronJob--ops--backup first-seen)" ]
     [ -z "$(state_get_trigger_field CronJob ops backup triggered-job)" ]
 }
 
-@test "forget_workload: both keys go null in the same patch" {
-    STATE_DIRTY=(); STATE_DELETED=()
+@test "forget_workload: both keys leave the manifest together" {
+    STATE_DIRTY=()
     state_set_trigger_field CronJob ops backup triggered-job 111
-    state_set_next_due CronJob ops backup 222
+    state_record_workload CronJob ops backup
     state_forget_workload CronJob ops backup
-    local patch
-    patch=$(state_build_patch)
-    [[ "$patch" == *'"s--CronJob--ops--backup":null'* ]]
-    [[ "$patch" == *'"j--CronJob--ops--backup":null'* ]]
+    local m
+    m=$(state_build_manifest)
+    [[ "$m" != *"w--CronJob--ops--backup"* ]]
+    [[ "$m" != *"j--CronJob--ops--backup"* ]]
 }
 
 # --- ledger reconciliation, after a full refresh ---
@@ -391,13 +420,13 @@ SH
     inventory_init
     inventory_put Deployment default web 1000 60 "" default '[]' '' 'containers main=a:1'
 
-    state_set_next_due Deployment default web 111
-    state_set_next_due Deployment default ghost 222
+    state_record_workload Deployment default web
+    state_record_workload Deployment default ghost
     state_set_trigger_field CronJob ops gone triggered-job 333
 
     state_reconcile_ledger
-    [ "$(state_get_next_due Deployment default web)" = "111" ]
-    [ -z "$(state_get_next_due Deployment default ghost)" ]
+    [ -n "$(state_get w--Deployment--default--web first-seen)" ]
+    [ -z "$(state_get w--Deployment--default--ghost first-seen)" ]
     [ -z "$(state_get_trigger_field CronJob ops gone triggered-job)" ]
 }
 
@@ -405,9 +434,9 @@ SH
     # shellcheck source=../scripts/lib/inventory.bash
     source "$SCRIPT_DIR/lib/inventory.bash"
     KEELSON_INVENTORY_DIR="$TMP_DIR/absent"
-    state_set_next_due Deployment default web 111
+    state_record_workload Deployment default web
     state_reconcile_ledger
-    [ "$(state_get_next_due Deployment default web)" = "111" ]
+    [ -n "$(state_get w--Deployment--default--web first-seen)" ]
 }
 
 # --- own namespace ---
@@ -436,4 +465,377 @@ SH
     state_own_namespace || rc=$?
     [ "$rc" -eq 1 ]
     [ "$STATE_NAMESPACE_FILE" = "$TMP_DIR/absent" ]
+}
+
+# --- state_load parsing ---
+#
+# The ledger is re-read by every scan, poll, queue-refresh and full-refresh
+# child, so how it parses is worth pinning independently of how it is stored.
+
+load_cm() {
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+case "\$1 \$2" in
+    "get configmap") cat <<'JSON'
+$1
+JSON
+        exit 0 ;;
+esac
+exit 0
+SH
+    STATE_CONFIGMAP_NAME=keelson-state
+    STATE_NAMESPACE=keelson-system
+    state_clear_cache
+    state_load
+}
+
+@test "state_load: a single key with a single field" {
+    load_cm '{"data":{"k1":"{\"next-due\":\"1787000060\"}"}}'
+    [ "$(state_get k1 next-due)" = "1787000060" ]
+    [ -n "${STATE_KEYS[k1]:-}" ]
+}
+
+@test "state_load: several keys each land separately" {
+    load_cm '{"data":{"k1":"{\"next-due\":\"111\"}","k2":"{\"next-due\":\"222\"}","k3":"{\"next-due\":\"333\"}"}}'
+    [ "$(state_get k1 next-due)" = "111" ]
+    [ "$(state_get k2 next-due)" = "222" ]
+    [ "$(state_get k3 next-due)" = "333" ]
+}
+
+@test "state_load: several fields under one key" {
+    load_cm '{"data":{"k1":"{\"triggered-job\":\"job-a\",\"triggered-at\":\"2026-05-19T10:00:00Z\"}"}}'
+    [ "$(state_get k1 triggered-job)" = "job-a" ]
+    [ "$(state_get k1 triggered-at)" = "2026-05-19T10:00:00Z" ]
+}
+
+@test "state_load: an empty object registers the key with no fields" {
+    load_cm '{"data":{"k1":"{}"}}'
+    [ -n "${STATE_KEYS[k1]:-}" ]
+    [ -z "$(state_get k1 next-due)" ]
+}
+
+@test "state_load: a null value registers the key with no fields" {
+    load_cm '{"data":{"k1":"null"}}'
+    [ -n "${STATE_KEYS[k1]:-}" ]
+    [ -z "$(state_get k1 next-due)" ]
+}
+
+@test "state_load: absent data section loads nothing and does not fail" {
+    load_cm '{"metadata":{"resourceVersion":"42"}}'
+    [ "${#STATE_KEYS[@]}" -eq 0 ]
+}
+
+@test "state_load: an empty data section loads nothing" {
+    load_cm '{"data":{}}'
+    [ "${#STATE_KEYS[@]}" -eq 0 ]
+}
+
+@test "state_load: a key containing dots survives intact" {
+    load_cm '{"data":{"j--CronJob--ns--my.app":"{\"next-due\":\"999\"}"}}'
+    [ "$(state_get 'j--CronJob--ns--my.app' next-due)" = "999" ]
+}
+
+@test "state_load: a backslash in a value is not doubled" {
+    load_cm '{"data":{"k1":"{\"note\":\"a\\\\b\"}"}}'
+    [ "$(state_get k1 note)" = 'a\b' ]
+}
+
+@test "state_load: an empty field value reads back empty" {
+    load_cm '{"data":{"k1":"{\"next-due\":\"\"}"}}'
+    [ -n "${STATE_KEYS[k1]:-}" ]
+    [ -z "$(state_get k1 next-due)" ]
+}
+
+@test "state_load: a value with a space survives" {
+    load_cm '{"data":{"k1":"{\"note\":\"two words\"}"}}'
+    [ "$(state_get k1 note)" = "two words" ]
+}
+
+@test "state_load: many keys all load" {
+    local d='' i
+    for i in $(seq 1 30); do
+        [ -n "$d" ] && d="$d,"
+        d="$d\"k$i\":\"{\\\"next-due\\\":\\\"$i\\\"}\""
+    done
+    load_cm "{\"data\":{$d}}"
+    [ "${#STATE_KEYS[@]}" -eq 30 ]
+    [ "$(state_get k1 next-due)" = "1" ]
+    [ "$(state_get k30 next-due)" = "30" ]
+}
+
+# --- provenance on the ledger itself ---
+#
+# The image tag, the label and the env can all disagree about which build is
+# running. This cannot: it is written by the build that wrote the record.
+
+@test "provenance: creation stamps who made it and when" {
+    install_default_kubectl
+    KEELSON_VERSION=1.42 KEELSON_PACKAGE_VERSION=1.15.1.36.1 state_init
+    local m
+    m=$(cat "$TMP_DIR/cm-applied.json")
+    [[ "$m" == *'"keelson.pro/createdByVersion":"1.42"'* ]]
+    [[ "$m" == *'"keelson.pro/createdByPackage":"1.15.1.36.1"'* ]]
+    [[ "$m" == *'"keelson.pro/createdAt":"20'* ]]
+}
+
+@test "provenance: creation also stamps the updated trio" {
+    install_default_kubectl
+    KEELSON_VERSION=1.42 KEELSON_PACKAGE_VERSION=1.15.1.36.1 state_init
+    local m
+    m=$(cat "$TMP_DIR/cm-applied.json")
+    [[ "$m" == *'"keelson.pro/updatedByVersion":"1.42"'* ]]
+    [[ "$m" == *'"keelson.pro/updatedAt":"20'* ]]
+}
+
+@test "provenance: a write refreshes updated and replays created" {
+    install_default_kubectl
+    state_init
+    STATE_CONFIGMAP_NAME=keelson-state
+    STATE_NAMESPACE=keelson-system
+    KEELSON_VERSION=1.43 KEELSON_PACKAGE_VERSION=1.16.0.0.1 \
+        state_set_trigger_field CronJob ops backup triggered-at now
+    local m
+    KEELSON_VERSION=1.43 KEELSON_PACKAGE_VERSION=1.16.0.0.1 m=$(state_build_manifest)
+    [[ "$m" == *'"keelson.pro/updatedByVersion":"1.43"'* ]]
+    [[ "$m" == *'"keelson.pro/updatedByPackage":"1.16.0.0.1"'* ]]
+    # created* is replayed as it was, not restamped with the running build
+    [[ "$m" != *'"keelson.pro/createdByVersion":"1.43"'* ]]
+}
+
+@test "provenance: the data payload is unaffected" {
+    install_default_kubectl
+    state_init
+    state_set_trigger_field CronJob ops backup triggered-at now
+    local m
+    m=$(state_build_manifest)
+    [[ "$m" == *'"data":{'* ]]
+    [[ "$m" == *'j--CronJob--ops--backup'* ]]
+}
+
+@test "provenance: a missing version is recorded as unknown, not empty" {
+    install_default_kubectl
+    unset KEELSON_VERSION KEELSON_PACKAGE_VERSION
+    state_init
+    [[ "$(cat "$TMP_DIR/cm-applied.json")" == *'"keelson.pro/createdByVersion":"unknown"'* ]]
+}
+
+@test "provenance: the ledger is created server-side under our field manager" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMP_DIR/kubectl.args"
+case "$1" in
+    get)   exit 1 ;;
+    apply) cat >/dev/null; exit 0 ;;
+esac
+exit 0
+SH
+    state_init || true
+    grep -q -- '--server-side' "$TMP_DIR/kubectl.args"
+    grep -q -- '--field-manager=keelson' "$TMP_DIR/kubectl.args"
+}
+
+@test "provenance: conflicts are forced" {
+    # The ledger is wholly Keelson's. If something else has taken a field we
+    # take it back rather than stopping: a conflict is not a reason to give up
+    # on keeping correct state.
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMP_DIR/kubectl.args"
+case "$1" in
+    get)   exit 1 ;;
+    apply) cat >/dev/null; exit 0 ;;
+esac
+exit 0
+SH
+    state_init || true
+    grep -q -- '--force-conflicts' "$TMP_DIR/kubectl.args"
+}
+
+@test "provenance: a failed create is reported, not silent" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+    apply) cat >/dev/null ;;
+esac
+exit 1
+SH
+    run emit state_init
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Could not create state ConfigMap"* ]]
+}
+
+@test "provenance: a flush keeps the same field manager as the create" {
+    install_default_kubectl
+    state_init
+    state_set_trigger_field CronJob ops backup triggered-at now
+    state_flush
+    grep -q -- '--field-manager=keelson' "$TMP_DIR/kubectl.log"
+}
+
+@test "provenance: the flush applies the whole ledger, server-side" {
+    install_default_kubectl
+    state_init
+    state_set_trigger_field CronJob ops backup triggered-at now
+    state_flush
+    grep -q -- '--server-side' "$TMP_DIR/kubectl.log"
+    ! grep -q -- '--type=merge' "$TMP_DIR/kubectl.log"
+}
+
+@test "flush: refused outright when the ledger was never loaded" {
+    # Apply removes what it omits, so writing the whole of a cache we never
+    # filled would erase the ledger and re-fire every CronJob gate in it.
+    install_default_kubectl
+    state_init
+    state_set_trigger_field CronJob ops backup triggered-at now
+    STATE_LOADED=0
+    run emit state_flush
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"never loaded"* ]]
+}
+
+@test "flush: a refusal keeps the dirty set for a later attempt" {
+    install_default_kubectl
+    state_init
+    state_set_trigger_field CronJob ops backup triggered-at now
+    STATE_LOADED=0
+    state_flush 2>/dev/null || true
+    [ "${#STATE_DIRTY[@]}" -gt 0 ]
+}
+
+@test "provenance: createdAt survives many writes unchanged" {
+    # It is minted once, in the shell that loads. state_apply pipes into
+    # kubectl and a pipeline is a subshell, so a stamp minted inside one
+    # would be lost and restamped with the running build on every write.
+    install_default_kubectl
+    KEELSON_VERSION=1.42 state_init
+    local first
+    first=$(state_build_manifest | yq -p=json -r '.metadata.annotations["keelson.pro/createdAt"]')
+    state_set_trigger_field CronJob ops backup triggered-at a
+    KEELSON_VERSION=1.99 state_flush
+    state_set_trigger_field CronJob ops backup triggered-at b
+    KEELSON_VERSION=2.00 state_flush
+    local last
+    last=$(state_build_manifest | yq -p=json -r '.metadata.annotations["keelson.pro/createdAt"]')
+    [ "$last" = "$first" ]
+    [ -n "$last" ]
+}
+
+@test "provenance: createdByVersion is the build that made it, not the one writing" {
+    install_default_kubectl
+    KEELSON_VERSION=1.42 KEELSON_PACKAGE_VERSION=1.15.1.36.1 state_init
+    state_set_trigger_field CronJob ops backup triggered-at a
+    local m
+    m=$(KEELSON_VERSION=9.99 KEELSON_PACKAGE_VERSION=9.9.9.9.9 state_build_manifest)
+    [[ "$m" == *'"keelson.pro/createdByVersion":"1.42"'* ]]
+    [[ "$m" == *'"keelson.pro/updatedByVersion":"9.99"'* ]]
+}
+
+@test "provenance: a ledger written before the annotations existed gets a stamp" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+case "$1 ${2:-}" in
+    "get configmap")
+        # A heredoc, not printf: printf eats the backslashes and emits
+        # invalid JSON.
+        cat <<'JSON'
+{"metadata":{"annotations":{}},"data":{"j--CronJob--ops--b":"{\"triggered-at\":\"x\"}"}}
+JSON
+        exit 0 ;;
+    "apply "*) cat >/dev/null; exit 0 ;;
+esac
+exit 0
+SH
+    state_init
+    [ -n "$STATE_CREATED_AT" ]
+    [[ "$(state_build_manifest)" == *'"keelson.pro/createdAt":"20'* ]]
+}
+
+# --- one writer ---
+#
+# A server-side apply sends the whole ledger. Two processes applying
+# concurrently would each drop what the other had just written, and a dropped
+# CronJob trigger record re-fires a Job that already ran. So children spool
+# and exactly one process replays and writes.
+
+@test "spool: a mutation is recorded for the writer" {
+    state_set_trigger_field CronJob ops backup triggered-at now
+    state_spool_commit
+    [ "$(ls "$KEELSON_STATE_SPOOL_DIR" | wc -l | tr -d ' ')" -eq 1 ]
+}
+
+@test "spool: nothing to say writes no file" {
+    state_spool_commit
+    [ "$(ls "$KEELSON_STATE_SPOOL_DIR" | wc -l | tr -d ' ')" -eq 0 ]
+}
+
+@test "spool: draining replays a set into the cache" {
+    ( state_set_trigger_field CronJob ops backup triggered-at v1
+      state_spool_commit ) 
+    state_drain_spool
+    [ "$(state_get_trigger_field CronJob ops backup triggered-at)" = "v1" ]
+}
+
+@test "spool: draining replays a forget" {
+    state_set_trigger_field CronJob ops backup triggered-at v1
+    STATE_SPOOL=""
+    ( state_forget "$(state_trigger_key CronJob ops backup)"
+      state_spool_commit )
+    state_drain_spool
+    [ -z "$(state_get_trigger_field CronJob ops backup triggered-at)" ]
+    [ -z "${STATE_KEYS[j--CronJob--ops--backup]:-}" ]
+}
+
+@test "spool: draining marks the key dirty so it gets written" {
+    ( state_set_trigger_field CronJob ops backup triggered-at v1
+      state_spool_commit )
+    STATE_DIRTY=()
+    state_drain_spool
+    [ -n "${STATE_DIRTY[j--CronJob--ops--backup]:-}" ]
+}
+
+@test "spool: an empty spool reports nothing to do" {
+    run state_drain_spool
+    [ "$status" -ne 0 ]
+}
+
+@test "spool: a non-empty spool reports work" {
+    ( state_set_trigger_field CronJob ops backup triggered-at v1
+      state_spool_commit )
+    run state_drain_spool
+    [ "$status" -eq 0 ]
+}
+
+@test "spool: draining removes what it replayed" {
+    ( state_set_trigger_field CronJob ops backup triggered-at v1
+      state_spool_commit )
+    state_drain_spool
+    [ "$(ls "$KEELSON_STATE_SPOOL_DIR" | wc -l | tr -d ' ')" -eq 0 ]
+}
+
+@test "spool: two children do not collide, and neither is lost" {
+    # The regression this replaces: both applied the whole ledger from their
+    # own stale copy, so whichever wrote second erased the other's key.
+    ( state_set_trigger_field CronJob ops one triggered-at a
+      state_spool_commit )
+    ( state_set_trigger_field CronJob ops two triggered-at b
+      state_spool_commit )
+    [ "$(ls "$KEELSON_STATE_SPOOL_DIR" | wc -l | tr -d ' ')" -eq 2 ]
+    state_drain_spool
+    [ "$(state_get_trigger_field CronJob ops one triggered-at)" = "a" ]
+    [ "$(state_get_trigger_field CronJob ops two triggered-at)" = "b" ]
+}
+
+@test "spool: a value containing the separator survives" {
+    ( state_set_trigger_field CronJob ops backup triggered-at 'a|b|c'
+      state_spool_commit )
+    state_drain_spool
+    [ "$(state_get_trigger_field CronJob ops backup triggered-at)" = 'a|b|c' ]
+}
+
+@test "spool: a half-written file is never read" {
+    # Written to a temp name and renamed, so the writer sees all of it or none.
+    printf 'S|j--CronJob--ops--x|triggered-at|partial' > "$KEELSON_STATE_SPOOL_DIR/.999.tmp"
+    run state_drain_spool
+    [ "$status" -ne 0 ]
+    [ -z "$(state_get_trigger_field CronJob ops x triggered-at)" ]
 }

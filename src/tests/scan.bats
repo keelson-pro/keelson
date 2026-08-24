@@ -62,6 +62,11 @@ setup() {
     source "$SCRIPT_DIR/lib/scan.bash"
 
     KEELSON_INVENTORY_DIR="$TMP_DIR/inventory"
+    KEELSON_FIRST_POLL_DELAY_MAX=300
+    KEELSON_REGISTRY_POLL_CONCURRENCY=2
+    KEELSON_POLL_TALLY_FILE="$TMP_DIR/poll-tally"
+    export KEELSON_POLL_TALLY_FILE
+    export KEELSON_FIRST_POLL_DELAY_MAX KEELSON_REGISTRY_POLL_CONCURRENCY
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
     KEELSON_RECONCILE_INTERVAL=60
     export KEELSON_RECONCILE_INTERVAL
@@ -459,7 +464,7 @@ SH
 # from one pass is always enough.
 
 @test "inventory: a scan with no inventory directory touches nothing" {
-    # keelson-boot-scan run outside a controller pod has no inventory to keep.
+    # keelson-user-recheck run outside a controller pod has no inventory to keep.
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
     scan_run 0 2>/dev/null
     [ ! -d "$KEELSON_INVENTORY_DIR" ]
@@ -681,6 +686,7 @@ SH
 }
 
 @test "inventory: an evicted workload is forgotten in the ledger too" {
+    local due=$(( $(date -u +%s) + 30 ))
     # Otherwise a CronJob's trigger entry outlives the CronJob and the state
     # ConfigMap only ever grows.
     inventory_init
@@ -689,7 +695,9 @@ SH
 
     kubectl_returns '{"items": []}'
     scan_run 0 2>/dev/null
-    [ -n "${STATE_DELETED[j--Deployment--default--app]:-}" ]
+    # Apply removes what it omits, so a forgotten key is one that has left
+    # the cache rather than one carrying a deletion marker.
+    [ -z "${STATE_KEYS[j--Deployment--default--app]:-}" ]
 }
 
 # --- next-due drives the registry, not the scan ---
@@ -815,7 +823,8 @@ SH
     kubectl_returns "$(deployment_with_schedule ghcr.io/x/y:1.0 1d)"
     scan_run 0 0 2>/dev/null
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" -gt "$(( $(date -u +%s) + 1000 ))" ]
+    # A day's schedule, but the first poll is capped, so it is not yet due.
+    [ "$INVENTORY_NEXT_DUE" -gt "$(date -u +%s)" ]
 
     kubectl_returns "$(deployment_with_schedule ghcr.io/x/y:2.0 1d)"
     scan_run 0 0 2>/dev/null
@@ -824,11 +833,12 @@ SH
 }
 
 @test "resync: an annotation change makes the workload due now" {
+    local due=$(( $(date -u +%s) + 30 ))
     # The watch stream cannot see these at all, so only the scan can.
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
     scan_run 0 0 2>/dev/null
-    inventory_set_next_due Deployment default app 4242424242
+    inventory_set_next_due Deployment default app "$due"
 
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 patch)"
     scan_run 0 0 2>/dev/null
@@ -840,11 +850,12 @@ SH
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
     scan_run 0 0 2>/dev/null
-    inventory_set_next_due Deployment default app 4242424242
+    local due=$(( $(date -u +%s) + 30 ))
+    inventory_set_next_due Deployment default app "$due"
 
     scan_run 0 0 2>/dev/null
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "4242424242" ]
+    [ "$INVENTORY_NEXT_DUE" = "$due" ]
 }
 
 @test "resync: it says so, so an operator knows the watch missed something" {
@@ -858,28 +869,30 @@ SH
 
 # --- schedules survive a restart ---
 #
-# The cache is derived and dies with the pod; the ledger does not. A restart
-# must resume each workload's place in its cycle rather than making every
-# watched workload due at once.
+# The cache dies with the pod. The schedule is derived from the identity, so a
+# cold start spreads the estate without persisting anything; the ledger only
+# records that Keelson has seen the workload.
 
-@test "restart: a new cache entry resumes a persisted next-due" {
+@test "restart: a cold cache derives its offset inside the window" {
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
-    state_set_next_due Deployment default app 4242424242
+    local before=$(date -u +%s)
     scan_run 0 0 2>/dev/null
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "4242424242" ]
+    [ "$INVENTORY_NEXT_DUE" -ge "$before" ]
+    [ "$INVENTORY_NEXT_DUE" -le "$(( before + 60 ))" ]
 }
 
-@test "restart: with nothing persisted it takes a fresh offset and records it" {
+@test "restart: a cold cache records the workload in the ledger" {
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
     scan_run 0 0 2>/dev/null
-    inventory_get Deployment default app
-    [ "$(state_get_next_due Deployment default app)" = "$INVENTORY_NEXT_DUE" ]
+    [ -n "$(state_get w--Deployment--default--app first-seen)" ]
 }
 
-@test "poll: the new next-due is written back to the ledger" {
+@test "poll: polling writes nothing to the ledger" {
+    # The whole point: a next-due written per poll was a ConfigMap patch per
+    # tick once workloads actually came due.
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
     scan_run 0 0 2>/dev/null
@@ -887,9 +900,10 @@ SH
 #!/usr/bin/env bash
 printf '{"Tags":["1.2.3"]}'
 SH
+    STATE_DIRTY=()
     scan_poll_due 0 "$LATE" 2>/dev/null
+    [ "${#STATE_DIRTY[@]}" -eq 0 ]
     inventory_get Deployment default app
-    [ "$(state_get_next_due Deployment default app)" = "$INVENTORY_NEXT_DUE" ]
     [ "$INVENTORY_NEXT_DUE" -gt "$LATE" ]
 }
 
@@ -899,12 +913,12 @@ SH
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
     scan_run 0 0 2>/dev/null
-    [ -n "$(state_get_next_due Deployment default app)" ]
+    [ -n "$(state_get w--Deployment--default--app first-seen)" ]
 
     kubectl_returns '{"items": []}'
     scan_run 0 0 2>/dev/null
-    [ -z "$(state_get_next_due Deployment default app)" ]
-    [ -n "${STATE_DELETED[s--Deployment--default--app]:-}" ]
+    [ -z "$(state_get w--Deployment--default--app first-seen)" ]
+    [ -z "${STATE_KEYS[w--Deployment--default--app]:-}" ]
 }
 
 # --- the queued re-read: what a watch event actually turns into ---
@@ -952,6 +966,7 @@ SH
 }
 
 @test "queue refresh: a changed annotation brings the poll forward" {
+    local due=$(( $(date -u +%s) + 30 ))
     # The case the whole re-read exists for: nothing about the image moved,
     # but the decision Keelson would make did.
     inventory_init
@@ -960,7 +975,7 @@ SH
     queue_enqueue Deployment default app
     scan_refresh_queued 0 2>/dev/null
     inventory_get Deployment default app
-    inventory_set_next_due Deployment default app 9999999999
+    inventory_set_next_due Deployment default app "$due"
 
     kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' major)"
     queue_enqueue Deployment default app
@@ -971,6 +986,7 @@ SH
 }
 
 @test "queue refresh: an unchanged workload keeps its schedule" {
+    local due=$(( $(date -u +%s) + 30 ))
     # Status churn is most of what a watch delivers and must cost nothing
     # beyond the read itself.
     inventory_init
@@ -978,12 +994,12 @@ SH
     kubectl_returns "$(single_deployment_json 'ghcr.io/x/y:1.0' minor)"
     queue_enqueue Deployment default app
     scan_refresh_queued 0 2>/dev/null
-    inventory_set_next_due Deployment default app 9999999999
+    inventory_set_next_due Deployment default app "$due"
 
     queue_enqueue Deployment default app
     scan_refresh_queued 0 2>/dev/null
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "9999999999" ]
+    [ "$INVENTORY_NEXT_DUE" = "$due" ]
 }
 
 @test "queue refresh: a workload that has gone is left for the delete event" {
@@ -1033,7 +1049,8 @@ deployment_with_init_json() {
       "metadata": {
         "namespace": "default",
         "name": "app",
-        "annotations": {"keelson.pro/policy": "$policy"}
+        "annotations": {"keelson.pro/policy": "$policy",
+                        "keelson.pro/initContainers": "true"}
       },
       "spec": {
         "template": {
@@ -1066,15 +1083,16 @@ JSON
 }
 
 @test "init containers: a reschedule does not lose which list a container is in" {
+    local due=$(( $(date -u +%s) + 30 ))
     # Dropping the list here would change the fingerprint, and a record that
     # fingerprints differently after a plain reschedule resyncs forever.
     inventory_init
     kubectl_returns "$(deployment_with_init_json ghcr.io/x/y:1.2.3 ghcr.io/x/m:1.4.0)"
     scan_run 0 0 2>/dev/null
-    inventory_set_next_due Deployment default app 4242424242
+    inventory_set_next_due Deployment default app "$due"
     scan_run 0 0 2>/dev/null
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "4242424242" ]
+    [ "$INVENTORY_NEXT_DUE" = "$due" ]
     [ "${INVENTORY_CONTAINER_LISTS[1]}" = "initContainers" ]
 }
 
@@ -1103,7 +1121,7 @@ case "$1" in
     patch|apply) exit 0 ;;
 esac
 cat <<'JSON'
-{"items":[{"metadata":{"namespace":"default","name":"app","annotations":{"keelson.pro/policy":"minor"}},"spec":{"template":{"spec":{"initContainers":[{"name":"migrate","image":"ghcr.io/x/m:1.4.0"}],"containers":[{"name":"main","image":"ghcr.io/x/y:1.2.3"}]}}}}]}
+{"items":[{"metadata":{"namespace":"default","name":"app","annotations":{"keelson.pro/policy":"minor","keelson.pro/initContainers":"true"}},"spec":{"template":{"spec":{"initContainers":[{"name":"migrate","image":"ghcr.io/x/m:1.4.0"}],"containers":[{"name":"main","image":"ghcr.io/x/y:1.2.3"}]}}}}]}
 JSON
 SH
     scan_run 1 2>/dev/null
@@ -1121,6 +1139,7 @@ SH
         "name": "app",
         "annotations": {
           "keelson.pro/policy": "minor",
+          "keelson.pro/initContainers": "true",
           "keelson.pro/policy.migrate": "never"
         }
       },
@@ -1335,6 +1354,7 @@ SH
 }
 
 @test "own update: the re-read that follows it does not resync" {
+    local due=$(( $(date -u +%s) + 30 ))
     # Keelson's patch fires a watch event like anyone else's. Without the
     # record being updated, the re-read reports a change and asks the registry
     # a question it has just answered.
@@ -1346,7 +1366,7 @@ SH
 printf '{"Tags":["1.2.3","1.3.0"]}'
 SH
     scan_run 1 2>/dev/null
-    inventory_set_next_due Deployment default app 9999999999
+    inventory_set_next_due Deployment default app "$due"
 
     # The cluster now serves what we just applied, as it would to the re-read.
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.3.0 minor)"
@@ -1354,7 +1374,7 @@ SH
     run emit scan_refresh_queued 1
     [[ "$output" != *"scan-resync"* ]]
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "9999999999" ]
+    [ "$INVENTORY_NEXT_DUE" = "$due" ]
 }
 
 # --- annotations Keelson does not read must not drive its decisions ---
@@ -1387,26 +1407,28 @@ JSON
 }
 
 @test "resync: someone else's annotation changing is not a decision change" {
+    local due=$(( $(date -u +%s) + 30 ))
     # Patching a Deployment makes its own controller bump
     # deployment.kubernetes.io/revision, so Keelson's own update read back as
     # a change and asked the registry a question it had just answered.
     inventory_init
     kubectl_returns "$(deployment_with_foreign_annotation ghcr.io/x/y:1.2.3 minor 1)"
     scan_run 0 0 2>/dev/null
-    inventory_set_next_due Deployment default app 9999999999
+    inventory_set_next_due Deployment default app "$due"
 
     kubectl_returns "$(deployment_with_foreign_annotation ghcr.io/x/y:1.2.3 minor 2)"
     run emit scan_run 0 0
     [[ "$output" != *"scan-resync"* ]]
     inventory_get Deployment default app
-    [ "$INVENTORY_NEXT_DUE" = "9999999999" ]
+    [ "$INVENTORY_NEXT_DUE" = "$due" ]
 }
 
 @test "resync: a Keelson annotation changing still is one" {
+    local due=$(( $(date -u +%s) + 30 ))
     inventory_init
     kubectl_returns "$(deployment_with_foreign_annotation ghcr.io/x/y:1.2.3 minor 1)"
     scan_run 0 0 2>/dev/null
-    inventory_set_next_due Deployment default app 9999999999
+    inventory_set_next_due Deployment default app "$due"
 
     kubectl_returns "$(deployment_with_foreign_annotation ghcr.io/x/y:1.2.3 major 1)"
     run emit scan_run 0 0
@@ -1682,4 +1704,375 @@ CRONJOB_LIST='{"items":[
     scan_extract_workload "$EXTRACT_LIST" Deployment 0
     [[ "$SCAN_WL_ANNOTATIONS" != *"containers "* ]]
     [[ "$SCAN_WL_CONTAINER_PAIRS" != *"keelson.pro/"* ]]
+}
+
+# --- an implausible next-due is corrupt, not a schedule ---
+#
+# No writer can put next-due beyond now + interval. Anything further out is
+# corrupt, and nothing corrects it on its own: inventory_due never selects a
+# far-future entry, so the workload is silently never polled again, across
+# restarts. Seen in the wild with 49 of 50 entries sat 69 days out.
+
+@test "clamp: a far-future cached next-due is recomputed" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 4242424242
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" -le "$(( $(date -u +%s) + 60 ))" ]
+}
+
+@test "clamp: correcting it writes nothing to the ledger" {
+    # The ledger carries no next-due at all now, so a correction is a cache
+    # repair and nothing else.
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 4242424242
+    STATE_DIRTY=()
+    scan_run 0 0 2>/dev/null
+    [ "${#STATE_DIRTY[@]}" -eq 0 ]
+}
+
+@test "clamp: it warns, because it should never happen" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 4242424242
+    run emit scan_run 0 0
+    [[ "$output" == *"next-due-implausible"* ]]
+}
+
+@test "clamp: exactly one interval out is left alone" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    local due=$(( $(date -u +%s) + 60 ))
+    inventory_set_next_due Deployment default app "$due"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "$due" ]
+}
+
+@test "clamp: a non-numeric next-due is corrupt too" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app "not-a-number"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" -le "$(( $(date -u +%s) + 60 ))" ]
+}
+
+# --- the ledger records whether Keelson is acting on a workload ---
+#
+# A workload carrying no Keelson annotation at all: catalogued, not acted on.
+deployment_no_annotations() {
+    cat <<JSON
+{
+  "items": [
+    {
+      "metadata": { "namespace": "default", "name": "app" },
+      "spec": { "template": { "spec": { "containers": [
+        { "name": "main", "image": "$1" }
+      ] } } }
+    }
+  ]
+}
+JSON
+}
+
+#
+# managed=false on a workload someone annotated is the interesting line: a
+# keel.sh/ policy under config-mode=keelson, or a match-tag with no policy,
+# are both silent misconfigurations otherwise.
+
+@test "record: an annotated workload is recorded as managed" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    [ "$(state_get w--Deployment--default--app managed)" = "true" ]
+}
+
+@test "record: an unannotated workload is recorded as not managed" {
+    inventory_init
+    kubectl_returns "$(deployment_no_annotations ghcr.io/x/y:1.0)"
+    scan_run 0 0 2>/dev/null
+    [ "$(state_get w--Deployment--default--app managed)" = "false" ]
+}
+
+@test "record: annotating a cached workload flips it" {
+    inventory_init
+    kubectl_returns "$(deployment_no_annotations ghcr.io/x/y:1.0)"
+    scan_run 0 0 2>/dev/null
+    [ "$(state_get w--Deployment--default--app managed)" = "false" ]
+
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    [ "$(state_get w--Deployment--default--app managed)" = "true" ]
+}
+
+@test "record: an unchanged workload writes nothing" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    STATE_DIRTY=()
+    scan_run 0 0 2>/dev/null
+    [ "${#STATE_DIRTY[@]}" -eq 0 ]
+}
+
+@test "record: first-seen survives a later pass unchanged" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    local first
+    first=$(state_get w--Deployment--default--app first-seen)
+    [ -n "$first" ]
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:2.0 patch)"
+    scan_run 0 0 2>/dev/null
+    [ "$(state_get w--Deployment--default--app first-seen)" = "$first" ]
+}
+
+# --- the trigger record is the image set, not a timestamp ---
+#
+# A CronJob can carry several containers. Recording one image left the others
+# undefined: updating container A and then container B compared against
+# whichever happened to have been written.
+
+cronjob_two_containers() {
+    cat <<JSON
+{
+  "items": [
+    {
+      "metadata": { "namespace": "ops", "name": "reindex",
+        "annotations": { "keelson.pro/policy": "minor",
+                         "keelson.pro/trigger-job-on-update": "true" } },
+      "spec": { "suspend": true, "jobTemplate": { "spec": { "template": { "spec": {
+        "initContainers": [ { "name": "wait-db", "image": "$2" } ],
+        "containers": [ { "name": "reindex", "image": "$1" } ]
+      } } } } }
+    }
+  ]
+}
+JSON
+}
+
+@test "trigger record: every container's image is recorded, init included" {
+    inventory_init
+    kubectl_returns "$(cronjob_two_containers ghcr.io/x/re:1.0 ghcr.io/x/wait:2.0)"
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 1 2>/dev/null || true
+    [ "$(state_get_trigger_field CronJob ops reindex 'containers/reindex')" = "ghcr.io/x/re:1.0" ]
+    [ "$(state_get_trigger_field CronJob ops reindex 'initContainers/wait-db')" = "ghcr.io/x/wait:2.0" ]
+}
+
+@test "trigger record: triggered-at is written, triggered-job is not" {
+    inventory_init
+    kubectl_returns "$(cronjob_two_containers ghcr.io/x/re:1.0 ghcr.io/x/wait:2.0)"
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 1 2>/dev/null || true
+    [ -n "$(state_get_trigger_field CronJob ops reindex triggered-at)" ]
+    [ -z "$(state_get_trigger_field CronJob ops reindex triggered-job)" ]
+}
+
+@test "trigger: an unchanged image set does not re-fire" {
+    inventory_init
+    kubectl_returns "$(cronjob_two_containers ghcr.io/x/re:1.0 ghcr.io/x/wait:2.0)"
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 1 2>/dev/null || true
+    : > "$TMP_DIR/kubectl.log"
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 1 2>/dev/null || true
+    ! grep -q "create job" "$TMP_DIR/kubectl.log"
+}
+
+@test "trigger: a third party changing the image does not fire" {
+    # It moves the baseline the next poll compares against; it is not an event
+    # Keelson acts on. Only our own update fires a Job.
+    inventory_init
+    kubectl_returns "$(cronjob_two_containers ghcr.io/x/re:1.0 ghcr.io/x/wait:2.0)"
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 1 2>/dev/null || true
+    : > "$TMP_DIR/kubectl.log"
+    kubectl_returns "$(cronjob_two_containers ghcr.io/x/re:9.9 ghcr.io/x/wait:2.0)"
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 1 2>/dev/null || true
+    ! grep -q "create job" "$TMP_DIR/kubectl.log"
+}
+
+# --- which containers are in scope ---
+#
+# keel defaults initContainers to false and Keelson tracks them always, so the
+# default follows the contract the mode is honouring. monitorContainers is
+# keel's regex over container names, empty meaning all.
+
+@test "monitored: init containers are out of scope by default" {
+    KEELSON_CONFIG_MODE=keelson
+    ! scan_container_monitored 'keelson.pro/policy=minor' initContainers migrate
+}
+
+@test "monitored: the default is the same under keel mode" {
+    KEELSON_CONFIG_MODE=keel
+    ! scan_container_monitored 'keel.sh/policy=minor' initContainers migrate
+}
+
+@test "monitored: keel mode still tracks ordinary containers" {
+    KEELSON_CONFIG_MODE=keel
+    scan_container_monitored 'keel.sh/policy=minor' containers web
+}
+
+@test "monitored: keel mode honours an explicit opt-in" {
+    KEELSON_CONFIG_MODE=keel
+    scan_container_monitored 'keel.sh/policy=minor
+keel.sh/initContainers=true' initContainers migrate
+}
+
+@test "monitored: keelson mode honours an explicit opt-in" {
+    KEELSON_CONFIG_MODE=keelson
+    scan_container_monitored 'keelson.pro/policy=minor
+keelson.pro/initContainers=true' initContainers migrate
+}
+
+@test "monitored: a non-true value leaves them out of scope" {
+    KEELSON_CONFIG_MODE=keelson
+    ! scan_container_monitored 'keelson.pro/initContainers=yes' initContainers migrate
+    ! scan_container_monitored 'keelson.pro/initContainers=' initContainers migrate
+}
+
+@test "monitored: an empty monitorContainers means all" {
+    KEELSON_CONFIG_MODE=keelson
+    scan_container_monitored 'keelson.pro/policy=minor' containers anything
+}
+
+@test "monitored: the regex selects by container name" {
+    KEELSON_CONFIG_MODE=keelson
+    scan_container_monitored 'keelson.pro/monitorContainers=^web$' containers web
+    ! scan_container_monitored 'keelson.pro/monitorContainers=^web$' containers sidecar
+}
+
+@test "monitored: an unusable regex monitors nothing, and says so" {
+    KEELSON_CONFIG_MODE=keelson
+    run emit scan_container_monitored 'keelson.pro/monitorContainers=[unclosed' containers web
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a usable regular expression"* ]]
+}
+
+@test "monitored: an init container is never polled without an opt-in" {
+    inventory_init
+    kubectl_returns '{"items":[{"metadata":{"namespace":"default","name":"app",
+      "annotations":{"keelson.pro/policy":"minor"}},
+      "spec":{"template":{"spec":{
+        "initContainers":[{"name":"migrate","image":"ghcr.io/x/init:1.0.0"}],
+        "containers":[{"name":"web","image":"ghcr.io/x/y:1.2.3"}]}}}}]}'
+    skopeo_counting
+    scan_run 0 1 2>/dev/null
+    # Only the app container reaches a registry; the init container is skipped
+    # before eligibility, so it costs no network call at all.
+    [ "$(skopeo_call_count)" = "1" ]
+}
+
+@test "monitored: both are polled when init containers are in scope" {
+    inventory_init
+    kubectl_returns '{"items":[{"metadata":{"namespace":"default","name":"app",
+      "annotations":{"keelson.pro/policy":"minor","keelson.pro/initContainers":"true"}},
+      "spec":{"template":{"spec":{
+        "initContainers":[{"name":"migrate","image":"ghcr.io/x/init:1.0.0"}],
+        "containers":[{"name":"web","image":"ghcr.io/x/y:1.2.3"}]}}}}]}'
+    skopeo_counting
+    scan_run 0 1 2>/dev/null
+    [ "$(skopeo_call_count)" = "2" ]
+}
+
+@test "monitored: the regex keeps an unmatched container off the network" {
+    inventory_init
+    kubectl_returns '{"items":[{"metadata":{"namespace":"default","name":"app",
+      "annotations":{"keelson.pro/policy":"minor","keelson.pro/monitorContainers":"^web$"}},
+      "spec":{"template":{"spec":{
+        "containers":[{"name":"web","image":"ghcr.io/x/y:1.2.3"},
+                      {"name":"sidecar","image":"ghcr.io/x/s:1.2.3"}]}}}}]}'
+    skopeo_counting
+    scan_run 0 1 2>/dev/null
+    [ "$(skopeo_call_count)" = "1" ]
+}
+
+# --- the poll runs registry checks concurrently ---
+#
+# A registry check is about two seconds of waiting for sixty milliseconds of
+# work, so a serial loop spent nearly all its time doing nothing.
+
+poll_fixture_n() {
+    local n=$1 items="" i
+    for (( i = 1; i <= n; i++ )); do
+        [ -n "$items" ] && items="$items,"
+        items="$items{\"metadata\":{\"namespace\":\"default\",\"name\":\"app$i\",
+          \"annotations\":{\"keelson.pro/policy\":\"minor\"}},
+          \"spec\":{\"template\":{\"spec\":{\"containers\":[
+            {\"name\":\"main\",\"image\":\"ghcr.io/x/y$i:1.2.3\"}]}}}}"
+    done
+    printf '{"items":[%s]}' "$items"
+}
+
+# skopeo that records overlap: how many were running at once.
+install_overlap_skopeo() {
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+d="$TMP_DIR/inflight"; mkdir -p "$d"
+touch "$d/$$"
+n=$(ls "$d" | wc -l | tr -d ' ')
+echo "$n" >> "$TMP_DIR/overlap"
+sleep 0.3
+rm -f "$d/$$"
+printf '{"Tags":["1.2.3"]}'
+SH
+}
+
+@test "poll concurrency: more than one registry check runs at a time" {
+    inventory_init
+    kubectl_returns "$(poll_fixture_n 6)"
+    scan_run 0 0 2>/dev/null
+    install_overlap_skopeo
+    KEELSON_REGISTRY_POLL_CONCURRENCY=3 scan_poll_due 0 "$LATE" 2>/dev/null
+    local peak
+    peak=$(sort -n "$TMP_DIR/overlap" | tail -1)
+    [ "$peak" -gt 1 ]
+}
+
+@test "poll concurrency: never more at once than configured" {
+    inventory_init
+    kubectl_returns "$(poll_fixture_n 6)"
+    scan_run 0 0 2>/dev/null
+    install_overlap_skopeo
+    KEELSON_REGISTRY_POLL_CONCURRENCY=2 scan_poll_due 0 "$LATE" 2>/dev/null
+    local peak
+    peak=$(sort -n "$TMP_DIR/overlap" | tail -1)
+    [ "$peak" -le 2 ]
+}
+
+@test "poll concurrency: one at a time is still allowed" {
+    inventory_init
+    kubectl_returns "$(poll_fixture_n 4)"
+    scan_run 0 0 2>/dev/null
+    install_overlap_skopeo
+    KEELSON_REGISTRY_POLL_CONCURRENCY=1 scan_poll_due 0 "$LATE" 2>/dev/null
+    local peak
+    peak=$(sort -n "$TMP_DIR/overlap" | tail -1)
+    [ "$peak" -eq 1 ]
+}
+
+@test "poll concurrency: every workload is still polled" {
+    inventory_init
+    kubectl_returns "$(poll_fixture_n 6)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    KEELSON_REGISTRY_POLL_CONCURRENCY=3 scan_poll_due 0 "$LATE" 2>/dev/null
+    [ "$(skopeo_call_count)" = "6" ]
+}
+
+@test "poll concurrency: the summary counts work done in the children" {
+    # The counters are locals, so they die with each child. Without adding up
+    # what they report the summary says zero however much was done.
+    inventory_init
+    kubectl_returns "$(poll_fixture_n 5)"
+    scan_run 0 0 2>/dev/null
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3"]}'
+SH
+    run emit scan_poll_due 0 "$LATE"
+    [[ "$output" == *'"resources":"5"'* ]]
 }

@@ -256,6 +256,12 @@ log_file_rotate() {
 #
 # THE ONLY CALLER IS THE CONTROLLER LOOP, once per tick. Do not call this
 # from the write path: see the note above log_file_write.
+# How often the controller bothers asking the file's size. A 10MB cap against
+# a few KB/s of logging makes the answer change about once an hour, and asking
+# costs a wc fork because bash cannot stat. At a 1s tick, asking every tick is
+# 3600 forks an hour to learn nothing 3599 times.
+LOG_FILE_ROTATE_CHECK_INTERVAL=60
+
 log_file_rotate_if_needed() {
     local max=${KEELSON_LOG_FILE_MAX_BYTES:-10485760}
     [ -f "$KEELSON_LOG_FILE_PATH" ] || return 0

@@ -129,8 +129,15 @@ inventory_hash() {
 # Derived from the name rather than stored or randomised, so it is stable
 # across restarts and needs no state of its own.
 inventory_first_due() {
+    local window=$4
+    local cap=${KEELSON_FIRST_POLL_DELAY_MAX:?KEELSON_FIRST_POLL_DELAY_MAX required}
+    # The offset spreads workloads so a restart does not poll the estate at
+    # once. Capping it also bounds the wait: without this a poll-schedule of
+    # @every 24h averages twelve hours out on a cold start, so a pod that
+    # restarts more often than that would never poll the workload at all.
+    [ "$window" -gt "$cap" ] && window=$cap
     inventory_hash "$1 $2 $3"
-    INVENTORY_FIRST_DUE=$(( $5 + INVENTORY_HASH % $4 ))
+    INVENTORY_FIRST_DUE=$(( $5 + INVENTORY_HASH % window ))
 }
 
 # inventory_fingerprint <interval> <suspend> <sa> <ips> <annotations>

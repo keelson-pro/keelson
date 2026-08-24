@@ -8,7 +8,7 @@
 | `keelson` | Long-running controller. The Deployment's `command`. | Forever (until SIGTERM). |
 | `keelson-probe` | Kubernetes probe — `startup`, `readiness`, `liveness`. | Exits after one decision. |
 | `keelson-validate` | Boot-time config and dependency check. | Exits after one run. |
-| `keelson-boot-scan` | One-shot scan, default dry-run. | Exits after one pass. |
+| `keelson-user-recheck` | One-shot re-check a user runs by hand, default dry-run. | Exits after one pass. |
 | `keelson-update-resource` | Patch one container's image on one workload. | Exits after one patch. |
 
 
@@ -31,10 +31,12 @@ inventory, and the status files).
    failure at once. A bad config fails the container, not the scan.
 2. Log a `boot` event and install `TERM`/`INT` traps that kill watcher PIDs
    and any in-flight scan.
-3. Initialise the work queue under `/keelson/work` and load the trigger-state
-   ConfigMap into memory (per-CronJob always-once ledger and each workload's
-   next-due, so schedules survive a restart; log dedupe is held
-   in-memory by `lib/log.bash` and does not touch the ConfigMap).
+3. Initialise the work queue under `/keelson/work` and load the state
+   ConfigMap into memory (a record per workload saying Keelson has seen it and
+   whether it is acting on it, plus the per-CronJob always-once ledger). No
+   schedule is stored: next-due is derived from a hash of the workload's
+   identity, so it is the same on every cold start. Log dedupe is held
+   in-memory by `lib/log.bash` and does not touch the ConfigMap.
 4. Enter the tick loop (`KEELSON_TICK_INTERVAL=1s`). Each tick:
    - **Publish the heartbeat.** The clock is read and written in the same
      breath, first thing, to `/keelson/work/status/heartbeat`. Written
@@ -85,14 +87,15 @@ inventory, and the status files).
      taken per tick: the cluster is listed, and only once that list is in
      hand is that kind's cache thrown away and rebuilt, so a failed list
      leaves the cache untouched and the window where those workloads are
-     invisible stays inside a single child. next-due comes back from the
-     ledger rather than the discarded file, so a refresh corrects drift
-     without resetting every schedule at once. The last kind of the cycle
+     invisible stays inside a single child. next-due is re-derived from the
+     workload's identity rather than restored, so a refresh moves each
+     workload's phase but keeps the estate spread across the interval and
+     never makes everything due at once. The last kind of the cycle
      also drops entries for kinds no longer watched and forgets ledger keys
      with no workload behind them.
 
      The controller's scan makes no registry calls of its own; that is the
-     tick's job, above. `keelson-boot-scan` is the exception, being a
+     tick's job, above. `keelson-user-recheck` is the exception, being a
      one-shot with no tick behind it, so it polls everything in the same
      pass. Otherwise the scan is the reconciler for the workload inventory under
      `/keelson/work/inventory`: it records every workload it saw, eligible or
@@ -206,7 +209,7 @@ Errors accumulate across every check so a misconfigured Pod logs the full
 list once, not one failure at a time across restarts.
 
 
-## `keelson-boot-scan` — one-shot scan
+## `keelson-user-recheck` — one-shot re-check
 
 **Invoked by:** humans, debugging from a pod shell or a Job. Not wired into
 the Deployment.
@@ -226,7 +229,7 @@ before flipping a workload to controller management.
 
 ## `keelson-update-resource` — single-workload patch
 
-**Invoked by:** the scan path inside `keelson` and `keelson-boot-scan` once
+**Invoked by:** the scan path inside `keelson` and `keelson-user-recheck` once
 a workload is found eligible. Also CLI-usable for manual overrides.
 
 **Args:** `<kind> <namespace> <name> <container> <new-image> [--init]` — the
@@ -272,7 +275,7 @@ Deployment
    ├── readinessProbe:  keelson-probe readiness   (PIDs + streaming)
    └── livenessProbe:   keelson-probe liveness    (heartbeat)
 
-humans ──► keelson-boot-scan        (same scan_run code path, no watchers)
+humans ──► keelson-user-recheck     (same scan_run code path, no watchers)
 humans ──► keelson-validate         (same checks the controller runs at boot)
 ```
 

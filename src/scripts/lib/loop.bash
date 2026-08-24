@@ -110,13 +110,10 @@ loop_supervise_watchers() {
 loop_start_scan() {
     local apply=$1
     (
-        state_load || log_warn state-reload-failed \
-            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
-            msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
         # poll-all=0: this pass refreshes the cache and evicts. Registry
         # work belongs to the due-poll above, on each workload's own cadence.
         scan_run "$apply" 0
-        [ "$apply" -eq 1 ] && { state_flush || true; }
+        [ "$apply" -eq 1 ] && { state_spool_commit || true; }
     ) &
     LOOP_SCAN_PID=$!
 }
@@ -132,11 +129,8 @@ loop_start_scan() {
 loop_start_queue_refresh() {
     local apply=$1
     (
-        state_load || log_warn state-reload-failed \
-            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
-            msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
         scan_refresh_queued "$apply"
-        [ "$apply" -eq 1 ] && { state_flush || true; }
+        [ "$apply" -eq 1 ] && { state_spool_commit || true; }
     ) &
     LOOP_QUEUE_PID=$!
 }
@@ -157,11 +151,8 @@ loop_start_queue_refresh() {
 loop_start_poll() {
     local apply=$1 now=$2
     (
-        state_load || log_warn state-reload-failed \
-            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
-            msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
         scan_poll_due "$apply" "$now"
-        [ "$apply" -eq 1 ] && { state_flush || true; }
+        [ "$apply" -eq 1 ] && { state_spool_commit || true; }
     ) &
     LOOP_POLL_PID=$!
 }
@@ -179,9 +170,6 @@ loop_start_poll() {
 loop_start_refresh() {
     local apply=$1 kind=$2 finish=$3
     (
-        state_load || log_warn state-reload-failed \
-            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
-            msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
         scan_refresh_kind "$apply" "$kind"
         if [ "$finish" -eq 1 ]; then
             inventory_evict_unwatched "$KEELSON_WATCHED_KINDS"
@@ -189,7 +177,7 @@ loop_start_refresh() {
             log_info_always full-refresh-complete kinds="$KEELSON_WATCHED_KINDS" \
                 msg="Full refresh complete: the cache was rebuilt from the cluster and the ledger reconciled against it."
         fi
-        [ "$apply" -eq 1 ] && { state_flush || true; }
+        [ "$apply" -eq 1 ] && { state_spool_commit || true; }
     ) &
     LOOP_REFRESH_PID=$!
 }
@@ -240,7 +228,7 @@ loop_run() {
 
     local tick_us=$(( tick * 1000000 ))
     local now cycle_start_us remaining_us over_us over
-    local last_scan_start=0 last_refresh iter=0
+    local last_scan_start=0 last_refresh iter=0 last_rotate_check=0
     clock_read
     last_refresh=$(( CLOCK_NOW_US / 1000000 ))
 
@@ -249,6 +237,16 @@ loop_run() {
         cycle_start_us=$CLOCK_NOW_US
         now=$(( cycle_start_us / 1000000 ))
         status_write_heartbeat "$cycle_start_us"
+
+        # The single writer. Children are subshells: they inherit this cache,
+        # spool what they change, and never touch the ConfigMap themselves.
+        # Two of them applying concurrently would each drop what the other had
+        # just written, and one dropped CronJob trigger record re-fires a Job
+        # that already ran. Drained before anything is spawned, so a child
+        # starts from a current view.
+        if [ "$apply" -eq 1 ] && state_drain_spool; then
+            state_flush || true
+        fi
 
         loop_supervise_watchers "$now" "$backoff_max" "$healthy_reset"
 
@@ -281,14 +279,21 @@ loop_run() {
             loop_start_queue_refresh "$apply"
         fi
 
-        # Every tick: what needs polling now? The cache answers without
-        # touching the cluster, so this costs nothing when nothing is due.
+        # Every tick: what needs polling now? Asked here rather than left to
+        # the child, for the same reason the queue is: the child cannot find
+        # out there is nothing to do without first loading the ledger, and
+        # loading it to learn that was the whole of this controller's idle
+        # cost. inventory_due is a glob and a builtin read per record, so
+        # asking costs nothing; spawning does.
         if [ "$LOOP_POLL_PID" -gt 0 ] && ! kill -0 "$LOOP_POLL_PID" 2>/dev/null; then
             wait "$LOOP_POLL_PID" 2>/dev/null || true
             LOOP_POLL_PID=0
         fi
         if [ "$LOOP_POLL_PID" -eq 0 ]; then
-            loop_start_poll "$apply" "$now"
+            inventory_due "$now"
+            if [ "${#INVENTORY_DUE[@]}" -gt 0 ]; then
+                loop_start_poll "$apply" "$now"
+            fi
         fi
 
         if [ "$LOOP_SCAN_PID" -gt 0 ] && ! kill -0 "$LOOP_SCAN_PID" 2>/dev/null; then
@@ -329,7 +334,13 @@ loop_run() {
         # the same file but must never rotate it; concurrent rename shuffles
         # lose rotated files. Last thing in the tick, so it accounts for
         # everything this tick logged.
-        log_file_rotate_if_needed
+        #
+        # Not every tick, though: the check costs a wc fork and the answer
+        # changes about once an hour. Zero to start, so the first tick asks.
+        if [ $(( now - last_rotate_check )) -ge "$LOG_FILE_ROTATE_CHECK_INTERVAL" ]; then
+            last_rotate_check=$now
+            log_file_rotate_if_needed
+        fi
 
         clock_read
         remaining_us=$(( tick_us - (CLOCK_NOW_US - cycle_start_us) ))

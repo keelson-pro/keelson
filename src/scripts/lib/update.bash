@@ -140,7 +140,7 @@ update_resolve_strategy() {
     local ann=$1 container=$2 owner_present=$3
     local val=""
     if [ -n "$ann" ]; then
-        annotation_get "$ann" field-manager-strategy "$container"
+        annotation_get "$ann" fieldManagerStrategy "$container"
         val=$ANNOTATION_VALUE
     fi
     if [ -n "$val" ]; then
