@@ -57,6 +57,8 @@ setup() {
     state_flush() { printf 'flush\n' >>"$TMP_DIR/state.calls"; }
     state_clear_cache() { printf 'clear\n' >>"$TMP_DIR/state.calls"; }
     state_load() { printf 'load\n' >>"$TMP_DIR/state.calls"; }
+    state_spool_commit() { printf 'commit\n' >>"$TMP_DIR/state.calls"; }
+    state_drain_spool() { printf 'drain\n' >>"$TMP_DIR/state.calls"; return 1; }
     watch_run_kind() { sleep 10; }
 
     sleep() { :; }
@@ -85,11 +87,13 @@ emit() { "$@" 2>&1; }
 
 # --- loop_start_queue_refresh ---
 
-@test "queue refresh: the child loads and flushes state" {
-    loop_start_queue_refresh 1
-    wait "$LOOP_QUEUE_PID"
-    grep -q "load" "$TMP_DIR/state.calls"
-    grep -q "flush" "$TMP_DIR/state.calls"
+@test "queue refresh: the child spools rather than writing" {
+    rm -f "$TMP_DIR/state.calls"
+    scan_run() { :; }
+    KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    [ "$LOOP_QUEUE_PID" -gt 0 ] && wait "$LOOP_QUEUE_PID" 2>/dev/null || true
+    grep -q commit "$TMP_DIR/state.calls"
+    ! grep -q '^flush$' "$TMP_DIR/state.calls"
 }
 
 @test "queue refresh: dry-run passes apply=0 and does not flush" {
@@ -363,16 +367,16 @@ emit() { "$@" 2>&1; }
     [ -f "$TMP_DIR/poll.calls" ]
 }
 
-@test "loop_run: the poll child loads and flushes state" {
-    # It is a subshell, so anything it records (a CronJob trigger, a new
-    # next-due) is lost unless it flushes, and without loading first the
-    # trigger gate reads empty and re-fires a Job that already ran.
+@test "loop_run: the poll child spools rather than writing" {
+    # A child is a subshell and the parent is the only writer: an apply sends
+    # the whole ledger, so two children writing would each drop the other's
+    # changes and a lost CronJob record re-fires a Job that already ran.
     rm -f "$TMP_DIR/state.calls"
     scan_run() { :; }
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     [ "$LOOP_POLL_PID" -gt 0 ] && wait "$LOOP_POLL_PID" 2>/dev/null || true
-    grep -q load "$TMP_DIR/state.calls"
-    grep -q flush "$TMP_DIR/state.calls"
+    grep -q commit "$TMP_DIR/state.calls"
+    ! grep -q '^load$' "$TMP_DIR/state.calls"
 }
 
 @test "loop_run: the poll is passed the tick's own clock" {

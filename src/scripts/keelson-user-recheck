@@ -50,6 +50,7 @@ USAGE
 
 main() {
     log_file_init
+    state_spool_init
     local apply=0
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -73,6 +74,9 @@ main() {
     scan_run "$apply" 1
 
     if [ "$apply" -eq 1 ]; then
+        # No tick loop here, so this process is its own writer: drain whatever
+        # the scan spooled and write it once.
+        state_drain_spool || true
         state_flush || true
     fi
 }

@@ -33,27 +33,63 @@
 # Cache:
 #   STATE_FIELDS["<data-key>:<field>"] = string
 #   STATE_KEYS["<data-key>"]           = 1 if known
-#   STATE_DIRTY["<data-key>"]          = 1 if changed since last flush
-#   STATE_DELETED["<data-key>"]        = 1 if to be removed on next flush
+#   STATE_DIRTY["<data-key>"]          = 1 if anything changed since the last
+#                                        write; a forgotten key is simply
+#                                        absent from STATE_KEYS
 #
-# ConfigMap.data values are JSON object strings, one per data-key. Single
-# writer assumption: state_flush uses a merge patch with no resourceVersion
-# check. Introduce leader election before lifting that assumption.
+# ConfigMap.data values are JSON object strings, one per data-key.
+#
+# One writer, enforced rather than assumed. state_flush server-side applies the
+# whole ledger with no resourceVersion check, so two processes doing it would
+# each drop whatever the other had just written -- and a dropped CronJob
+# trigger record re-fires a Job that already ran. The controller's children are
+# subshells: they inherit this cache, spool what they change to
+# KEELSON_STATE_SPOOL_DIR, and never write. The tick loop drains the spool and
+# writes, once, before spawning anything.
+#
+# Between pods that assumption still holds only by there being one pod. Leader
+# election is what would be needed to run two.
 #
 # Configuration:
 #   KEELSON_STATE_CONFIGMAP     ConfigMap name
 #   KEELSON_STATE_NAMESPACE     override (default: read SA mount)
 #   KEELSON_SA_NAMESPACE_FILE   override of SA namespace path (tests)
+#   KEELSON_STATE_SPOOL_DIR     where children leave mutations for the writer
 #
 # Depends on: lib/log.bash
 
 declare -gA STATE_FIELDS=()
 declare -gA STATE_KEYS=()
 declare -gA STATE_DIRTY=()
-declare -gA STATE_DELETED=()
 STATE_NAMESPACE=""
 STATE_NAMESPACE_FILE=""
 STATE_CONFIGMAP_NAME=""
+
+# Set only by a load that actually read the ledger. A flush is a server-side
+# apply of the whole thing, and apply removes fields we own and omit, so
+# flushing a cache we never filled would erase the ledger -- including the
+# CronJob always-once gate, which would then re-fire Jobs that already ran.
+STATE_LOADED=0
+
+# The creation stamp, read once and replayed on every apply. We own those
+# three fields, so omitting them would delete them: the provenance would
+# erase itself on the first write after it was set.
+STATE_CREATED_AT=""
+STATE_CREATED_BY_VERSION=""
+STATE_CREATED_BY_PACKAGE=""
+STATE_CREATED_JSON=""
+
+# Where a child leaves mutations for the parent to apply. The parent is the
+# only process that writes the ConfigMap: a server-side apply sends the whole
+# ledger, so two children applying concurrently would each drop what the other
+# had just written -- one would erase a CronJob trigger record and the next
+# poll would re-fire a Job that had already run.
+#
+# Tests override this by reassigning it after sourcing.
+KEELSON_STATE_SPOOL_DIR=/keelson/work/state-spool
+
+# Lines a child has accumulated and not yet committed.
+STATE_SPOOL=""
 
 # state_trigger_key <kind> <ns> <name>
 state_trigger_key() {
@@ -107,7 +143,10 @@ state_forget() {
         esac
     done
     unset 'STATE_KEYS[$data_key]'
-    STATE_DELETED["$data_key"]=1
+    STATE_SPOOL+="F|$data_key"$'\n'
+    # No deletion marker: the manifest is the whole ledger, so a key that is
+    # gone from STATE_KEYS is absent from the next apply and the server drops
+    # it. The null-value patching this replaced was the fiddly part.
     STATE_DIRTY["$data_key"]=1
 }
 
@@ -170,7 +209,6 @@ state_init() {
     STATE_FIELDS=()
     STATE_KEYS=()
     STATE_DIRTY=()
-    STATE_DELETED=()
     state_load
 }
 
@@ -181,12 +219,20 @@ state_load() {
     local cm_json
     if ! cm_json=$(kubectl get configmap "$STATE_CONFIGMAP_NAME" \
             -n "$STATE_NAMESPACE" -o json 2>/dev/null); then
+        # The ledger does not exist yet, so an empty cache is a complete
+        # picture of it and writing that is safe. Marked before the apply
+        # because state_apply writes the whole cache and refuses without it.
+        STATE_LOADED=1
+        # Minted here, in this shell. state_apply pipes into kubectl and a
+        # pipeline is a subshell, so a stamp minted inside it would be lost
+        # and every write would restamp createdAt with the running build.
+        state_created_annotations
         # apply rather than create: kubectl create configmap has no way to
         # set annotations, and the alternative is a second call to annotate a
         # ConfigMap that has just been made. Recording which build made it
         # answers the question a corrupt ledger otherwise cannot -- the image
         # tag, the label and the env can disagree, this cannot.
-        if ! state_apply_new_configmap; then
+        if ! state_apply; then
             log_error state-configmap-create-failed \
                 configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
                 msg="Could not create state ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE'."
@@ -211,11 +257,18 @@ state_load() {
     # silently disappears.
     local lines rest line rec k field val
     lines=$(printf '%s' "$cm_json" | yq -p=json -o=y -r '
-        .data // {} | to_entries | .[] | .key as $k | (
-          ( "K|" + $k ),
-          ( .value | select(. != "null" and . != "") | from_json | to_entries | .[]
-              | "F|" + $k + "|" + .key + "|" + .value )
+        .metadata.annotations as $a | (
+          ( "C|At|"      + ($a["keelson.pro/createdAt"]        // "") ),
+          ( "C|Version|" + ($a["keelson.pro/createdByVersion"] // "") ),
+          ( "C|Package|" + ($a["keelson.pro/createdByPackage"] // "") ),
+          ( .data // {} | to_entries | .[] | .key as $k | (
+              ( "K|" + $k ),
+              ( .value | select(. != "null" and . != "") | from_json | to_entries | .[]
+                  | "F|" + $k + "|" + .key + "|" + .value )
+          ) )
         )' 2>/dev/null)
+
+    STATE_LOADED=1
 
     rest=$lines
     while [ -n "$rest" ]; do
@@ -226,6 +279,10 @@ state_load() {
             rest=${rest#*$'\n'}
         fi
         case "$line" in
+            'C|At|')      STATE_CREATED_AT= ;;
+            'C|At|'*)     STATE_CREATED_AT=${line#C|At|} ;;
+            'C|Version|'*) STATE_CREATED_BY_VERSION=${line#C|Version|} ;;
+            'C|Package|'*) STATE_CREATED_BY_PACKAGE=${line#C|Package|} ;;
             'K|'*)
                 STATE_KEYS["${line#K|}"]=1
                 ;;
@@ -241,6 +298,11 @@ state_load() {
                 ;;
         esac
     done
+
+    # Settle the creation stamp in this shell: a ledger written before these
+    # annotations existed carries none, and minting it inside the pipeline
+    # state_apply uses would lose it and restamp on every write.
+    state_created_annotations
 }
 
 # state_get <data-key> <field>
@@ -255,6 +317,10 @@ state_set() {
     STATE_FIELDS["$data_key:$field"]=$value
     STATE_KEYS["$data_key"]=1
     STATE_DIRTY["$data_key"]=1
+    # Applied here so this process reads back what it just wrote, and spooled
+    # so the writer can replay it. A child is a subshell: without the spool the
+    # mutation dies with it.
+    STATE_SPOOL+="S|$data_key|$field|$value"$'\n'
 }
 
 state_get_trigger_field() {
@@ -274,7 +340,6 @@ state_clear_cache() {
     STATE_FIELDS=()
     STATE_KEYS=()
     STATE_DIRTY=()
-    STATE_DELETED=()
 }
 
 # state_json_escape <string>
@@ -312,12 +377,12 @@ state_render_data_value() {
     printf '{%s}' "$items"
 }
 
-# state_build_patch
-# Builds the strategic-merge patch body for state_flush.
+# state_build_manifest
+# The whole ledger as a ConfigMap manifest, for state_apply.
 # state_provenance_annotations <created|updated>
 # The three annotations for one half of the record, as JSON object entries.
-# createdAt and its pair are written once by the apply below; a merge patch
-# would overwrite them, so the flush only ever writes the updated three.
+# createdAt and its pair are replayed verbatim by state_created_annotations;
+# only the updated three are refreshed on each write.
 state_provenance_annotations() {
     local w=$1
     printf '"keelson.pro/%sAt":"%s","keelson.pro/%sByVersion":"%s","keelson.pro/%sByPackage":"%s"' \
@@ -326,45 +391,130 @@ state_provenance_annotations() {
         "$w" "$(state_json_escape "${KEELSON_PACKAGE_VERSION:-unknown}")"
 }
 
-# state_apply_new_configmap
-# Creates the ledger with its provenance already on it, in one call.
-#
-# Server-side, under the same field manager Keelson claims workloads with, so
-# one identity covers everything it owns. --force-conflicts because this
-# ConfigMap is Keelson's, wholly: if something else has taken a field, we take
-# it back and carry on. There is nothing here to negotiate over, and a
-# conflict is not a reason to stop keeping correct state.
-state_apply_new_configmap() {
-    printf '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"%s","namespace":"%s","annotations":{%s,%s}}}' \
-        "$(state_json_escape "$STATE_CONFIGMAP_NAME")" \
-        "$(state_json_escape "$STATE_NAMESPACE")" \
-        "$(state_provenance_annotations created)" \
-        "$(state_provenance_annotations updated)" \
+# state_created_annotations
+# The creation stamp for an apply: whatever the ledger already carried, or a
+# fresh one if it carried none. We own these three fields, so an apply that
+# omitted them would delete them and the provenance would erase itself on the
+# first write after it was set.
+# Sets the globals rather than echoing: called from inside a command
+# substitution the first-write memoisation would die with the subshell, and
+# every apply would restamp createdAt with the running build.
+state_created_annotations() {
+    if [ -z "$STATE_CREATED_AT" ]; then
+        STATE_CREATED_AT=$(state_now)
+        STATE_CREATED_BY_VERSION=${KEELSON_VERSION:-unknown}
+        STATE_CREATED_BY_PACKAGE=${KEELSON_PACKAGE_VERSION:-unknown}
+    fi
+    printf -v STATE_CREATED_JSON \
+        '"keelson.pro/createdAt":"%s","keelson.pro/createdByVersion":"%s","keelson.pro/createdByPackage":"%s"' \
+        "$(state_json_escape "$STATE_CREATED_AT")" \
+        "$(state_json_escape "$STATE_CREATED_BY_VERSION")" \
+        "$(state_json_escape "$STATE_CREATED_BY_PACKAGE")"
+}
+
+# state_spool_init
+# Ensures the spool directory exists. Idempotent, called once at boot.
+state_spool_init() {
+    mkdir -p "$KEELSON_STATE_SPOOL_DIR"
+}
+
+# state_spool_commit
+# Hands this process's mutations to the writer. Written to a temp name and
+# renamed, so the writer never reads a half-written file, and named by BASHPID
+# rather than $$ because in a subshell $$ is still the parent's and two
+# children would collide on one name.
+state_spool_commit() {
+    [ -n "$STATE_SPOOL" ] || return 0
+    local tmp="${KEELSON_STATE_SPOOL_DIR}/.${BASHPID}.tmp"
+    local final="${KEELSON_STATE_SPOOL_DIR}/${BASHPID}"
+    if ! printf '%s' "$STATE_SPOOL" > "$tmp" 2>/dev/null \
+            || ! mv -f "$tmp" "$final" 2>/dev/null; then
+        rm -f "$tmp" 2>/dev/null
+        log_error state-spool-write-failed path="$final" \
+            msg="Could not hand state changes to the writer via '$final'; they are lost."
+        return 1
+    fi
+    STATE_SPOOL=""
+    return 0
+}
+
+# state_drain_spool
+# Replays every spooled mutation into this process's cache and removes the
+# files. Returns 0 if anything was replayed, 1 if the spool was empty, so the
+# caller writes only when there is something to write.
+state_drain_spool() {
+    local f rest line found=1
+    shopt -s nullglob
+    for f in "$KEELSON_STATE_SPOOL_DIR"/*; do
+        case "$f" in *.tmp) continue ;; esac
+        rest=$(cat "$f" 2>/dev/null) || rest=""
+        rm -f "$f" 2>/dev/null
+        [ -n "$rest" ] || continue
+        found=0
+        while [ -n "$rest" ]; do
+            line=${rest%%$'\n'*}
+            if [ "$line" = "$rest" ]; then
+                rest=
+            else
+                rest=${rest#*$'\n'}
+            fi
+            [ -n "$line" ] || continue
+            case "$line" in
+                'S|'*)
+                    local rec=${line#S|} k field val
+                    k=${rec%%|*}; rec=${rec#*|}
+                    field=${rec%%|*}; val=${rec#*|}
+                    STATE_FIELDS["$k:$field"]=$val
+                    STATE_KEYS["$k"]=1
+                    STATE_DIRTY["$k"]=1
+                    ;;
+                'F|'*)
+                    local gone=${line#F|} pair
+                    for pair in "${!STATE_FIELDS[@]}"; do
+                        case "$pair" in "$gone:"*) unset 'STATE_FIELDS[$pair]' ;; esac
+                    done
+                    unset 'STATE_KEYS[$gone]'
+                    STATE_DIRTY["$gone"]=1
+                    ;;
+            esac
+        done
+    done
+    shopt -u nullglob
+    return "$found"
+}
+
+# state_apply
+# Writes the whole ledger, server-side, under the same field manager Keelson
+# claims workloads with. --force-conflicts because this ConfigMap is Keelson's,
+# wholly: if something else has taken a field, we take it back and carry on.
+# There is nothing here to negotiate over, and a conflict is not a reason to
+# stop keeping correct state.
+state_apply() {
+    state_build_manifest \
         | kubectl apply --server-side --field-manager=keelson \
             --force-conflicts -f - >/dev/null 2>&1
 }
 
-state_build_patch() {
+state_build_manifest() {
     local entries="" first=1 key value
-    for key in "${!STATE_DIRTY[@]}"; do
+    for key in "${!STATE_KEYS[@]}"; do
         if [ "$first" -eq 1 ]; then
             first=0
         else
             entries="$entries,"
         fi
-        if [ -n "${STATE_DELETED[$key]:-}" ]; then
-            # Unquoted null: that is what removes a key from a merge patch.
-            entries="$entries\"$(state_json_escape "$key")\":null"
-            continue
-        fi
         value=$(state_render_data_value "$key")
         entries="$entries\"$(state_json_escape "$key")\":\"$(state_json_escape "$value")\""
     done
-    # The provenance rides on a write that was happening anyway, so it costs
-    # no extra call. Diagnostic only: nothing reads it, and it must never be
-    # the reason a state write fails.
-    printf '{"metadata":{"annotations":{%s}},"data":{%s}}' \
-        "$(state_provenance_annotations updated)" "$entries"
+    # Called before the printf, not inside it: a subshell would discard the
+    # memoised stamp and restamp createdAt on every write.
+    state_created_annotations
+    printf '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"%s","namespace":"%s","annotations":{%s,%s}},"data":{%s}}' \
+        "$(state_json_escape "$STATE_CONFIGMAP_NAME")" \
+        "$(state_json_escape "$STATE_NAMESPACE")" \
+        "$STATE_CREATED_JSON" \
+        "$(state_provenance_annotations updated)" \
+        "$entries"
 }
 
 # state_flush
@@ -375,23 +525,22 @@ state_flush() {
     if [ "${#STATE_DIRTY[@]}" -eq 0 ]; then
         return 0
     fi
-    local patch
-    patch=$(state_build_patch)
-    # Same field manager the ledger was created under, so ownership stays with
-    # keelson rather than passing to kubectl's default on the first write.
-    #
-    # A merge patch, not a server-side apply. Apply is declarative: fields we
-    # own and omit are removed, and this sends only the dirty keys. Sending the
-    # whole ledger instead would be tidier, but state_load failing is a warn
-    # the child carries on from, and applying a full state from an empty cache
-    # would erase the CronJob always-once gate and re-fire Jobs that already
-    # ran. A merge patch can only ever change what it names.
-    if kubectl patch configmap "$STATE_CONFIGMAP_NAME" \
-            -n "$STATE_NAMESPACE" --type=merge --field-manager=keelson \
-            --patch "$patch" >/dev/null 2>&1; then
+    # Apply is declarative: a field we own and leave out is removed, which is
+    # how a forget happens now. That makes it lethal from a cache we never
+    # filled -- it would erase the ledger, including the CronJob always-once
+    # gate, and the next poll would re-fire Jobs that already ran. state_load
+    # failing is a warning the child carries on from, so this is the guard
+    # that keeps carrying on from being destructive.
+    if [ "$STATE_LOADED" -ne 1 ]; then
+        log_error state-flush-refused \
+            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
+            keys="${#STATE_DIRTY[@]}" \
+            msg="Refusing to write ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE': the ledger was never loaded, and writing the whole of an empty cache would erase it."
+        return 1
+    fi
+    if state_apply; then
         local count=${#STATE_DIRTY[@]}
         STATE_DIRTY=()
-        STATE_DELETED=()
         log_debug state-flushed \
             configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
             keys="$count" \
@@ -401,7 +550,7 @@ state_flush() {
     log_error state-flush-failed \
         configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
         keys="${#STATE_DIRTY[@]}" \
-        msg="State flush failed: could not patch ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' (${#STATE_DIRTY[@]} dirty keys)."
+        msg="State flush failed: could not apply ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' (${#STATE_DIRTY[@]} dirty keys)."
     return 1
 }
 

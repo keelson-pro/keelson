@@ -110,13 +110,10 @@ loop_supervise_watchers() {
 loop_start_scan() {
     local apply=$1
     (
-        state_load || log_warn state-reload-failed \
-            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
-            msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
         # poll-all=0: this pass refreshes the cache and evicts. Registry
         # work belongs to the due-poll above, on each workload's own cadence.
         scan_run "$apply" 0
-        [ "$apply" -eq 1 ] && { state_flush || true; }
+        [ "$apply" -eq 1 ] && { state_spool_commit || true; }
     ) &
     LOOP_SCAN_PID=$!
 }
@@ -132,11 +129,8 @@ loop_start_scan() {
 loop_start_queue_refresh() {
     local apply=$1
     (
-        state_load || log_warn state-reload-failed \
-            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
-            msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
         scan_refresh_queued "$apply"
-        [ "$apply" -eq 1 ] && { state_flush || true; }
+        [ "$apply" -eq 1 ] && { state_spool_commit || true; }
     ) &
     LOOP_QUEUE_PID=$!
 }
@@ -157,11 +151,8 @@ loop_start_queue_refresh() {
 loop_start_poll() {
     local apply=$1 now=$2
     (
-        state_load || log_warn state-reload-failed \
-            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
-            msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
         scan_poll_due "$apply" "$now"
-        [ "$apply" -eq 1 ] && { state_flush || true; }
+        [ "$apply" -eq 1 ] && { state_spool_commit || true; }
     ) &
     LOOP_POLL_PID=$!
 }
@@ -179,9 +170,6 @@ loop_start_poll() {
 loop_start_refresh() {
     local apply=$1 kind=$2 finish=$3
     (
-        state_load || log_warn state-reload-failed \
-            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
-            msg="State reload from ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' failed."
         scan_refresh_kind "$apply" "$kind"
         if [ "$finish" -eq 1 ]; then
             inventory_evict_unwatched "$KEELSON_WATCHED_KINDS"
@@ -189,7 +177,7 @@ loop_start_refresh() {
             log_info_always full-refresh-complete kinds="$KEELSON_WATCHED_KINDS" \
                 msg="Full refresh complete: the cache was rebuilt from the cluster and the ledger reconciled against it."
         fi
-        [ "$apply" -eq 1 ] && { state_flush || true; }
+        [ "$apply" -eq 1 ] && { state_spool_commit || true; }
     ) &
     LOOP_REFRESH_PID=$!
 }
@@ -249,6 +237,16 @@ loop_run() {
         cycle_start_us=$CLOCK_NOW_US
         now=$(( cycle_start_us / 1000000 ))
         status_write_heartbeat "$cycle_start_us"
+
+        # The single writer. Children are subshells: they inherit this cache,
+        # spool what they change, and never touch the ConfigMap themselves.
+        # Two of them applying concurrently would each drop what the other had
+        # just written, and one dropped CronJob trigger record re-fires a Job
+        # that already ran. Drained before anything is spawned, so a child
+        # starts from a current view.
+        if [ "$apply" -eq 1 ] && state_drain_spool; then
+            state_flush || true
+        fi
 
         loop_supervise_watchers "$now" "$backoff_max" "$healthy_reset"
 

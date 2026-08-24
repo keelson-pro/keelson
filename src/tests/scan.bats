@@ -692,7 +692,9 @@ SH
 
     kubectl_returns '{"items": []}'
     scan_run 0 2>/dev/null
-    [ -n "${STATE_DELETED[j--Deployment--default--app]:-}" ]
+    # Apply removes what it omits, so a forgotten key is one that has left
+    # the cache rather than one carrying a deletion marker.
+    [ -z "${STATE_KEYS[j--Deployment--default--app]:-}" ]
 }
 
 # --- next-due drives the registry, not the scan ---
@@ -913,7 +915,7 @@ SH
     kubectl_returns '{"items": []}'
     scan_run 0 0 2>/dev/null
     [ -z "$(state_get w--Deployment--default--app first-seen)" ]
-    [ -n "${STATE_DELETED[w--Deployment--default--app]:-}" ]
+    [ -z "${STATE_KEYS[w--Deployment--default--app]:-}" ]
 }
 
 # --- the queued re-read: what a watch event actually turns into ---
