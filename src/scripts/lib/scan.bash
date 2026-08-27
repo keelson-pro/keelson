@@ -1016,24 +1016,6 @@ scan_poll_overrun_count() {
     return 0
 }
 
-# scan_poll_overrun_should_log <count>
-# True on the 1st, 2nd, 4th, 8th consecutive overrun and so on, then every
-# KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT-th. A controller that cannot hold
-# its cadence says so at once, keeps saying so while anyone might still be
-# watching, and never goes quiet altogether: the condition does not clear
-# itself, and a log that stops mentioning it reads exactly like one that fixed
-# it.
-scan_poll_overrun_should_log() {
-    local n=$1
-    local limit=${KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT:?KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT required}
-    [ "$n" -gt 0 ] || return 1
-    if [ "$n" -ge "$limit" ]; then
-        (( n % limit == 0 ))
-    else
-        (( (n & (n - 1)) == 0 ))
-    fi
-}
-
 scan_poll_due() {
     local _scan_apply=${1:-0} now=$2
     inventory_enabled || return 0
@@ -1136,7 +1118,8 @@ scan_poll_due() {
     fi
     scan_poll_overrun_count \
         "${KEELSON_POLL_OVERRUN_FILE:-/keelson/work/poll-overrun}" "$overran"
-    if scan_poll_overrun_should_log "$SCAN_POLL_OVERRUNS"; then
+    if log_backoff_should_emit "$SCAN_POLL_OVERRUNS" \
+            "${KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT:?KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT required}"; then
         log_warn poll-pass-overrun elapsed="$elapsed" interval="$_scan_min_interval" \
             workloads="${#INVENTORY_DUE[@]}" consecutive="$SCAN_POLL_OVERRUNS" \
             msg="Polling ${#INVENTORY_DUE[@]} due workloads took ${elapsed}s, longer than the ${_scan_min_interval}s cadence of the most frequently polled of them, so the estate is being refreshed slower than it is configured to be. That is $SCAN_POLL_OVERRUNS passes in a row; this is reported with a widening gap between reports, not once per pass. Raise KEELSON_REGISTRY_POLL_CONCURRENCY, which needs memory raised with it, or lengthen the poll schedule."

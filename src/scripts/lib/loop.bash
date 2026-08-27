@@ -22,6 +22,7 @@
 #   LOOP_WATCHER_STARTED[<kind>]   unix-seconds the current watcher started
 #   LOOP_WATCHER_ELIGIBLE[<kind>]  earliest unix-seconds we may respawn this kind
 #   LOOP_SCAN_PID                  current scan child PID (0 if none)
+#   LOOP_SCAN_OVERRUNS             consecutive scans that outran their interval
 #   LOOP_QUEUE_PID                 current queue-refresh child PID (0 if none)
 #   LOOP_MANAGED_LOGGED            1 once the managed-workload list has been logged
 #   LOOP_FIRST_SCAN_DONE           1 once the first reconcile scan child has finished
@@ -40,6 +41,7 @@ LOOP_MANAGED_LOGGED=0
 LOOP_FIRST_SCAN_DONE=0
 LOOP_QUEUE_PID=0
 LOOP_REFRESH_PID=0
+LOOP_SCAN_OVERRUNS=0
 declare -ga LOOP_REFRESH_PENDING=()
 
 # loop_publish_watchers
@@ -182,6 +184,35 @@ loop_start_refresh() {
     LOOP_REFRESH_PID=$!
 }
 
+# loop_check_scan_overrun <elapsed> <interval>
+# Warns when a reconcile scan took longer than the interval it is scheduled
+# on, backing off as the overruns repeat.
+#
+# Nothing else notices. last_scan_start is measured from the scan's start, so
+# a scan that outruns its interval simply has the next one begin on the
+# following tick: no overlap, no gap in coverage, and no mention of the fact
+# that the cluster is being listed as fast as it can be rather than on the
+# cadence configured. tick-overrun is a different measurement, of the tick
+# loop's own cycle, and stays zero throughout.
+#
+# The count lives in a variable rather than on disk because this runs in the
+# tick loop itself, which outlives every scan it starts.
+loop_check_scan_overrun() {
+    local elapsed=$1 interval=$2
+    if [ "$elapsed" -le "$interval" ]; then
+        LOOP_SCAN_OVERRUNS=0
+        return 0
+    fi
+    LOOP_SCAN_OVERRUNS=$(( LOOP_SCAN_OVERRUNS + 1 ))
+    log_backoff_should_emit "$LOOP_SCAN_OVERRUNS" \
+        "${KEELSON_RECONCILE_OVERRUN_WARNING_BACKOFF_LIMIT:?KEELSON_RECONCILE_OVERRUN_WARNING_BACKOFF_LIMIT required}" \
+        || return 0
+    log_warn reconcile-pass-overrun elapsed="$elapsed" interval="$interval" \
+        consecutive="$LOOP_SCAN_OVERRUNS" \
+        msg="The reconcile scan took ${elapsed}s against a ${interval}s interval, so the cluster is being listed as fast as it can be rather than on the cadence configured. That is $LOOP_SCAN_OVERRUNS scans in a row; this is reported with a widening gap between reports, not once per scan. Lengthen KEELSON_RECONCILE_INTERVAL, or narrow what is scanned with KEELSON_SCOPE or KEELSON_WATCHED_KINDS."
+    return 0
+}
+
 # loop_kill_children
 # Best-effort kill of every spawned child. Called from the shutdown trap.
 loop_kill_children() {
@@ -300,6 +331,7 @@ loop_run() {
             wait "$LOOP_SCAN_PID" 2>/dev/null || true
             LOOP_SCAN_PID=0
             LOOP_FIRST_SCAN_DONE=1
+            loop_check_scan_overrun "$(( now - last_scan_start ))" "$poll"
         fi
         if [ "$LOOP_SCAN_PID" -eq 0 ] && [ $(( now - last_scan_start )) -ge "$poll" ]; then
             loop_start_scan "$apply"
