@@ -33,6 +33,7 @@ SCAN_WL_SA_NAME=
 # Set by scan_extract_kind, consumed by scan_each_workload.
 SCAN_KIND_RECORDS=
 SCAN_KIND_COUNT=0
+SCAN_POLL_OVERRUNS=0
 
 # scan_run <apply> [poll-all]
 #
@@ -974,19 +975,63 @@ scan_tag_passes_filter() {
 # counters the summary reads. Each child is a subshell, so its counts die with
 # it; without this the summary reports zero however much work was done.
 scan_sum_tally() {
-    local f=$1 t w u nc s e
+    local f=$1 t w u nc s e interval
     [ -r "$f" ] || return 0
-    while read -r t w u nc s e; do
-        [ -n "$e" ] || continue
+    while read -r t w u nc s e interval; do
+        [ -n "$interval" ] || continue
         _scan_total=$(( _scan_total + t ))
         _scan_would_update=$(( _scan_would_update + w ))
         _scan_updated=$(( _scan_updated + u ))
         _scan_no_change=$(( _scan_no_change + nc ))
         _scan_skip=$(( _scan_skip + s ))
         _scan_error=$(( _scan_error + e ))
+        # The shortest cadence in the pass is the one the pass has to fit
+        # inside; a workload on a daily schedule is not evidence of anything.
+        if [ "$interval" -gt 0 ] 2>/dev/null && { [ "$_scan_min_interval" -eq 0 ] \
+                || [ "$interval" -lt "$_scan_min_interval" ]; }; then
+            _scan_min_interval=$interval
+        fi
     done < "$f"
     rm -f "$f" 2>/dev/null || true
     return 0
+}
+
+# scan_poll_overrun_count <path> <overran>
+# Sets SCAN_POLL_OVERRUNS to the number of consecutive passes that have
+# overrun, this one included; a pass that fitted resets it to zero.
+#
+# On disk because each pass is its own subshell: a counter in memory dies
+# with the child that incremented it, which is also why log.bash's rate
+# limiter cannot throttle anything a poll child says. Only one poll runs at a
+# time, gated on LOOP_POLL_PID, so there is no writer to race with.
+scan_poll_overrun_count() {
+    local path=$1 overran=$2 n=0
+    if [ "$overran" -eq 1 ]; then
+        [ -r "$path" ] && read -r n < "$path" 2>/dev/null
+        case "$n" in ''|*[!0-9]*) n=0 ;; esac
+        n=$(( n + 1 ))
+    fi
+    SCAN_POLL_OVERRUNS=$n
+    printf '%s\n' "$n" > "$path" 2>/dev/null || true
+    return 0
+}
+
+# scan_poll_overrun_should_log <count>
+# True on the 1st, 2nd, 4th, 8th consecutive overrun and so on, then every
+# KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT-th. A controller that cannot hold
+# its cadence says so at once, keeps saying so while anyone might still be
+# watching, and never goes quiet altogether: the condition does not clear
+# itself, and a log that stops mentioning it reads exactly like one that fixed
+# it.
+scan_poll_overrun_should_log() {
+    local n=$1
+    local limit=${KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT:?KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT required}
+    [ "$n" -gt 0 ] || return 1
+    if [ "$n" -ge "$limit" ]; then
+        (( n % limit == 0 ))
+    else
+        (( (n & (n - 1)) == 0 ))
+    fi
 }
 
 scan_poll_due() {
@@ -997,8 +1042,12 @@ scan_poll_due() {
     [ "${#INVENTORY_DUE[@]}" -eq 0 ] && return 0
 
     local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
-          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
+          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0 \
+          _scan_min_interval=0
     registry_init
+
+    clock_read
+    local start_us=$CLOCK_NOW_US
 
     # One workload per child, at most KEELSON_REGISTRY_POLL_CONCURRENCY at a
     # time. A registry check is about two seconds of waiting for roughly sixty
@@ -1044,8 +1093,9 @@ scan_poll_due() {
             # Counters are locals, so they die with this child. Appended for
             # the parent to add up, or the summary would report zero however
             # much work was done. One short line, so the append is atomic.
-            printf '%d %d %d %d %d %d\n' "$_scan_total" "$_scan_would_update" \
+            printf '%d %d %d %d %d %d %d\n' "$_scan_total" "$_scan_would_update" \
                 "$_scan_updated" "$_scan_no_change" "$_scan_skip" "$_scan_error" \
+                "$INVENTORY_INTERVAL" \
                 >>"$tally" 2>/dev/null || true
         ) &
         inflight=$(( inflight + 1 ))
@@ -1059,6 +1109,9 @@ scan_poll_due() {
 
     scan_sum_tally "$tally"
 
+    clock_read
+    local elapsed=$(( (CLOCK_NOW_US - start_us) / 1000000 ))
+
     log_debug poll-summary \
         workloads="${#INVENTORY_DUE[@]}" \
         resources="$_scan_total" \
@@ -1066,6 +1119,27 @@ scan_poll_due() {
         no-change="$_scan_no_change" \
         skip="$_scan_skip" \
         error="$_scan_error" \
-        msg="Polled ${#INVENTORY_DUE[@]} due workloads: $_scan_total containers examined, $_scan_updated updated, $_scan_no_change no-change, $_scan_skip skipped, $_scan_error errored."
+        elapsed="$elapsed" \
+        msg="Polled ${#INVENTORY_DUE[@]} due workloads in ${elapsed}s: $_scan_total containers examined, $_scan_updated updated, $_scan_no_change no-change, $_scan_skip skipped, $_scan_error errored."
+
+    # A pass cannot hold a cadence it takes longer than. Nothing else notices:
+    # the next pass simply starts late, every workload in it is polled late,
+    # and the controller runs at a fraction of its configured rate saying
+    # nothing about it. Reported against the shortest cadence in the pass
+    # because that is the one being missed first.
+    #
+    # An if, not a && chain: a false test would leave this returning 1 and
+    # set -e would take the pass down on a pass that merely fitted.
+    local overran=0
+    if [ "$_scan_min_interval" -gt 0 ] && [ "$elapsed" -gt "$_scan_min_interval" ]; then
+        overran=1
+    fi
+    scan_poll_overrun_count \
+        "${KEELSON_POLL_OVERRUN_FILE:-/keelson/work/poll-overrun}" "$overran"
+    if scan_poll_overrun_should_log "$SCAN_POLL_OVERRUNS"; then
+        log_warn poll-pass-overrun elapsed="$elapsed" interval="$_scan_min_interval" \
+            workloads="${#INVENTORY_DUE[@]}" consecutive="$SCAN_POLL_OVERRUNS" \
+            msg="Polling ${#INVENTORY_DUE[@]} due workloads took ${elapsed}s, longer than the ${_scan_min_interval}s cadence of the most frequently polled of them, so the estate is being refreshed slower than it is configured to be. That is $SCAN_POLL_OVERRUNS passes in a row; this is reported with a widening gap between reports, not once per pass. Raise KEELSON_REGISTRY_POLL_CONCURRENCY, which needs memory raised with it, or lengthen the poll schedule."
+    fi
     return 0
 }

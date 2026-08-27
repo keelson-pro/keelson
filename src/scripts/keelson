@@ -83,6 +83,7 @@ log_boot_config() {
     config_line tick-interval "$KEELSON_TICK_INTERVAL"
     config_line reconcile-interval "$KEELSON_RECONCILE_INTERVAL"
     config_line registry-poll-interval-default "$KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT"
+    config_line poll-overrun-warning-backoff-limit "$KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT"
     config_line full-refresh-interval "$KEELSON_FULL_REFRESH_INTERVAL"
     config_line heartbeat-max-age "$KEELSON_HEARTBEAT_MAX_AGE"
     config_line watcher-respawn-backoff-max "$KEELSON_WATCHER_RESPAWN_BACKOFF_MAX"

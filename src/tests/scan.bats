@@ -65,7 +65,10 @@ setup() {
     KEELSON_FIRST_POLL_DELAY_MAX=300
     KEELSON_REGISTRY_POLL_CONCURRENCY=2
     KEELSON_POLL_TALLY_FILE="$TMP_DIR/poll-tally"
-    export KEELSON_POLL_TALLY_FILE
+    KEELSON_POLL_OVERRUN_FILE="$TMP_DIR/poll-overrun"
+    KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT=64
+    export KEELSON_POLL_TALLY_FILE KEELSON_POLL_OVERRUN_FILE \
+           KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT
     export KEELSON_FIRST_POLL_DELAY_MAX KEELSON_REGISTRY_POLL_CONCURRENCY
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
     KEELSON_RECONCILE_INTERVAL=60
@@ -783,6 +786,97 @@ SH
     scan_poll_due 0 "$LATE" 2>/dev/null
     inventory_get Deployment default app
     [ "$INVENTORY_NEXT_DUE" = "$(( LATE + 7200 ))" ]
+}
+
+@test "poll: a pass that outruns the shortest cadence in it says so" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    # The pass is timed rather than simulated, so the clock is what moves:
+    # 200s between the read that opens the pass and the one that closes it.
+    clock_read() {
+        CLOCK_CALLS=$(( ${CLOCK_CALLS:-0} + 1 ))
+        CLOCK_NOW_US=$(( (CLOCK_CALLS - 1) * 200000000 ))
+    }
+    run emit scan_poll_due 0 "$LATE"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+}
+
+@test "poll: a pass inside the cadence says nothing" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    run emit scan_poll_due 0 "$LATE"
+    [[ "$output" != *"poll-pass-overrun"* ]]
+}
+
+@test "poll: consecutive overruns are reported on the 1st, 2nd and 4th, not the 3rd" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    # run executes in a subshell, so each pass starts this counter afresh and
+    # every one of them takes 200s. What carries between them is the count on
+    # disk, which is the whole point of keeping it there.
+    clock_read() {
+        CLOCK_CALLS=$(( ${CLOCK_CALLS:-0} + 1 ))
+        CLOCK_NOW_US=$(( (CLOCK_CALLS - 1) * 200000000 ))
+    }
+    run emit scan_poll_due 0 "$(( LATE + 60 ))"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+    run emit scan_poll_due 0 "$(( LATE + 120 ))"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+    run emit scan_poll_due 0 "$(( LATE + 180 ))"
+    [[ "$output" != *"poll-pass-overrun"* ]]
+    run emit scan_poll_due 0 "$(( LATE + 240 ))"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+}
+
+@test "poll: the backoff limit sets how far it backs off" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    clock_read() {
+        CLOCK_CALLS=$(( ${CLOCK_CALLS:-0} + 1 ))
+        CLOCK_NOW_US=$(( (CLOCK_CALLS - 1) * 200000000 ))
+    }
+    # At 3 the doubling never gets past the limit, so it reports every third
+    # pass from the third on: 1, 2, 3, then 6. At the default 64 the fourth
+    # would have reported and the third would not.
+    KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT=3
+    run emit scan_poll_due 0 "$(( LATE + 60 ))"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+    run emit scan_poll_due 0 "$(( LATE + 120 ))"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+    run emit scan_poll_due 0 "$(( LATE + 180 ))"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+    run emit scan_poll_due 0 "$(( LATE + 240 ))"
+    [[ "$output" != *"poll-pass-overrun"* ]]
+}
+
+@test "poll: a pass that fits resets the backoff" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    printf '3\n' > "$KEELSON_POLL_OVERRUN_FILE"
+    run emit scan_poll_due 0 "$(( LATE + 60 ))"
+    [[ "$output" != *"poll-pass-overrun"* ]]
+    [ "$(cat "$KEELSON_POLL_OVERRUN_FILE")" = "0" ]
+}
+
+@test "poll: an empty pass cannot overrun" {
+    inventory_init
+    skopeo_counting
+    clock_read() {
+        CLOCK_CALLS=$(( ${CLOCK_CALLS:-0} + 1 ))
+        CLOCK_NOW_US=$(( (CLOCK_CALLS - 1) * 200000000 ))
+    }
+    run emit scan_poll_due 0 "$LATE"
+    [[ "$output" != *"poll-pass-overrun"* ]]
 }
 
 @test "poll: an empty cache polls nothing" {

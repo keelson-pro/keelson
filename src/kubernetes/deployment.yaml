@@ -86,6 +86,8 @@ spec:
               value: "${Keelson/FirstPollDelayMax}"
             - name: KEELSON_REGISTRY_POLL_CONCURRENCY
               value: "${Keelson/RegistryPollConcurrency}"
+            - name: KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT
+              value: "${Keelson/PollOverrunWarningBackoffLimit}"
             - name: KEELSON_FULL_REFRESH_INTERVAL
               value: "${Keelson/FullRefreshInterval}"
             - name: KEELSON_TICK_INTERVAL
