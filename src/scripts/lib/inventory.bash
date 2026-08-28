@@ -32,6 +32,12 @@
 #   namespace=<ns>
 #   name=<name>
 #   next-due=<unix seconds>       when this workload's repo is next polled
+#   managed=<true|false>          whether Keelson acts on it, and so whether
+#                                 next-due means anything. Unmanaged workloads
+#                                 are cached but never polled: the ledger's
+#                                 record of every workload seen is reconciled
+#                                 against this cache, and dropping them here
+#                                 would drop them there.
 #   interval=<seconds>            its own polling cadence
 #   suspend=<true|false|>         CronJob only; empty otherwise
 #   service-account=<name>
@@ -67,6 +73,7 @@ INVENTORY_KIND=
 INVENTORY_NAMESPACE=
 INVENTORY_NAME=
 INVENTORY_NEXT_DUE=0
+INVENTORY_MANAGED=true
 INVENTORY_INTERVAL=0
 INVENTORY_SUSPEND=
 INVENTORY_SERVICE_ACCOUNT=
@@ -80,6 +87,7 @@ INVENTORY_HEAD_KIND=
 INVENTORY_HEAD_NAMESPACE=
 INVENTORY_HEAD_NAME=
 INVENTORY_HEAD_NEXT_DUE=0
+INVENTORY_HEAD_MANAGED=true
 declare -ga INVENTORY_HEAD_LINES=()
 declare -ga INVENTORY_CONTAINER_LISTS=()
 declare -ga INVENTORY_CONTAINER_NAMES=()
@@ -165,13 +173,19 @@ inventory_fingerprint() {
 
 # inventory_put <kind> <ns> <name> <next-due> <interval> <suspend>
 #               <service-account> <image-pull-secrets> <annotations>
-#               <containers>
+#               <containers> [managed]
 #
 # <annotations> is the flattened newline-separated "<key>=<value>" block.
 # <containers> is newline-separated "<list> <name>=<image>".
+#
+# <managed> defaults to true, which is also how a record written before the
+# field existed reads. Polling something Keelson turns out not to manage costs
+# a registry call it does nothing with; not polling something it does manage
+# is a workload that silently stops being updated, so the default leans the
+# way whose failure is visible.
 inventory_put() {
     local kind=$1 ns=$2 name=$3 next_due=$4 interval=$5 suspend=$6 \
-          sa=$7 ips=$8 annotations=$9 containers=${10}
+          sa=$7 ips=$8 annotations=$9 containers=${10} managed=${11:-true}
     local line fp
 
     inventory_fingerprint "$interval" "$suspend" "$sa" "$ips" \
@@ -190,6 +204,7 @@ inventory_put() {
         printf 'namespace=%s\n' "$ns"
         printf 'name=%s\n' "$name"
         printf 'next-due=%s\n' "$next_due"
+        printf 'managed=%s\n' "$managed"
         printf 'interval=%s\n' "$interval"
         printf 'suspend=%s\n' "$suspend"
         printf 'service-account=%s\n' "$sa"
@@ -228,6 +243,7 @@ inventory_get() {
     INVENTORY_NAMESPACE=
     INVENTORY_NAME=
     INVENTORY_NEXT_DUE=0
+    INVENTORY_MANAGED=true
     INVENTORY_INTERVAL=0
     INVENTORY_SUSPEND=
     INVENTORY_SERVICE_ACCOUNT=
@@ -244,6 +260,7 @@ inventory_get() {
             namespace)          INVENTORY_NAMESPACE=$value ;;
             name)               INVENTORY_NAME=$value ;;
             next-due)           INVENTORY_NEXT_DUE=$value ;;
+            managed)            INVENTORY_MANAGED=$value ;;
             interval)           INVENTORY_INTERVAL=$value ;;
             suspend)            INVENTORY_SUSPEND=$value ;;
             service-account)    INVENTORY_SERVICE_ACCOUNT=$value ;;
@@ -294,7 +311,8 @@ inventory_set_next_due() {
     done
     inventory_put "$kind" "$ns" "$name" "$next_due" "$INVENTORY_INTERVAL" \
         "$INVENTORY_SUSPEND" "$INVENTORY_SERVICE_ACCOUNT" \
-        "$INVENTORY_IMAGE_PULL_SECRETS" "$INVENTORY_ANNOTATIONS" "$containers"
+        "$INVENTORY_IMAGE_PULL_SECRETS" "$INVENTORY_ANNOTATIONS" "$containers" \
+        "$INVENTORY_MANAGED"
 }
 
 # inventory_set_container_image <kind> <ns> <name> <list> <container> <image>
@@ -321,7 +339,8 @@ inventory_set_container_image() {
     [ "$found" -eq 0 ] || return 1
     inventory_put "$kind" "$ns" "$name" "$INVENTORY_NEXT_DUE" "$INVENTORY_INTERVAL" \
         "$INVENTORY_SUSPEND" "$INVENTORY_SERVICE_ACCOUNT" \
-        "$INVENTORY_IMAGE_PULL_SECRETS" "$INVENTORY_ANNOTATIONS" "$containers"
+        "$INVENTORY_IMAGE_PULL_SECRETS" "$INVENTORY_ANNOTATIONS" "$containers" \
+        "$INVENTORY_MANAGED"
 }
 
 # inventory_mark_polled <kind> <ns> <name> <now>
@@ -367,11 +386,11 @@ inventory_evict_unwatched() {
 }
 
 # inventory_read_head <path>
-# Sets INVENTORY_HEAD_KIND, _NAMESPACE, _NAME and _NEXT_DUE from a record,
-# reading as little of it as it can. Returns 1 if there is no kind, which is
-# how a half-written or foreign file reads.
+# Sets INVENTORY_HEAD_KIND, _NAMESPACE, _NAME, _NEXT_DUE and _MANAGED from a
+# record, reading as little of it as it can. Returns 1 if there is no kind,
+# which is how a half-written or foreign file reads.
 #
-# inventory_put writes those four fields first, so four lines is normally the
+# inventory_put writes those five fields first, so five lines is normally the
 # whole answer and the annotations, containers and fingerprint below them are
 # never read at all. They are taken by position, but only once the head has
 # been confirmed to hold them in that order; anything else is read and parsed
@@ -381,15 +400,17 @@ inventory_evict_unwatched() {
 # tick, and reading whole records was over half the cost of that pass.
 inventory_read_head() {
     local line key value
-    mapfile -n 4 -t INVENTORY_HEAD_LINES < "$1" 2>/dev/null || return 1
+    mapfile -n 5 -t INVENTORY_HEAD_LINES < "$1" 2>/dev/null || return 1
     if [[ ${INVENTORY_HEAD_LINES[0]} == kind=* \
             && ${INVENTORY_HEAD_LINES[1]} == namespace=* \
             && ${INVENTORY_HEAD_LINES[2]} == name=* \
-            && ${INVENTORY_HEAD_LINES[3]} == next-due=* ]]; then
+            && ${INVENTORY_HEAD_LINES[3]} == next-due=* \
+            && ${INVENTORY_HEAD_LINES[4]} == managed=* ]]; then
         INVENTORY_HEAD_KIND=${INVENTORY_HEAD_LINES[0]#kind=}
         INVENTORY_HEAD_NAMESPACE=${INVENTORY_HEAD_LINES[1]#namespace=}
         INVENTORY_HEAD_NAME=${INVENTORY_HEAD_LINES[2]#name=}
         INVENTORY_HEAD_NEXT_DUE=${INVENTORY_HEAD_LINES[3]#next-due=}
+        INVENTORY_HEAD_MANAGED=${INVENTORY_HEAD_LINES[4]#managed=}
         return 0
     fi
 
@@ -397,6 +418,9 @@ inventory_read_head() {
     INVENTORY_HEAD_NAMESPACE=
     INVENTORY_HEAD_NAME=
     INVENTORY_HEAD_NEXT_DUE=0
+    # Absent means managed, matching inventory_put's default: a record written
+    # before the field existed is one to keep polling, not one to drop.
+    INVENTORY_HEAD_MANAGED=true
     mapfile -t INVENTORY_HEAD_LINES < "$1" 2>/dev/null || return 1
     for line in "${INVENTORY_HEAD_LINES[@]}"; do
         key=${line%%=*}
@@ -406,6 +430,7 @@ inventory_read_head() {
             namespace) INVENTORY_HEAD_NAMESPACE=$value ;;
             name)      INVENTORY_HEAD_NAME=$value ;;
             next-due)  INVENTORY_HEAD_NEXT_DUE=$value ;;
+            managed)   INVENTORY_HEAD_MANAGED=$value ;;
         esac
     done
     [ -n "$INVENTORY_HEAD_KIND" ]
@@ -415,6 +440,13 @@ inventory_read_head() {
 # Populates INVENTORY_DUE with "<kind> <ns> <name>" for every workload whose
 # next-due has arrived. This is what the tick asks each second; a quiet
 # cluster on long schedules does no registry work at all in between.
+#
+# Only what Keelson manages. Everything the cluster has is cached, because the
+# ledger is reconciled against this cache and a workload has to be here to be
+# remembered; but a workload with no policy has nothing a registry could tell
+# us. Polling them anyway cost a forked child, a record read and a record
+# rewritten per workload per interval, to reach a decision its annotations had
+# already made.
 inventory_due() {
     local now=$1 f
     INVENTORY_DUE=()
@@ -422,6 +454,7 @@ inventory_due() {
     for f in "$KEELSON_INVENTORY_DIR"/*; do
         case "$f" in *.tmp) continue ;; esac
         inventory_read_head "$f" || continue
+        [ "$INVENTORY_HEAD_MANAGED" = true ] || continue
         [ "$now" -ge "$INVENTORY_HEAD_NEXT_DUE" ] 2>/dev/null || continue
         INVENTORY_DUE+=("$INVENTORY_HEAD_KIND $INVENTORY_HEAD_NAMESPACE $INVENTORY_HEAD_NAME")
     done

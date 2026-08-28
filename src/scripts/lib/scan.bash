@@ -584,7 +584,7 @@ scan_cache_workload() {
     fi
 
     inventory_put "$kind" "$ns" "$name" "$next_due" "$interval" "$suspend" \
-        "$sa" "$ips" "$annotations" "$containers"
+        "$sa" "$ips" "$annotations" "$containers" "$managed"
 }
 
 # scan_log_managed_workloads

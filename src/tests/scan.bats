@@ -492,6 +492,41 @@ SH
     [ "$status" -eq 0 ]
 }
 
+@test "inventory: an ineligible workload is cached as unmanaged and never polled" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0)"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_MANAGED" = "false" ]
+    skopeo_counting
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    [ "$(skopeo_call_count)" = "0" ]
+}
+
+@test "inventory: a workload given a policy becomes managed and polls at once" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0)"
+    scan_run 0 0 2>/dev/null
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_MANAGED" = "true" ]
+    skopeo_counting
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    [ "$(skopeo_call_count)" = "1" ]
+}
+
+@test "inventory: a workload that loses its policy stops being polled" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    [ "$(skopeo_call_count)" = "0" ]
+}
+
 @test "inventory: a new workload is scheduled inside its first interval" {
     # Offset by a hash of the identity rather than all landing on now+interval,
     # so an estate cached in one pass does not fall due in lockstep after.
