@@ -57,10 +57,34 @@ Configuration is via env (see KEELSON_* in Configuration.md).
 USAGE
 }
 
+declare -a CONFIG_NAMES=()
+declare -a CONFIG_VALUES=()
+
+# config_line <name> <value>
+# Collected rather than emitted, so config_flush can pad to the longest name
+# it was actually given. A fixed width stops aligning the moment a setting
+# longer than it is added, and says nothing when it does.
 config_line() {
-    local pad
-    printf -v pad '%-30s' "$1"
-    log_info_always config setting="$1" value="$2" msg="  $pad = $2"
+    CONFIG_NAMES+=("$1")
+    CONFIG_VALUES+=("$2")
+}
+
+# config_flush
+# Emits what config_line collected, every name padded to the widest.
+config_flush() {
+    local i width=0 pad
+    for i in ${CONFIG_NAMES[@]+"${CONFIG_NAMES[@]}"}; do
+        if [ "${#i}" -gt "$width" ]; then
+            width=${#i}
+        fi
+    done
+    for (( i = 0; i < ${#CONFIG_NAMES[@]}; i++ )); do
+        printf -v pad "%-${width}s" "${CONFIG_NAMES[$i]}"
+        log_info_always config setting="${CONFIG_NAMES[$i]}" \
+            value="${CONFIG_VALUES[$i]}" msg="  $pad = ${CONFIG_VALUES[$i]}"
+    done
+    CONFIG_NAMES=()
+    CONFIG_VALUES=()
 }
 
 # Every setting Keelson read, once, at boot. A pod behaving differently from
@@ -102,6 +126,7 @@ log_boot_config() {
     config_line log-repeat-interval-info "$KEELSON_LOG_INFO_REPEAT_INTERVAL"
     config_line log-repeat-interval-warn "$KEELSON_LOG_WARN_REPEAT_INTERVAL"
     config_line log-repeat-interval-error "$KEELSON_LOG_ERROR_REPEAT_INTERVAL"
+    config_flush
 }
 
 shutdown() {
