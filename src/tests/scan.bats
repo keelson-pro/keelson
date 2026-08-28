@@ -492,6 +492,44 @@ SH
     [ "$status" -eq 0 ]
 }
 
+@test "inventory: a next-due written after the pass started is not condemned" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    # 65s past the clock the pass starts with, which is what a poll child
+    # marking this workload ten seconds into the pass would have written.
+    inventory_set_next_due Deployment default app 1000065
+    clock_read() {
+        CLOCK_CALLS=$(( ${CLOCK_CALLS:-0} + 1 ))
+        if [ "$CLOCK_CALLS" -eq 1 ]; then
+            CLOCK_NOW_US=1000000000000
+        else
+            CLOCK_NOW_US=1000010000000
+        fi
+    }
+    run emit scan_run 0 0
+    [[ "$output" != *"next-due-implausible"* ]]
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "1000065" ]
+}
+
+@test "inventory: a next-due beyond any clock is still condemned" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 2000000
+    clock_read() {
+        CLOCK_CALLS=$(( ${CLOCK_CALLS:-0} + 1 ))
+        if [ "$CLOCK_CALLS" -eq 1 ]; then
+            CLOCK_NOW_US=1000000000000
+        else
+            CLOCK_NOW_US=1000010000000
+        fi
+    }
+    run emit scan_run 0 0
+    [[ "$output" == *"next-due-implausible"* ]]
+}
+
 @test "inventory: a second pass over an unchanged workload writes nothing" {
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
