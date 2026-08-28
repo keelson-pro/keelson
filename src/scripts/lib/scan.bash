@@ -480,6 +480,52 @@ scan_workload() {
     fi
 }
 
+# scan_check_next_due <kind> <ns> <name> <next-due> <interval>
+# True if a cached next-due is one a legitimate writer could have produced.
+# Returns 1 having warned and left a replacement in INVENTORY_FIRST_DUE.
+#
+# next-due cannot legitimately be beyond one interval out: inventory_first_due
+# is now + (hash % interval), inventory_mark_polled is exactly now + interval,
+# a resync is now. Further out than that, or not a number at all, is corrupt,
+# and nothing would ever correct it: inventory_due does not select a
+# far-future entry, so inventory_mark_polled never runs on it and the workload
+# is simply never polled again, silently, across restarts.
+#
+# Asked of the value read from disk, before anything downstream decides to
+# replace it. A workload whose fingerprint moved has its next-due overwritten
+# with "now", which is a correct schedule but a silent one: the corrupt value
+# it replaced would never be reported, and reporting it is the whole point.
+# The values computed below are right by construction and never needed asking.
+#
+# Against a clock read here rather than the one the pass started with. A poll
+# child that marked this workload since then wrote its next-due against a
+# later clock, so it can sit beyond _scan_now + interval quite legitimately,
+# and comparing the two condemned valid schedules, warned about them and reset
+# them. Read after the record, so whatever is in hand was written before this
+# reading and one interval is a real bound again.
+scan_check_next_due() {
+    local kind=$1 ns=$2 name=$3 next_due=$4 interval=$5
+    clock_read
+    local now=$(( CLOCK_NOW_US / 1000000 ))
+    local implausible=0
+    case "$next_due" in
+        ''|*[!0-9]*) implausible=1 ;;
+        *)
+            # An if, not a && chain: a false test would leave the case
+            # returning 1, and set -e kills the pass before it writes back.
+            if [ "$next_due" -gt $(( now + interval )) ]; then
+                implausible=1
+            fi
+            ;;
+    esac
+    [ "$implausible" -eq 1 ] || return 0
+    log_warn next-due-implausible kind="$kind" ns="$ns" name="$name" \
+        next-due="$next_due" interval="$interval" \
+        msg="$kind '$name' in '$ns' had a next-due of '$next_due', which is not within one ${interval}s interval of now; recomputing it."
+    inventory_first_due "$kind" "$ns" "$name" "$interval" "$now"
+    return 1
+}
+
 # scan_cache_workload <kind> <ns> <name> <annotations> <suspend> <sa> <ips>
 #                     <container-pairs>
 #
@@ -537,6 +583,8 @@ scan_cache_workload() {
     if inventory_get "$kind" "$ns" "$name"; then
         cached=1
         next_due=$INVENTORY_NEXT_DUE
+        scan_check_next_due "$kind" "$ns" "$name" "$next_due" "$interval" \
+            || next_due=$INVENTORY_FIRST_DUE
         if [ "$INVENTORY_FINGERPRINT" != "$computed_fingerprint" ]; then
             # The one comparison that decides whether anything Keelson cares
             # about moved, wherever the read came from: a queued re-read after
@@ -555,41 +603,6 @@ scan_cache_workload() {
         # ever bought was resuming the exact phase of a cycle, at the price of
         # a ConfigMap write per poll.
         inventory_first_due "$kind" "$ns" "$name" "$interval" "$_scan_now"
-        next_due=$INVENTORY_FIRST_DUE
-    fi
-
-    # Whatever it came from, next-due cannot legitimately be beyond one
-    # interval out: inventory_first_due is now + (hash % interval),
-    # inventory_mark_polled is exactly now + interval, a resync is now.
-    # Further out than that, or not a number at all, is corrupt - and nothing
-    # would ever correct it, because inventory_due does not select a
-    # far-future entry, so inventory_mark_polled never runs on it. The
-    # workload is simply never polled again, silently, across restarts.
-    # Checked against a fresh reading, not the one the pass started with. A
-    # poll child that marked this workload since then wrote its next-due
-    # against a later clock, so it can legitimately sit beyond
-    # _scan_now + interval, and comparing the two condemned valid schedules,
-    # warned about them and reset them. Taken after inventory_get, so whatever
-    # is in hand was written before this reading and one interval is a real
-    # bound again.
-    clock_read
-    local check_now=$(( CLOCK_NOW_US / 1000000 ))
-    local implausible=0
-    case "$next_due" in
-        ''|*[!0-9]*) implausible=1 ;;
-        *)
-            # An if, not a && chain: a false test would leave the case
-            # returning 1, and set -e kills the pass before it writes back.
-            if [ "$next_due" -gt $(( check_now + interval )) ]; then
-                implausible=1
-            fi
-            ;;
-    esac
-    if [ "$implausible" -eq 1 ]; then
-        log_warn next-due-implausible kind="$kind" ns="$ns" name="$name" \
-            next-due="$next_due" interval="$interval" \
-            msg="$kind '$name' in '$ns' had a next-due of '$next_due', which is not within one ${interval}s interval of now; recomputing it."
-        inventory_first_due "$kind" "$ns" "$name" "$interval" "$check_now"
         next_due=$INVENTORY_FIRST_DUE
     fi
 
