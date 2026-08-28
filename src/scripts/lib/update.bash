@@ -125,10 +125,28 @@ EOF
 # update_fetch_managed_fields <kind> <ns> <name>
 # Fetches the workload's managedFields array as JSON. Used by the CLI path
 # (the scanner already has this in hand from its list call).
+#
+# kubectl emits the JSON itself rather than the whole object being piped
+# through yq. This is the most expensive moment Keelson has: a pipe holds
+# kubectl at ~52MB resident and yq at ~22MB at the same time, per updating
+# child and times the poll concurrency, and that sum is what the memory limit
+# has to cover. A deployment running at 250Mi took thirty OOM kills in under
+# four days.
+#
+# The [*] matters. jsonpath returns a result set, so asking for
+# .metadata.managedFields yields one result that is itself the array and
+# renders as [[...]]; the extra level makes managedfields_apply_owner_of_image
+# find no owner at all and routes every update to the unowned strategy. [*]
+# makes each entry its own result, giving the flat array callers expect.
+#
+# Empty output means the object carries no managedFields, which is an empty
+# array rather than an error.
 update_fetch_managed_fields() {
-    local kind=$1 ns=$2 name=$3
-    kubectl get "$kind" "$name" -n "$ns" -o json 2>/dev/null \
-        | yq -p=json -o=json '.metadata.managedFields // []' 2>/dev/null
+    local kind=$1 ns=$2 name=$3 out
+    out=$(kubectl get "$kind" "$name" -n "$ns" \
+        -o 'jsonpath-as-json={.metadata.managedFields[*]}' 2>/dev/null) || return 1
+    printf '%s' "${out:-[]}"
+    return 0
 }
 
 # update_resolve_strategy <annotations> <container> <apply-owner-present>

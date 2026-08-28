@@ -120,7 +120,7 @@ SH
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 case "$1" in
-    get) printf '{}' ;;
+    get) printf '[]' ;;
     *) echo "$@" >>"$TMP_DIR/kubectl.log"; exit 0 ;;
 esac
 SH
@@ -140,7 +140,7 @@ case "$1" in
     *) echo "$@" >>"$TMP_DIR/kubectl.log"; exit 0 ;;
 esac
 SH
-    printf '{"metadata":{"managedFields":%s}}' "$(mf_update_kubectl)" >"$TMP_DIR/mf.json"
+    printf '%s' "$(mf_update_kubectl)" >"$TMP_DIR/mf.json"
     KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 0 ]
     [[ "$output" == *'"manager":"keelson"'* ]]
@@ -162,7 +162,7 @@ case "$1" in
     *) echo "$@" >>"$TMP_DIR/kubectl.log"; exit 0 ;;
 esac
 SH
-    printf '{"metadata":{"managedFields":%s}}' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
+    printf '%s' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
     KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 0 ]
     [[ "$output" == *'"manager":"argocd-application-controller"'* ]]
@@ -200,7 +200,7 @@ case "$1" in
     *) echo "$@" >>"$TMP_DIR/kubectl.log"; exit 0 ;;
 esac
 SH
-    printf '{"metadata":{"managedFields":%s}}' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
+    printf '%s' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
     KEELSON_FIELD_MANAGER_STRATEGY_OWNED=patch \
     KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 0 ]
@@ -213,7 +213,7 @@ SH
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 case "$1" in
-    get) printf '{}' ;;
+    get) printf '[]' ;;
     *) echo "$@" >>"$TMP_DIR/kubectl.log"; exit 0 ;;
 esac
 SH
@@ -237,7 +237,7 @@ case "$1" in
     *) echo "$@" >>"$TMP_DIR/kubectl.log"; exit 0 ;;
 esac
 SH
-    printf '{"metadata":{"managedFields":%s}}' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
+    printf '%s' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
     local ann='keelson.pro/field-manager-strategy=claim'
     KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3 "" "$ann"
     [ "$status" -eq 0 ]
@@ -251,7 +251,7 @@ SH
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 case "$1" in
-    get) printf '{}' ;;
+    get) printf '[]' ;;
     *) echo "$@" >>"$TMP_DIR/kubectl.log"; exit 0 ;;
 esac
 SH
@@ -267,7 +267,7 @@ SH
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 case "$1" in
-    get) printf '{}' ;;
+    get) printf '[]' ;;
     *) echo "$@" >>"$TMP_DIR/kubectl.log"; exit 0 ;;
 esac
 SH
@@ -286,7 +286,7 @@ case "$1" in
     *) echo "$@" >>"$TMP_DIR/kubectl.log"; exit 0 ;;
 esac
 SH
-    printf '{"metadata":{"managedFields":%s}}' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
+    printf '%s' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
     local ann=$'keelson.pro/field-manager-strategy=mimic\nkeelson.pro/field-manager-strategy.main=patch'
     KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3 "" "$ann"
     [ "$status" -eq 0 ]
@@ -307,7 +307,7 @@ case "$1" in
         ;;
 esac
 SH
-    printf '{"metadata":{"managedFields":%s}}' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
+    printf '%s' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
     KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 1 ]
     [[ "$output" == *'"event":"update-apply-conflict"'* ]]
@@ -328,7 +328,7 @@ case "$1" in
         ;;
 esac
 SH
-    printf '{"metadata":{"managedFields":%s}}' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
+    printf '%s' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
     KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 1 ]
     [[ "$output" == *'"event":"update-failed"'* ]]
@@ -408,4 +408,39 @@ SH
     [ "$status" -eq 1 ]
     [[ "$output" == *"Could not create Job"* ]]
     [[ "$output" == *"from CronJob 'nightly' in 'batch'"* ]]
+}
+
+# --- update_fetch_managed_fields ---
+
+@test "fetch_managed_fields: asks kubectl for the flat array and returns it" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "$@" >>"$TMP_DIR/kubectl.log"
+printf '[{"manager":"argocd-application-controller","operation":"Apply"}]'
+SH
+    run update_fetch_managed_fields Deployment default app
+    [ "$status" -eq 0 ]
+    [ "$output" = '[{"manager":"argocd-application-controller","operation":"Apply"}]' ]
+    # [*] and not the bare path: without it kubectl wraps the array in the
+    # jsonpath result set and every owner lookup comes back empty.
+    grep -q -- 'jsonpath-as-json={.metadata.managedFields\[\*\]}' "$TMP_DIR/kubectl.log"
+}
+
+@test "fetch_managed_fields: an object with none yields an empty array" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    run update_fetch_managed_fields Deployment default app
+    [ "$status" -eq 0 ]
+    [ "$output" = "[]" ]
+}
+
+@test "fetch_managed_fields: a failed kubectl returns 1" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    run update_fetch_managed_fields Deployment default app
+    [ "$status" -eq 1 ]
 }
