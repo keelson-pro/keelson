@@ -19,9 +19,11 @@ setup() {
     KEELSON_FULL_REFRESH_INTERVAL=3600
     KEELSON_WATCHER_RESPAWN_BACKOFF_MAX=300
     KEELSON_WATCHER_RESPAWN_HEALTHY_RESET=30
+    KEELSON_RECONCILE_OVERRUN_WARNING_BACKOFF_LIMIT=64
     export PATH TMP_DIR KEELSON_WATCHED_KINDS \
         KEELSON_TICK_INTERVAL KEELSON_RECONCILE_INTERVAL KEELSON_FULL_REFRESH_INTERVAL \
-        KEELSON_WATCHER_RESPAWN_BACKOFF_MAX KEELSON_WATCHER_RESPAWN_HEALTHY_RESET
+        KEELSON_WATCHER_RESPAWN_BACKOFF_MAX KEELSON_WATCHER_RESPAWN_HEALTHY_RESET \
+        KEELSON_RECONCILE_OVERRUN_WARNING_BACKOFF_LIMIT
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash
@@ -574,4 +576,43 @@ emit() { "$@" 2>&1; }
     scan_run() { :; }
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     [ -f "$calls" ]
+}
+
+# --- reconcile scan overrun ---
+
+@test "scan overrun: a scan inside its interval says nothing and clears the count" {
+    LOOP_SCAN_OVERRUNS=3
+    run emit loop_check_scan_overrun 60 60
+    [[ "$output" != *"The reconcile scan took"* ]]
+    loop_check_scan_overrun 60 60
+    [ "$LOOP_SCAN_OVERRUNS" -eq 0 ]
+}
+
+@test "scan overrun: a scan past its interval says so" {
+    run emit loop_check_scan_overrun 200 60
+    [[ "$output" == *"The reconcile scan took"* ]]
+    [[ "$output" == *"200s"* ]]
+}
+
+# The count is a variable in this shell, and `run` would spend it in a
+# subshell, so the calls have to be made here with stderr caught in a file.
+overrun_said() {
+    loop_check_scan_overrun "$1" "$2" 2>"$TMP_DIR/overrun.out"
+    grep -q "The reconcile scan took" "$TMP_DIR/overrun.out"
+}
+
+@test "scan overrun: consecutive overruns are reported on the 1st, 2nd and 4th" {
+    overrun_said 200 60
+    overrun_said 200 60
+    ! overrun_said 200 60
+    overrun_said 200 60
+    ! overrun_said 200 60
+}
+
+@test "scan overrun: the backoff limit sets how far it backs off" {
+    KEELSON_RECONCILE_OVERRUN_WARNING_BACKOFF_LIMIT=3
+    overrun_said 200 60
+    overrun_said 200 60
+    overrun_said 200 60
+    ! overrun_said 200 60
 }

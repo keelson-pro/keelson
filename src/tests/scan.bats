@@ -65,7 +65,10 @@ setup() {
     KEELSON_FIRST_POLL_DELAY_MAX=300
     KEELSON_REGISTRY_POLL_CONCURRENCY=2
     KEELSON_POLL_TALLY_FILE="$TMP_DIR/poll-tally"
-    export KEELSON_POLL_TALLY_FILE
+    KEELSON_POLL_OVERRUN_FILE="$TMP_DIR/poll-overrun"
+    KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT=64
+    export KEELSON_POLL_TALLY_FILE KEELSON_POLL_OVERRUN_FILE \
+           KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT
     export KEELSON_FIRST_POLL_DELAY_MAX KEELSON_REGISTRY_POLL_CONCURRENCY
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
     KEELSON_RECONCILE_INTERVAL=60
@@ -489,6 +492,99 @@ SH
     [ "$status" -eq 0 ]
 }
 
+@test "inventory: a next-due written after the pass started is not condemned" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    # 65s past the clock the pass starts with, which is what a poll child
+    # marking this workload ten seconds into the pass would have written.
+    inventory_set_next_due Deployment default app 1000065
+    clock_read() {
+        CLOCK_CALLS=$(( ${CLOCK_CALLS:-0} + 1 ))
+        if [ "$CLOCK_CALLS" -eq 1 ]; then
+            CLOCK_NOW_US=1000000000000
+        else
+            CLOCK_NOW_US=1000010000000
+        fi
+    }
+    run emit scan_run 0 0
+    [[ "$output" != *"next-due-implausible"* ]]
+    inventory_get Deployment default app
+    [ "$INVENTORY_NEXT_DUE" = "1000065" ]
+}
+
+@test "inventory: a next-due beyond any clock is still condemned" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 2000000
+    clock_read() {
+        CLOCK_CALLS=$(( ${CLOCK_CALLS:-0} + 1 ))
+        if [ "$CLOCK_CALLS" -eq 1 ]; then
+            CLOCK_NOW_US=1000000000000
+        else
+            CLOCK_NOW_US=1000010000000
+        fi
+    }
+    run emit scan_run 0 0
+    [[ "$output" == *"next-due-implausible"* ]]
+}
+
+@test "inventory: a second pass over an unchanged workload writes nothing" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    local calls="$TMP_DIR/put.calls"
+    inventory_put() { printf 'put\n' >>"$calls"; }
+    scan_run 0 0 2>/dev/null
+    [ ! -f "$calls" ]
+}
+
+@test "inventory: a changed workload is still written" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.3.0 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io/x/y:1.3.0" ]
+}
+
+@test "inventory: an ineligible workload is cached as unmanaged and never polled" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0)"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_MANAGED" = "false" ]
+    skopeo_counting
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    [ "$(skopeo_call_count)" = "0" ]
+}
+
+@test "inventory: a workload given a policy becomes managed and polls at once" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0)"
+    scan_run 0 0 2>/dev/null
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "$INVENTORY_MANAGED" = "true" ]
+    skopeo_counting
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    [ "$(skopeo_call_count)" = "1" ]
+}
+
+@test "inventory: a workload that loses its policy stops being polled" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0 minor)"
+    scan_run 0 0 2>/dev/null
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    scan_poll_due 0 "$LATE" 2>/dev/null
+    [ "$(skopeo_call_count)" = "0" ]
+}
+
 @test "inventory: a new workload is scheduled inside its first interval" {
     # Offset by a hash of the identity rather than all landing on now+interval,
     # so an estate cached in one pass does not fall due in lockstep after.
@@ -783,6 +879,97 @@ SH
     scan_poll_due 0 "$LATE" 2>/dev/null
     inventory_get Deployment default app
     [ "$INVENTORY_NEXT_DUE" = "$(( LATE + 7200 ))" ]
+}
+
+@test "poll: a pass that outruns the shortest cadence in it says so" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    # The pass is timed rather than simulated, so the clock is what moves:
+    # 200s between the read that opens the pass and the one that closes it.
+    clock_read() {
+        CLOCK_CALLS=$(( ${CLOCK_CALLS:-0} + 1 ))
+        CLOCK_NOW_US=$(( (CLOCK_CALLS - 1) * 200000000 ))
+    }
+    run emit scan_poll_due 0 "$LATE"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+}
+
+@test "poll: a pass inside the cadence says nothing" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    run emit scan_poll_due 0 "$LATE"
+    [[ "$output" != *"poll-pass-overrun"* ]]
+}
+
+@test "poll: consecutive overruns are reported on the 1st, 2nd and 4th, not the 3rd" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    # run executes in a subshell, so each pass starts this counter afresh and
+    # every one of them takes 200s. What carries between them is the count on
+    # disk, which is the whole point of keeping it there.
+    clock_read() {
+        CLOCK_CALLS=$(( ${CLOCK_CALLS:-0} + 1 ))
+        CLOCK_NOW_US=$(( (CLOCK_CALLS - 1) * 200000000 ))
+    }
+    run emit scan_poll_due 0 "$(( LATE + 60 ))"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+    run emit scan_poll_due 0 "$(( LATE + 120 ))"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+    run emit scan_poll_due 0 "$(( LATE + 180 ))"
+    [[ "$output" != *"poll-pass-overrun"* ]]
+    run emit scan_poll_due 0 "$(( LATE + 240 ))"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+}
+
+@test "poll: the backoff limit sets how far it backs off" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    clock_read() {
+        CLOCK_CALLS=$(( ${CLOCK_CALLS:-0} + 1 ))
+        CLOCK_NOW_US=$(( (CLOCK_CALLS - 1) * 200000000 ))
+    }
+    # At 3 the doubling never gets past the limit, so it reports every third
+    # pass from the third on: 1, 2, 3, then 6. At the default 64 the fourth
+    # would have reported and the third would not.
+    KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT=3
+    run emit scan_poll_due 0 "$(( LATE + 60 ))"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+    run emit scan_poll_due 0 "$(( LATE + 120 ))"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+    run emit scan_poll_due 0 "$(( LATE + 180 ))"
+    [[ "$output" == *"poll-pass-overrun"* ]]
+    run emit scan_poll_due 0 "$(( LATE + 240 ))"
+    [[ "$output" != *"poll-pass-overrun"* ]]
+}
+
+@test "poll: a pass that fits resets the backoff" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    skopeo_counting
+    printf '3\n' > "$KEELSON_POLL_OVERRUN_FILE"
+    run emit scan_poll_due 0 "$(( LATE + 60 ))"
+    [[ "$output" != *"poll-pass-overrun"* ]]
+    [ "$(cat "$KEELSON_POLL_OVERRUN_FILE")" = "0" ]
+}
+
+@test "poll: an empty pass cannot overrun" {
+    inventory_init
+    skopeo_counting
+    clock_read() {
+        CLOCK_CALLS=$(( ${CLOCK_CALLS:-0} + 1 ))
+        CLOCK_NOW_US=$(( (CLOCK_CALLS - 1) * 200000000 ))
+    }
+    run emit scan_poll_due 0 "$LATE"
+    [[ "$output" != *"poll-pass-overrun"* ]]
 }
 
 @test "poll: an empty cache polls nothing" {
@@ -1534,6 +1721,31 @@ SH
 # pass costs, so it is the thing most likely to be rewritten for speed. These
 # pin what it produces, field by field, so a rewrite has to answer for each.
 
+# Extraction is per kind now, so these reach one workload by walking to its
+# index. The assertions below are unchanged: what a single workload's record
+# must contain is the same question whether it was extracted alone or with
+# forty-nine others.
+extract_at() {
+    local list_json=$1 kind=$2 want=$3 rest block i=0
+    scan_extract_kind "$list_json" "$kind" || return 1
+    rest=${SCAN_KIND_RECORDS#*W|$'\n'}
+    while [ -n "$rest" ]; do
+        case "$rest" in
+            *$'\n'W\|$'\n'*)
+                block=${rest%%$'\n'W|$'\n'*}
+                rest=${rest#*$'\n'W|$'\n'}
+                ;;
+            *) block=$rest; rest= ;;
+        esac
+        if [ "$i" -eq "$want" ]; then
+            scan_extract_workload "$block"
+            return 0
+        fi
+        i=$(( i + 1 ))
+    done
+    return 1
+}
+
 EXTRACT_LIST='{"items":[
  {"metadata":{"namespace":"prod","name":"web",
    "annotations":{"keelson.pro/policy":"minor","keelson.pro/match-tag":"^1\\.",
@@ -1551,73 +1763,73 @@ EXTRACT_LIST='{"items":[
 ]}'
 
 @test "extract: namespace and name come from the indexed item" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    extract_at "$EXTRACT_LIST" Deployment 0
     [ "$SCAN_WL_NS" = "prod" ]
     [ "$SCAN_WL_NAME" = "web" ]
 }
 
 @test "extract: the index selects the workload" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    extract_at "$EXTRACT_LIST" Deployment 1
     [ "$SCAN_WL_NS" = "other" ]
     [ "$SCAN_WL_NAME" = "bare" ]
 }
 
 @test "extract: names come out bare, not quoted" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    extract_at "$EXTRACT_LIST" Deployment 0
     case "$SCAN_WL_NAME" in *'"'*) return 1 ;; esac
     case "$SCAN_WL_NS" in *'"'*) return 1 ;; esac
     case "$SCAN_WL_SA_NAME" in *'"'*) return 1 ;; esac
 }
 
 @test "extract: only keelson and keel annotations survive" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    extract_at "$EXTRACT_LIST" Deployment 0
     [[ "$SCAN_WL_ANNOTATIONS" == *"keelson.pro/policy=minor"* ]]
     [[ "$SCAN_WL_ANNOTATIONS" != *"deployment.kubernetes.io/revision"* ]]
 }
 
 @test "extract: a backslash in an annotation value is not doubled" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    extract_at "$EXTRACT_LIST" Deployment 0
     [[ "$SCAN_WL_ANNOTATIONS" == *'keelson.pro/match-tag=^1\.'* ]]
 }
 
 @test "extract: a workload with no annotations yields nothing" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    extract_at "$EXTRACT_LIST" Deployment 1
     [ -z "$SCAN_WL_ANNOTATIONS" ]
 }
 
 @test "extract: image pull secrets stay on one line for the cache record" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    extract_at "$EXTRACT_LIST" Deployment 0
     [ "$(printf '%s\n' "$SCAN_WL_IPS_JSON" | wc -l | tr -d ' ')" = "1" ]
     [[ "$SCAN_WL_IPS_JSON" == *"regcred"* ]]
 }
 
 @test "extract: absent image pull secrets are an empty array" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    extract_at "$EXTRACT_LIST" Deployment 1
     [ "$SCAN_WL_IPS_JSON" = "[]" ]
 }
 
 @test "extract: service account is read when set" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    extract_at "$EXTRACT_LIST" Deployment 0
     [ "$SCAN_WL_SA_NAME" = "deployer" ]
 }
 
 @test "extract: an unset service account defaults to 'default'" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    extract_at "$EXTRACT_LIST" Deployment 1
     [ "$SCAN_WL_SA_NAME" = "default" ]
 }
 
 @test "extract: managed fields come through as JSON" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    extract_at "$EXTRACT_LIST" Deployment 0
     [ "$(printf '%s' "$SCAN_WL_MANAGED_FIELDS" | yq -p=json -o=y '.[0].manager')" = "argocd" ]
 }
 
 @test "extract: absent managed fields are an empty array" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    extract_at "$EXTRACT_LIST" Deployment 1
     [ "$(printf '%s' "$SCAN_WL_MANAGED_FIELDS" | yq -p=json -o=y 'length')" = "0" ]
 }
 
 @test "extract: suspend is only read for CronJob" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    extract_at "$EXTRACT_LIST" Deployment 0
     [ -z "$SCAN_WL_SUSPEND" ]
 }
 
@@ -1631,12 +1843,12 @@ CRONJOB_LIST='{"items":[
 ]}'
 
 @test "extract: CronJob suspend is read" {
-    scan_extract_workload "$CRONJOB_LIST" CronJob 0
+    extract_at "$CRONJOB_LIST" CronJob 0
     [ "$SCAN_WL_SUSPEND" = "true" ]
 }
 
 @test "extract: an unset CronJob suspend reads false, not empty" {
-    scan_extract_workload "$CRONJOB_LIST" CronJob 1
+    extract_at "$CRONJOB_LIST" CronJob 1
     [ "$SCAN_WL_SUSPEND" = "false" ]
 }
 
@@ -1646,29 +1858,29 @@ CRONJOB_LIST='{"items":[
 # loop reads back, so the format is a contract between the two.
 
 @test "pairs: every container is listed with its list, name and image" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    extract_at "$EXTRACT_LIST" Deployment 0
     [[ "$SCAN_WL_CONTAINER_PAIRS" == *"containers web=ghcr.io/acme/web:1.2.3"* ]]
     [[ "$SCAN_WL_CONTAINER_PAIRS" == *"containers side=ghcr.io/acme/side:0.1.0"* ]]
 }
 
 @test "pairs: init containers carry initContainers as their list" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    extract_at "$EXTRACT_LIST" Deployment 0
     [[ "$SCAN_WL_CONTAINER_PAIRS" == *"initContainers migrate=ghcr.io/acme/migrate:2.0.0"* ]]
 }
 
 @test "pairs: containers come before init containers" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    extract_at "$EXTRACT_LIST" Deployment 0
     [ "${SCAN_WL_CONTAINER_PAIRS%%$'\n'*}" = "containers web=ghcr.io/acme/web:1.2.3" ]
 }
 
 @test "pairs: one line per container, no blanks" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    extract_at "$EXTRACT_LIST" Deployment 0
     [ "$(printf '%s\n' "$SCAN_WL_CONTAINER_PAIRS" | wc -l | tr -d ' ')" = "3" ]
     ! printf '%s\n' "$SCAN_WL_CONTAINER_PAIRS" | grep -q '^$'
 }
 
 @test "pairs: a workload with no init containers lists only its containers" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 1
+    extract_at "$EXTRACT_LIST" Deployment 1
     [ "$SCAN_WL_CONTAINER_PAIRS" = "containers only=nginx:1.0" ]
 }
 
@@ -1676,7 +1888,7 @@ CRONJOB_LIST='{"items":[
     local list='{"items":[{"metadata":{"namespace":"n","name":"w"},
       "spec":{"template":{"spec":{"containers":[
         {"name":"c","image":"ghcr.io/acme/w@sha256:abc123"}]}}}}]}'
-    scan_extract_workload "$list" Deployment 0
+    extract_at "$list" Deployment 0
     [ "$SCAN_WL_CONTAINER_PAIRS" = "containers c=ghcr.io/acme/w@sha256:abc123" ]
 }
 
@@ -1684,24 +1896,24 @@ CRONJOB_LIST='{"items":[
     local list='{"items":[{"metadata":{"namespace":"n","name":"w"},
       "spec":{"template":{"spec":{"containers":[
         {"name":"c","image":"reg.local:5000/acme/w:1.0"}]}}}}]}'
-    scan_extract_workload "$list" Deployment 0
+    extract_at "$list" Deployment 0
     [ "$SCAN_WL_CONTAINER_PAIRS" = "containers c=reg.local:5000/acme/w:1.0" ]
 }
 
 @test "pairs: a workload with no containers at all yields nothing" {
     local list='{"items":[{"metadata":{"namespace":"n","name":"w"},
       "spec":{"template":{"spec":{}}}}]}'
-    scan_extract_workload "$list" Deployment 0
+    extract_at "$list" Deployment 0
     [ -z "$SCAN_WL_CONTAINER_PAIRS" ]
 }
 
 @test "pairs: CronJob containers read through jobTemplate" {
-    scan_extract_workload "$CRONJOB_LIST" CronJob 0
+    extract_at "$CRONJOB_LIST" CronJob 0
     [ "$SCAN_WL_CONTAINER_PAIRS" = "containers job=ghcr.io/acme/job:3.0.0" ]
 }
 
 @test "pairs: annotations after the sentinel do not swallow the pairs" {
-    scan_extract_workload "$EXTRACT_LIST" Deployment 0
+    extract_at "$EXTRACT_LIST" Deployment 0
     [[ "$SCAN_WL_ANNOTATIONS" != *"containers "* ]]
     [[ "$SCAN_WL_CONTAINER_PAIRS" != *"keelson.pro/"* ]]
 }

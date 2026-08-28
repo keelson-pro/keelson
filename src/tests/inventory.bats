@@ -257,6 +257,71 @@ put_simple() {
     [ "${#INVENTORY_DUE[@]}" -eq 0 ]
 }
 
+@test "due: an unmanaged workload never comes back due" {
+    inventory_put Deployment default web 1000 60 "" default '[]' '' \
+        'containers main=a:1' false
+    inventory_due 2000
+    [ "${#INVENTORY_DUE[@]}" -eq 0 ]
+}
+
+@test "due: a record with no managed line is treated as managed" {
+    printf 'kind=Deployment\nnamespace=default\nname=web\nnext-due=1000\ninterval=60\n' \
+        > "$KEELSON_INVENTORY_DIR/Deployment--default--web"
+    inventory_due 2000
+    [ "${#INVENTORY_DUE[@]}" -eq 1 ]
+}
+
+@test "put then get round-trips managed, defaulting to true" {
+    put_simple
+    inventory_get Deployment default web
+    [ "$INVENTORY_MANAGED" = "true" ]
+    inventory_put Deployment default other 1700 60 "" default '[]' '' \
+        'containers main=b:1' false
+    inventory_get Deployment default other
+    [ "$INVENTORY_MANAGED" = "false" ]
+}
+
+@test "list: an unmanaged workload is still listed" {
+    inventory_put Deployment default web 1000 60 "" default '[]' '' \
+        'containers main=a:1' false
+    inventory_list
+    [ "${#INVENTORY_ALL[@]}" -eq 1 ]
+}
+
+@test "mark_polled and set_container_image keep managed as it was" {
+    inventory_put Deployment default web 1000 60 "" default '[]' '' \
+        'containers main=a:1' false
+    inventory_mark_polled Deployment default web 2000
+    inventory_get Deployment default web
+    [ "$INVENTORY_MANAGED" = "false" ]
+    inventory_set_container_image Deployment default web containers main a:2
+    inventory_get Deployment default web
+    [ "$INVENTORY_MANAGED" = "false" ]
+}
+
+@test "due: a record holding its fields past its head is still found" {
+    printf 'annotation=keelson.pro/policy=minor\nannotation=a=1\nannotation=b=2\nannotation=c=3\nkind=Deployment\nnamespace=default\nname=web\nnext-due=1000\ninterval=60\n' \
+        > "$KEELSON_INVENTORY_DIR/Deployment--default--web"
+    inventory_due 2000
+    [ "${#INVENTORY_DUE[@]}" -eq 1 ]
+    [ "${INVENTORY_DUE[0]}" = "Deployment default web" ]
+}
+
+@test "due: a record with no kind anywhere in it is skipped" {
+    printf 'annotation=a=1\nannotation=b=2\nannotation=c=3\nannotation=d=4\nnext-due=1000\n' \
+        > "$KEELSON_INVENTORY_DIR/Deployment--default--junk"
+    inventory_due 2000
+    [ "${#INVENTORY_DUE[@]}" -eq 0 ]
+}
+
+@test "list: a record holding its identity past its head is still listed" {
+    printf 'annotation=a=1\nannotation=b=2\nannotation=c=3\nannotation=d=4\nkind=CronJob\nnamespace=ops\nname=backup\nnext-due=1000\n' \
+        > "$KEELSON_INVENTORY_DIR/CronJob--ops--backup"
+    inventory_list
+    [ "${#INVENTORY_ALL[@]}" -eq 1 ]
+    [ "${INVENTORY_ALL[0]}" = "CronJob ops backup" ]
+}
+
 @test "set_next_due reschedules and preserves the record" {
     put_simple 1000 60
     inventory_set_next_due Deployment default web 4000

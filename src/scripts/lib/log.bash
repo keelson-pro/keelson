@@ -148,6 +148,29 @@ log_hint() {
     fi
 }
 
+# log_backoff_should_emit <count> <limit>
+# True on the 1st, 2nd, 4th, 8th occurrence of a repeating condition and so
+# on, then every <limit>-th. For a condition that does not clear itself and
+# so would otherwise be said on every occurrence forever.
+#
+# Distinct from the rate limiter above, which is a fixed gap in seconds keyed
+# on the line's own values: a line carrying a measurement that changes each
+# time is a new key every time, so nothing is ever suppressed. This backs off
+# on the count of occurrences instead, and says nothing about their spacing.
+#
+# Counting is the caller's, because where the count can live is the caller's
+# problem: a subshell spawned per occurrence has to keep it on disk, while a
+# long-lived loop can hold it in a variable.
+log_backoff_should_emit() {
+    local n=$1 limit=$2
+    [ "$n" -gt 0 ] || return 1
+    if [ "$n" -ge "$limit" ]; then
+        (( n % limit == 0 ))
+    else
+        (( (n & (n - 1)) == 0 ))
+    fi
+}
+
 # log_throttle_interval <level>  -> LOG_THROTTLE_INTERVAL
 # The configured repeat-interval (seconds) for <level>. 0 means never
 # throttle. Missing var also means 0 so older deploys don't break.
