@@ -533,8 +533,9 @@ scan_cache_workload() {
     # A workload already cached keeps its place in the cycle; a new one gets
     # an offset inside its first interval, so workloads cached in the same
     # pass do not all fall due together forever after.
-    local next_due
+    local next_due cached=0
     if inventory_get "$kind" "$ns" "$name"; then
+        cached=1
         next_due=$INVENTORY_NEXT_DUE
         if [ "$INVENTORY_FINGERPRINT" != "$computed_fingerprint" ]; then
             # The one comparison that decides whether anything Keelson cares
@@ -581,6 +582,24 @@ scan_cache_workload() {
             msg="$kind '$name' in '$ns' had a next-due of '$next_due', which is not within one ${interval}s interval of now; recomputing it."
         inventory_first_due "$kind" "$ns" "$name" "$interval" "$_scan_now"
         next_due=$INVENTORY_FIRST_DUE
+    fi
+
+    # Nothing to write if the record already says exactly this. A reconcile
+    # scan otherwise rewrites every workload it lists, every pass, to produce
+    # the bytes already on disk: a temp file, a rename, and a process for the
+    # rename, per workload per pass. On a steady estate that is the whole cost
+    # of a scan, and none of it changes anything.
+    #
+    # The three compared are everything inventory_put is given that is not
+    # already inside the fingerprint. Only valid against a record that was
+    # actually read: inventory_get leaves the globals untouched when it finds
+    # nothing, so a new workload would otherwise be compared against whatever
+    # the previous one left behind.
+    if [ "$cached" -eq 1 ] \
+            && [ "$computed_fingerprint" = "$INVENTORY_FINGERPRINT" ] \
+            && [ "$next_due" = "$INVENTORY_NEXT_DUE" ] \
+            && [ "$managed" = "$INVENTORY_MANAGED" ]; then
+        return 0
     fi
 
     inventory_put "$kind" "$ns" "$name" "$next_due" "$interval" "$suspend" \

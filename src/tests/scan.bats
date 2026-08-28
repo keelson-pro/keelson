@@ -492,6 +492,26 @@ SH
     [ "$status" -eq 0 ]
 }
 
+@test "inventory: a second pass over an unchanged workload writes nothing" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    local calls="$TMP_DIR/put.calls"
+    inventory_put() { printf 'put\n' >>"$calls"; }
+    scan_run 0 0 2>/dev/null
+    [ ! -f "$calls" ]
+}
+
+@test "inventory: a changed workload is still written" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.3.0 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_get Deployment default app
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io/x/y:1.3.0" ]
+}
+
 @test "inventory: an ineligible workload is cached as unmanaged and never polled" {
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.0)"
