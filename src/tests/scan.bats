@@ -530,6 +530,19 @@ SH
     [[ "$output" == *"next-due-implausible"* ]]
 }
 
+@test "inventory: a corrupt next-due is reported even when the workload changed" {
+    inventory_init
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    scan_run 0 0 2>/dev/null
+    inventory_set_next_due Deployment default app 2000000000
+    # The image moves too, so the resync would otherwise replace next-due with
+    # "now" before anything had looked at what was there.
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.3.0 minor)"
+    run emit scan_run 0 0
+    [[ "$output" == *"next-due-implausible"* ]]
+    [[ "$output" == *"scan-resync"* ]]
+}
+
 @test "inventory: a second pass over an unchanged workload writes nothing" {
     inventory_init
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
