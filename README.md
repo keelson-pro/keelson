@@ -20,20 +20,6 @@ not ideal. The final thing lacking in keel was job support, this [open ticket](h
 illustrates the issue. No progress in over 7 years since the ticket was opened.
 
 
-## Contents
-
-- **Scripts** (`src/scripts`) - bash runtime entry points.
-- **Library** (`src/scripts/lib`) - bash scripts sourced by runtime scripts.
-- **Manifests** (`src/kubernetes/` and generated) - templated with `${Environment}`.
-- **Defaults** (`src/defaults/`) - shipped values that populate the Deployment env so a vanilla install just works.
-- **Tests** (`src/tests/`) - the BATS suite covering the library code.
-
-
-## Tech stack
-
-Bash, kubectl, yq 4, skopeo. Everything runs in containers. Tests: BATS. Lint: shellcheck.
-
-
 ## Configuration
 
 See [Configuration.md](Configuration.md) for environment variables, the
@@ -53,8 +39,22 @@ this differs from Keel.
 ## Runtime
 
 See [EntryPoints.md](EntryPoints.md) for the five executable scripts in
-`src/scripts/` — what calls them, with what arguments, and how they fit
+`src/scripts/` - what calls them, with what arguments, and how they fit
 together at runtime.
+
+
+## Tech stack
+
+Bash, kubectl, yq 4, skopeo. Everything runs in containers. Tests: BATS. Lint: shellcheck.
+
+
+## Contents
+
+- **Scripts** (`src/scripts`) - bash runtime entry points.
+- **Library** (`src/scripts/lib`) - bash scripts sourced by runtime scripts.
+- **Manifests** (`src/kubernetes/` and generated) - templated with `${Environment}`.
+- **Defaults** (`src/defaults/`) - shipped values that populate the Deployment env so a vanilla install just works.
+- **Tests** (`src/tests/`) - the BATS suite covering the library code.
 
 
 # License
