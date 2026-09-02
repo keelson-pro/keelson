@@ -4,7 +4,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: ${ProjectName}-clusterrole-checksum
+  name: ${Environment}.${ProjectName}-clusterrole-checksum
   labels:
     kaptain.org/environment: ${Environment}
     kaptain.org/product: ${ProductName}
