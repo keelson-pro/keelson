@@ -94,7 +94,7 @@ log_boot_config() {
     log_info_always config-header msg="Keelson configuration from environment:"
     config_line scope "$KEELSON_SCOPE"
     if [ "$KEELSON_SCOPE" = "namespace" ]; then
-        config_line namespace "${KEELSON_NAMESPACE:-}"
+        config_line namespaces "${KEELSON_NAMESPACES:-}"
     fi
     config_line config-mode "$KEELSON_CONFIG_MODE"
     config_line watched-kinds "$KEELSON_WATCHED_KINDS"

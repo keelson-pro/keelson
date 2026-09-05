@@ -2,10 +2,9 @@
 # Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRoleBinding
 metadata:
-  name: ${ProjectName}-role-checksum
-  namespace: ${Environment}
+  name: ${Environment}.${ProjectName}-all-ns-clusterrolebinding-checksum
   labels:
     kaptain.org/environment: ${Environment}
     kaptain.org/product: ${ProductName}
@@ -20,8 +19,11 @@ metadata:
     app.kubernetes.io/part-of: ${ProductName}
   annotations:
     kaptain.org/source-repository: ${RepositoryOwner}/${RepositoryName}
-rules:
-  # State ConfigMap (keelson-state) and central config ConfigMaps (keelson-registries, keelson-notifications)
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "list", "create", "patch", "update"]
+subjects:
+  - kind: ServiceAccount
+    name: ${ProjectName}
+    namespace: ${Environment}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ${Environment}.${ProjectName}-all-ns-clusterrole-checksum

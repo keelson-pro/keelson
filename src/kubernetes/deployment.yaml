@@ -72,6 +72,8 @@ spec:
               value: "${Keelson/LogManagedWorkloads}"
             - name: KEELSON_SCOPE
               value: "${Keelson/Scope}"
+            - name: KEELSON_NAMESPACES
+              value: "${Keelson/Namespaces}"
             - name: KEELSON_CONFIG_MODE
               value: "${Keelson/ConfigMode}"
             - name: KEELSON_RESPECT_SA_PULL_SECRETS

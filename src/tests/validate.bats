@@ -279,14 +279,218 @@ YAML
     [ "$status" -eq 1 ]
 }
 
-@test "validate_config: KEELSON_SCOPE=namespace requires KEELSON_NAMESPACE" {
+@test "validate_config: KEELSON_SCOPE=namespace requires KEELSON_NAMESPACES" {
     set_required_env
     install_required_binaries
     export KEELSON_SCOPE=namespace
-    unset KEELSON_NAMESPACE
+    unset KEELSON_NAMESPACES
     v_run emit validate_config
     [ "$status" -eq 1 ]
-    [[ "$output" == *"KEELSON_NAMESPACE"* ]]
+    [[ "$output" == *"KEELSON_NAMESPACES"* ]]
+}
+
+@test "validate_config: KEELSON_SCOPE=namespace accepts a list" {
+    set_required_env
+    install_required_binaries
+    export KEELSON_SCOPE=namespace
+    export KEELSON_NAMESPACES="team-a team-b team-c"
+    v_run emit validate_config
+    [[ "$output" != *"KEELSON_NAMESPACES"* ]]
+    [[ "$output" != *"not a valid namespace name"* ]]
+}
+
+@test "validate_config: the empty default is fine in cluster scope" {
+    set_required_env
+    install_required_binaries
+    export KEELSON_NAMESPACES=""
+    v_run emit validate_config
+    [[ "$output" != *"KEELSON_NAMESPACES"* ]]
+}
+
+@test "validate_config: a list under cluster scope is checked and called ignored" {
+    set_required_env
+    install_required_binaries
+    export KEELSON_NAMESPACES="team-a"
+    v_run emit validate_config
+    [[ "$output" == *"the list is ignored"* ]]
+}
+
+@test "validate_config: a bad name under cluster scope still fails" {
+    set_required_env
+    install_required_binaries
+    export KEELSON_NAMESPACES="Team_A"
+    v_run emit validate_config
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'Team_A'"* ]]
+}
+
+# --- namespace list normalisation ---
+
+@test "normalise namespace: commas become spaces" {
+    KEELSON_NAMESPACES="team-a,team-b"
+    validate_normalise_namespaces
+    [ "$KEELSON_NAMESPACES" = "team-a team-b" ]
+}
+
+@test "normalise namespace: runs of whitespace collapse to one space" {
+    KEELSON_NAMESPACES=$'  team-a \t team-b\n'
+    validate_normalise_namespaces
+    [ "$KEELSON_NAMESPACES" = "team-a team-b" ]
+}
+
+@test "normalise namespace: empty entries from sloppy separators go" {
+    KEELSON_NAMESPACES="team-a,,team-b,"
+    validate_normalise_namespaces
+    [ "$KEELSON_NAMESPACES" = "team-a team-b" ]
+}
+
+@test "normalise namespace: a duplicate is dropped and said out loud" {
+    KEELSON_NAMESPACES="team-a team-b team-a"
+    run emit validate_normalise_namespaces
+    [[ "$output" == *"listed more than once"* ]]
+    validate_normalise_namespaces
+    [ "$KEELSON_NAMESPACES" = "team-a team-b" ]
+}
+
+@test "normalise namespace: order is kept" {
+    KEELSON_NAMESPACES="team-c team-a team-b"
+    validate_normalise_namespaces
+    [ "$KEELSON_NAMESPACES" = "team-c team-a team-b" ]
+}
+
+@test "normalise namespace: a single namespace is untouched" {
+    KEELSON_NAMESPACES="team-a"
+    validate_normalise_namespaces
+    [ "$KEELSON_NAMESPACES" = "team-a" ]
+}
+
+@test "normalise namespace: unset stays empty rather than erroring" {
+    unset KEELSON_NAMESPACES
+    validate_normalise_namespaces
+    [ -z "$KEELSON_NAMESPACES" ]
+}
+
+# --- namespace names ---
+
+@test "namespaces: a valid list passes" {
+    export KEELSON_NAMESPACES="team-a team-b-staging ns1"
+    validate_env_namespaces
+}
+
+@test "namespaces: an empty list fails" {
+    export KEELSON_NAMESPACES=""
+    run emit validate_env_namespaces
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"KEELSON_NAMESPACES"* ]]
+}
+
+@test "namespaces: uppercase is rejected" {
+    export KEELSON_NAMESPACES="team-a TeamB"
+    run emit validate_env_namespaces
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'TeamB'"* ]]
+}
+
+@test "namespaces: a leading or trailing hyphen is rejected" {
+    export KEELSON_NAMESPACES="-team-a"
+    run emit validate_env_namespaces
+    [ "$status" -eq 1 ]
+    export KEELSON_NAMESPACES="team-a-"
+    run emit validate_env_namespaces
+    [ "$status" -eq 1 ]
+}
+
+@test "namespaces: an underscore or slash is rejected" {
+    export KEELSON_NAMESPACES="team_a"
+    run emit validate_env_namespaces
+    [ "$status" -eq 1 ]
+    export KEELSON_NAMESPACES="team/a"
+    run emit validate_env_namespaces
+    [ "$status" -eq 1 ]
+}
+
+@test "namespaces: over 63 characters is rejected" {
+    export KEELSON_NAMESPACES="aaaaaaaaaabaaaaaaaaaacaaaaaaaaaadaaaaaaaaaaeaaaaaaaaaafaaaaaaaaaag"
+    run emit validate_env_namespaces
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"63 characters"* ]]
+}
+
+# --- namespaces exist ---
+
+@test "namespaces exist: a namespace the API server knows passes" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf 'namespace/%s\n' "$3"
+SH
+    export KEELSON_NAMESPACES="team-a team-b"
+    v_run validate_namespaces_exist
+    [ "$status" -eq 0 ]
+}
+
+@test "namespaces exist: a missing namespace fails and names it" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo 'Error from server (NotFound): namespaces "team-typo" not found' >&2
+exit 1
+SH
+    export KEELSON_NAMESPACES="team-typo"
+    v_run emit validate_namespaces_exist
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'team-typo'"* ]]
+    [[ "$output" == *"not found"* ]]
+}
+
+@test "namespaces exist: forbidden fails too, the ClusterRole is missing" {
+    # A half-applied install, not a lifestyle choice: without the read there
+    # is no way to tell a working namespace from a typo.
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo 'Error from server (Forbidden): namespaces "team-a" is forbidden' >&2
+exit 1
+SH
+    export KEELSON_NAMESPACES="team-a"
+    v_run emit validate_namespaces_exist
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ClusterRole"* ]]
+}
+
+@test "namespaces exist: an unreachable API server fails" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo 'The connection to the server localhost:8080 was refused' >&2
+exit 1
+SH
+    export KEELSON_NAMESPACES="team-a"
+    v_run emit validate_namespaces_exist
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"connection to the server"* ]]
+}
+
+@test "namespaces exist: no kubectl at all fails" {
+    rm -f "$TMP_BIN/kubectl"
+    export KEELSON_NAMESPACES="team-a"
+    v_run emit validate_namespaces_exist
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'team-a'"* ]]
+}
+
+@test "namespaces exist: every namespace is checked, not just the first" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$3" >>"$TMP_DIR/ns.checked"
+SH
+    export KEELSON_NAMESPACES="team-a team-b team-c"
+    v_run validate_namespaces_exist
+    [ "$(wc -l <"$TMP_DIR/ns.checked" | tr -d ' ')" = "3" ]
+}
+
+@test "namespaces: every bad entry is reported, not just the first" {
+    export KEELSON_NAMESPACES="Bad1 team-a Bad2"
+    run emit validate_env_namespaces
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'Bad1'"* ]]
+    [[ "$output" == *"'Bad2'"* ]]
 }
 
 # --- heartbeat headroom ---

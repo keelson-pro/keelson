@@ -5,27 +5,32 @@
 # Sourced; not directly executable.
 #
 # Configuration (all required, validated at boot):
-#   KEELSON_TICK_INTERVAL          seconds between supervisor ticks
-#   KEELSON_RECONCILE_INTERVAL          seconds between scan starts (measured from
-#                                  scan start time; long scans queue the next
-#                                  for the very next tick, never overlap)
-#   KEELSON_FULL_REFRESH_INTERVAL  seconds between dedupe-cache refreshes
-#   KEELSON_WATCHER_RESPAWN_BACKOFF_MAX    cap on per-kind respawn delay (s)
-#   KEELSON_WATCHER_RESPAWN_HEALTHY_RESET  alive duration that clears a kind's failure count
+#   KEELSON_TICK_INTERVAL                  seconds between supervisor ticks
+#   KEELSON_RECONCILE_INTERVAL             seconds between scan starts (measured from
+#                                          scan start time; long scans queue the next
+#                                          for the very next tick, never overlap)
+#   KEELSON_FULL_REFRESH_INTERVAL          seconds between dedupe-cache refreshes
+#   KEELSON_WATCHER_RESPAWN_BACKOFF_MAX    cap on per-target respawn delay (s)
+#   KEELSON_WATCHER_RESPAWN_HEALTHY_RESET  alive duration that clears a target's failure count
 #
 # Test overrides:
-#   KEELSON_LOOP_MAX_ITERATIONS    0 = forever (default); >0 for tests
+#   KEELSON_LOOP_MAX_ITERATIONS            0 = forever (default); >0 for tests
+#
+# Watcher maps are keyed by watch target, which is the kind in cluster scope
+# and "<Kind>.<namespace>" per namespace otherwise: see watch_targets. One
+# namespace failing then backs off alone instead of dragging the kind's other
+# namespaces down with it.
 #
 # Globals owned by this file:
-#   LOOP_WATCHER_PIDS[<kind>]      current watcher PID (0 if none)
-#   LOOP_WATCHER_FAIL[<kind>]      consecutive failures since last healthy reset
-#   LOOP_WATCHER_STARTED[<kind>]   unix-seconds the current watcher started
-#   LOOP_WATCHER_ELIGIBLE[<kind>]  earliest unix-seconds we may respawn this kind
-#   LOOP_SCAN_PID                  current scan child PID (0 if none)
-#   LOOP_SCAN_OVERRUNS             consecutive scans that outran their interval
-#   LOOP_QUEUE_PID                 current queue-refresh child PID (0 if none)
-#   LOOP_MANAGED_LOGGED            1 once the managed-workload list has been logged
-#   LOOP_FIRST_SCAN_DONE           1 once the first reconcile scan child has finished
+#   LOOP_WATCHER_PIDS[<target>]      current watcher PID (0 if none)
+#   LOOP_WATCHER_FAIL[<target>]      consecutive failures since last healthy reset
+#   LOOP_WATCHER_STARTED[<target>]   unix-seconds the current watcher started
+#   LOOP_WATCHER_ELIGIBLE[<target>]  earliest unix-seconds we may respawn this target
+#   LOOP_SCAN_PID                    current scan child PID (0 if none)
+#   LOOP_SCAN_OVERRUNS               consecutive scans that outran their interval
+#   LOOP_QUEUE_PID                   current queue-refresh child PID (0 if none)
+#   LOOP_MANAGED_LOGGED              1 once the managed-workload list has been logged
+#   LOOP_FIRST_SCAN_DONE             1 once the first reconcile scan child has finished
 #
 # Depends on (must be sourced first):
 #   lib/log.bash, lib/clock.bash, lib/queue.bash, lib/state.bash, lib/scan.bash,
@@ -47,9 +52,10 @@ declare -ga LOOP_REFRESH_PENDING=()
 # loop_publish_watchers
 # Publishes the current PID map for keelson-probe's readiness check.
 loop_publish_watchers() {
-    local kind args=()
-    for kind in $KEELSON_WATCHED_KINDS; do
-        args+=("${kind}=${LOOP_WATCHER_PIDS[$kind]:-0}")
+    local target args=()
+    watch_targets
+    for target in "${WATCH_TARGETS[@]}"; do
+        args+=("${target}=${LOOP_WATCHER_PIDS[$target]:-0}")
     done
     status_write_watchers "${args[@]}"
 }
@@ -64,41 +70,50 @@ loop_publish_watchers() {
 # map moves on a death or a respawn, not on a schedule.
 loop_supervise_watchers() {
     local now=$1 backoff_max=$2 healthy_reset=$3
-    local kind pid started fails delay new_pid changed=0
-    for kind in $KEELSON_WATCHED_KINDS; do
-        pid=${LOOP_WATCHER_PIDS[$kind]:-0}
+    local target what pid started fails delay new_pid changed=0
+    watch_targets
+    for target in "${WATCH_TARGETS[@]}"; do
+        watch_target_split "$target"
+        if [ -n "$WATCH_TARGET_NS" ]; then
+            what="kind '$WATCH_TARGET_KIND' in namespace '$WATCH_TARGET_NS'"
+        else
+            what="kind '$WATCH_TARGET_KIND'"
+        fi
+        pid=${LOOP_WATCHER_PIDS[$target]:-0}
         if [ "$pid" -gt 0 ]; then
             if kill -0 "$pid" 2>/dev/null; then
-                started=${LOOP_WATCHER_STARTED[$kind]:-$now}
-                if [ "${LOOP_WATCHER_FAIL[$kind]:-0}" -gt 0 ] && \
+                started=${LOOP_WATCHER_STARTED[$target]:-$now}
+                if [ "${LOOP_WATCHER_FAIL[$target]:-0}" -gt 0 ] && \
                         [ $(( now - started )) -ge "$healthy_reset" ]; then
-                    LOOP_WATCHER_FAIL[$kind]=0
+                    LOOP_WATCHER_FAIL[$target]=0
                 fi
                 continue
             fi
-            log_warn watcher-died kind="$kind" pid="$pid" \
-                msg="Watcher for kind '$kind' died (pid $pid)."
-            fails=$(( ${LOOP_WATCHER_FAIL[$kind]:-0} + 1 ))
-            LOOP_WATCHER_FAIL[$kind]=$fails
+            log_warn watcher-died kind="$WATCH_TARGET_KIND" target="$target" pid="$pid" \
+                msg="Watcher for $what died (pid $pid)."
+            fails=$(( ${LOOP_WATCHER_FAIL[$target]:-0} + 1 ))
+            LOOP_WATCHER_FAIL[$target]=$fails
             delay=$(( 1 << (fails - 1) ))
             [ "$delay" -gt "$backoff_max" ] && delay=$backoff_max
-            LOOP_WATCHER_ELIGIBLE[$kind]=$(( now + delay ))
-            LOOP_WATCHER_PIDS[$kind]=0
+            LOOP_WATCHER_ELIGIBLE[$target]=$(( now + delay ))
+            LOOP_WATCHER_PIDS[$target]=0
             changed=1
         fi
-        [ "$now" -lt "${LOOP_WATCHER_ELIGIBLE[$kind]:-0}" ] && continue
-        watch_run_kind "$kind" &
+        [ "$now" -lt "${LOOP_WATCHER_ELIGIBLE[$target]:-0}" ] && continue
+        watch_run_target "$target" &
         new_pid=$!
-        LOOP_WATCHER_PIDS[$kind]=$new_pid
-        LOOP_WATCHER_STARTED[$kind]=$now
+        LOOP_WATCHER_PIDS[$target]=$new_pid
+        LOOP_WATCHER_STARTED[$target]=$now
         changed=1
-        fails=${LOOP_WATCHER_FAIL[$kind]:-0}
+        fails=${LOOP_WATCHER_FAIL[$target]:-0}
         if [ "$fails" -eq 0 ]; then
-            log_info_always watcher-spawned kind="$kind" pid="$new_pid" fails="$fails" \
-                msg="Watcher for kind '$kind' started (pid $new_pid)."
+            log_info_always watcher-spawned kind="$WATCH_TARGET_KIND" target="$target" \
+                pid="$new_pid" fails="$fails" \
+                msg="Watcher for $what started (pid $new_pid)."
         else
-            log_warn watcher-respawned kind="$kind" pid="$new_pid" fails="$fails" \
-                msg="Watcher for kind '$kind' respawned (pid $new_pid, fail count $fails)."
+            log_warn watcher-respawned kind="$WATCH_TARGET_KIND" target="$target" \
+                pid="$new_pid" fails="$fails" \
+                msg="Watcher for $what respawned (pid $new_pid, fail count $fails)."
         fi
     done
     [ "$changed" -eq 1 ] && loop_publish_watchers

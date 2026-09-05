@@ -102,6 +102,98 @@ validate_env_kinds() {
     done
 }
 
+# validate_normalise_namespaces
+# Rewrites KEELSON_NAMESPACES into its canonical form: entries separated by a
+# single space, in the order given, with duplicates dropped.
+#
+# Commas are accepted as separators and become spaces. A comma-separated list
+# is what most operators reach for, both spellings mean exactly the same
+# thing, and a namespace name can contain neither a comma nor a space, so
+# there is nothing to disambiguate.
+#
+# The only place a configured value is rewritten, and it is done once at boot
+# so everything downstream reads the same string: the boot config line, the
+# error messages below, the watcher targets and the scan's list calls all say
+# what Keelson actually did rather than what was typed.
+validate_normalise_namespaces() {
+    local ns raw=${KEELSON_NAMESPACES:-} seen=' ' out=
+    raw=${raw//,/ }
+    # Unquoted on purpose: word splitting collapses any run of whitespace and
+    # drops the empty entries a trailing or doubled separator leaves behind.
+    # shellcheck disable=SC2086
+    set -- $raw
+    for ns in "$@"; do
+        case "$seen" in
+            *" $ns "*)
+                log_warn validate-namespace-duplicate ns="$ns" \
+                    msg="Namespace '$ns' is listed more than once in KEELSON_NAMESPACES; watching it once."
+                continue
+                ;;
+        esac
+        seen="$seen$ns "
+        out="${out:+$out }$ns"
+    done
+    KEELSON_NAMESPACES=$out
+}
+
+# validate_env_namespaces
+# KEELSON_SCOPE=namespace needs at least one namespace, and every entry has to
+# be a name the API server could accept: an RFC 1123 label of lowercase
+# alphanumerics and hyphens, not starting or ending with one, 63 chars at most.
+#
+# Checked rather than left to kubectl because a namespace that does not exist
+# is not an error kubectl reports as anything but an empty list. A typo would
+# leave a watcher streaming nothing, reporting itself perfectly healthy, and
+# the workloads it was meant to cover updated by nobody.
+validate_env_namespaces() {
+    local ns errors=0 valid
+    validate_env_set KEELSON_NAMESPACES || return 1
+    for ns in $KEELSON_NAMESPACES; do
+        valid=1
+        case "$ns" in
+            *[!a-z0-9-]*|-*|*-) valid=0 ;;
+        esac
+        if [ "${#ns}" -gt 63 ]; then
+            valid=0
+        fi
+        if [ "$valid" -eq 0 ]; then
+            log_error validate-namespace-invalid ns="$ns" \
+                msg="Validation failed: '$ns' in KEELSON_NAMESPACES is not a valid namespace name (lowercase letters, digits and hyphens, not leading or trailing, 63 characters at most)."
+            errors=$((errors+1))
+        fi
+    done
+    [ "$errors" -eq 0 ]
+}
+
+# validate_namespaces_exist
+# Reads every namespace in KEELSON_NAMESPACES from the API server. Anything
+# short of a clean read fails the boot.
+#
+# A name that passed the syntax check above can still be a typo, and a typo is
+# invisible at runtime: listing a namespace that does not exist is not an
+# error kubectl reports as anything but an empty list, so the watcher would
+# stream nothing and report itself perfectly healthy forever.
+#
+# One outcome for every failure, deliberately. Missing means the configuration
+# names a namespace that is not there. Forbidden means the cluster-scoped
+# ClusterRole was never applied, so the install is half-built. Unreachable
+# means Keelson cannot talk to the cluster it was asked to manage. All three
+# are broken installs, and a controller that boots anyway is a controller
+# reporting Ready while updating nothing.
+validate_namespaces_exist() {
+    local ns out rc errors=0
+    for ns in ${KEELSON_NAMESPACES:-}; do
+        rc=0
+        out=$(kubectl get namespace "$ns" -o name 2>&1) || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            log_error validate-namespace-unreadable ns="$ns" rc="$rc" \
+                msg="Validation failed: could not read namespace '$ns' from KEELSON_NAMESPACES: ${out:-no output from kubectl} (exit $rc). Either it does not exist, or Keelson has no 'get namespaces' permission and the cluster-scoped ClusterRole and ClusterRoleBinding are missing from this install."
+            errors=$((errors+1))
+        fi
+    done
+    [ "$errors" -eq 0 ]
+}
+
 validate_binary() {
     local bin=$1
     if ! command -v "$bin" >/dev/null 2>&1; then
@@ -243,8 +335,21 @@ validate_config() {
     validate_env_enum KEELSON_FIELD_MANAGER_STRATEGY_OWNED "mimic patch" || errors=$((errors+1))
     validate_env_enum KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED "patch claim" || errors=$((errors+1))
 
+    # Empty means every namespace, which only KEELSON_SCOPE=cluster is
+    # entitled to, so the empty default ships without failing a vanilla
+    # install. Any value at all is checked, whatever the scope: a list that is
+    # about to be ignored is worth saying out loud, and one that is about to
+    # be used is worth checking before a watcher sits on a typo forever.
+    validate_normalise_namespaces
     if [ "${KEELSON_SCOPE:-}" = "namespace" ]; then
-        validate_env_set KEELSON_NAMESPACE || errors=$((errors+1))
+        # Only the list Keelson is about to act on is worth a round trip, and
+        # only once its names are known to be names at all.
+        validate_env_namespaces && validate_namespaces_exist || errors=$((errors+1))
+    elif [ -n "${KEELSON_NAMESPACES:-}" ]; then
+        validate_env_namespaces || errors=$((errors+1))
+        log_warn validate-namespaces-ignored namespaces="$KEELSON_NAMESPACES" \
+            scope="${KEELSON_SCOPE:-}" \
+            msg="KEELSON_NAMESPACES is set to '$KEELSON_NAMESPACES' but KEELSON_SCOPE is '${KEELSON_SCOPE:-}', so every namespace is watched and the list is ignored. Set KEELSON_SCOPE=namespace to honour it."
     fi
 
     for var in KEELSON_RECONCILE_INTERVAL KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT \
