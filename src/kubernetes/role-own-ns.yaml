@@ -23,7 +23,7 @@ metadata:
 rules:
   # Workloads Keelson reads, watches, and updates the image on (scoped to this namespace)
   - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
     verbs: ["get", "list", "watch", "patch", "update"]
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
