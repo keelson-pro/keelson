@@ -3,7 +3,7 @@
 # Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 
 # Tests for lib/loop.bash. The supervisor + tick scheduler are exercised
-# with shimmed sleep + date and a stubbed watch_run_kind that spawns a
+# with shimmed sleep + date and a stubbed watch_run_target that spawns a
 # short-lived background sleeper. Scan is also stubbed.
 
 load helper
@@ -14,6 +14,7 @@ setup() {
     mkdir -p "$TMP_BIN"
     PATH="$TMP_BIN:$PATH"
     KEELSON_WATCHED_KINDS=Deployment
+    KEELSON_SCOPE=cluster
     KEELSON_TICK_INTERVAL=1
     KEELSON_RECONCILE_INTERVAL=60
     KEELSON_FULL_REFRESH_INTERVAL=3600
@@ -36,6 +37,10 @@ setup() {
     source "$SCRIPT_DIR/lib/status.bash"
     # shellcheck source=../scripts/lib/state.bash
     source "$SCRIPT_DIR/lib/state.bash"
+    # shellcheck source=../scripts/lib/workload.bash
+    source "$SCRIPT_DIR/lib/workload.bash"
+    # shellcheck source=../scripts/lib/watch.bash
+    source "$SCRIPT_DIR/lib/watch.bash"
     # shellcheck source=../scripts/lib/loop.bash
     source "$SCRIPT_DIR/lib/loop.bash"
 
@@ -61,7 +66,10 @@ setup() {
     state_load() { printf 'load\n' >>"$TMP_DIR/state.calls"; }
     state_spool_commit() { printf 'commit\n' >>"$TMP_DIR/state.calls"; }
     state_drain_spool() { printf 'drain\n' >>"$TMP_DIR/state.calls"; return 1; }
-    watch_run_kind() { sleep 10; }
+    # watch.bash is sourced rather than stubbed so the supervisor builds its
+    # targets the way the controller does; only the long-running watcher
+    # itself is replaced.
+    watch_run_target() { sleep 10; }
 
     sleep() { :; }
 }
@@ -233,6 +241,35 @@ emit() { "$@" 2>&1; }
     [ "$status" -eq 0 ]
 }
 
+# --- one watcher per namespace ---
+
+@test "supervisor: spawns a watcher per namespace and publishes both" {
+    KEELSON_SCOPE=namespace KEELSON_NAMESPACES="team-a team-b"
+    loop_supervise_watchers 100 300 30
+    [ "${LOOP_WATCHER_PIDS[Deployment.team-a]}" -gt 0 ]
+    [ "${LOOP_WATCHER_PIDS[Deployment.team-b]}" -gt 0 ]
+    [ "${LOOP_WATCHER_PIDS[Deployment.team-a]}" != "${LOOP_WATCHER_PIDS[Deployment.team-b]}" ]
+    grep -q "^Deployment.team-a=${LOOP_WATCHER_PIDS[Deployment.team-a]}\$" "$WATCHERS_FILE"
+    grep -q "^Deployment.team-b=${LOOP_WATCHER_PIDS[Deployment.team-b]}\$" "$WATCHERS_FILE"
+}
+
+@test "supervisor: one namespace backing off leaves the other alone" {
+    # The whole point of a watcher per namespace: team-a denied by RBAC must
+    # not stop team-b's Deployments being watched.
+    KEELSON_SCOPE=namespace KEELSON_NAMESPACES="team-a team-b"
+    LOOP_WATCHER_PIDS[Deployment.team-a]=0
+    LOOP_WATCHER_ELIGIBLE[Deployment.team-a]=200
+    loop_supervise_watchers 100 300 30
+    [ "${LOOP_WATCHER_PIDS[Deployment.team-a]}" = "0" ]
+    [ "${LOOP_WATCHER_PIDS[Deployment.team-b]}" -gt 0 ]
+}
+
+@test "supervisor: names the namespace when a namespaced watcher starts" {
+    KEELSON_SCOPE=namespace KEELSON_NAMESPACES=team-a
+    run emit loop_supervise_watchers 100 300 30
+    [[ "$output" == *"kind 'Deployment' in namespace 'team-a'"* ]]
+}
+
 # --- loop_run scheduling ---
 
 @test "loop_run: triggers scan on first tick" {
@@ -320,8 +357,8 @@ emit() { "$@" 2>&1; }
 # --- cycle time ---
 
 @test "loop_run: sleeps the tick remainder, not the whole tick" {
-    # watch_run_kind's stub sleeps too; keep it off the real sleep stub.
-    watch_run_kind() { command sleep 10; }
+    # watch_run_target's stub sleeps too; keep it off the real sleep stub.
+    watch_run_target() { command sleep 10; }
     sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
     loop_supervise_watchers() { command sleep 0.4; return 0; }
     KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
@@ -330,8 +367,8 @@ emit() { "$@" 2>&1; }
 }
 
 @test "loop_run: a fast tick still sleeps nearly the whole tick" {
-    # watch_run_kind's stub sleeps too; keep it off the real sleep stub.
-    watch_run_kind() { command sleep 10; }
+    # watch_run_target's stub sleeps too; keep it off the real sleep stub.
+    watch_run_target() { command sleep 10; }
     sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
     KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     awk '{ exit ($1 > 0.9 && $1 <= 1) ? 0 : 1 }' "$TMP_DIR/sleeps"
@@ -340,8 +377,8 @@ emit() { "$@" 2>&1; }
 @test "loop_run: sub-second work does not read as an overrun" {
     # Integer-second arithmetic would call this a 1s tick whenever the
     # second happened to roll over mid-work, and skip the sleep entirely.
-    # watch_run_kind's stub sleeps too; keep it off the real sleep stub.
-    watch_run_kind() { command sleep 10; }
+    # watch_run_target's stub sleeps too; keep it off the real sleep stub.
+    watch_run_target() { command sleep 10; }
     sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
     loop_supervise_watchers() { command sleep 0.3; return 0; }
     KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=3 run emit loop_run
@@ -351,8 +388,8 @@ emit() { "$@" 2>&1; }
 }
 
 @test "loop_run: overrunning tick does not sleep and warns" {
-    # watch_run_kind's stub sleeps too; keep it off the real sleep stub.
-    watch_run_kind() { command sleep 10; }
+    # watch_run_target's stub sleeps too; keep it off the real sleep stub.
+    watch_run_target() { command sleep 10; }
     sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
     loop_supervise_watchers() { command sleep 1.3; return 0; }
     KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=1 run emit loop_run

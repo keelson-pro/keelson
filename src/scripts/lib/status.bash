@@ -9,7 +9,7 @@
 #   <dir>/heartbeat   heartbeat=<unix-seconds>   written by the controller loop
 #                                                once per tick; that cadence is
 #                                                the whole point of it
-#   <dir>/watchers    <Kind>=<pid> per line      written by the watcher
+#   <dir>/watchers    <target>=<pid> per line    written by the watcher
 #                                                supervisor at the moment it
 #                                                changes the map, which is a
 #                                                death or a respawn and so
@@ -66,7 +66,7 @@ status_write_heartbeat() {
     status_write_file "$KEELSON_STATUS_DIR/heartbeat" "heartbeat=$CLOCK_TEXT"
 }
 
-# status_write_watchers [<kind=pid> ...]
+# status_write_watchers [<target=pid> ...]
 status_write_watchers() {
     status_write_file "$KEELSON_STATUS_DIR/watchers" "$@"
 }
@@ -91,7 +91,7 @@ status_read_heartbeat() {
 }
 
 # status_read_watchers
-# Populates STATUS_PIDS["<kind>"]=<pid>. Returns 1 if the file is missing.
+# Populates STATUS_PIDS["<target>"]=<pid>. Returns 1 if the file is missing.
 status_read_watchers() {
     STATUS_PIDS=()
     local file="$KEELSON_STATUS_DIR/watchers"
@@ -104,28 +104,28 @@ status_read_watchers() {
     return 0
 }
 
-# status_write_watcher_health <kind> <consecutive-failures> <error-text>
-# Written by the watcher for that kind, and by nobody else: one writer per
+# status_write_watcher_health <target> <consecutive-failures> <error-text>
+# Written by the watcher for that target, and by nobody else: one writer per
 # file, so watchers never contend. A live PID says the watcher process
 # exists; this says whether its watch is actually streaming.
 status_write_watcher_health() {
-    local kind=$1 failures=$2 err=$3
+    local target=$1 failures=$2 err=$3
     # The reader splits on the first '=' per line, so the error has to be a
     # single line. kubectl's messages are short; keep the first 200 chars.
     err=${err//$'\n'/ }
     err=${err//$'\r'/ }
-    status_write_file "$KEELSON_STATUS_DIR/watcher-$kind" \
+    status_write_file "$KEELSON_STATUS_DIR/watcher-$target" \
         "failures=$failures" "error=${err:0:200}"
 }
 
-# status_read_watcher_health <kind>
+# status_read_watcher_health <target>
 # Populates STATUS_WATCHER_FAILURES and STATUS_WATCHER_ERROR.
-# Returns 1 if the kind has not published yet.
+# Returns 1 if the target has not published yet.
 status_read_watcher_health() {
-    local kind=$1
+    local target=$1
     STATUS_WATCHER_FAILURES=0
     STATUS_WATCHER_ERROR=
-    local file="$KEELSON_STATUS_DIR/watcher-$kind"
+    local file="$KEELSON_STATUS_DIR/watcher-$target"
     [ -r "$file" ] || return 1
     local key value
     while IFS='=' read -r key value; do
@@ -138,14 +138,14 @@ status_read_watcher_health() {
 }
 
 # status_all_watchers_streaming
-# True iff every kind in the watcher map has published zero consecutive
-# failures. A kind that has not published at all is not streaming yet.
+# True iff every target in the watcher map has published zero consecutive
+# failures. A target that has not published at all is not streaming yet.
 status_all_watchers_streaming() {
     status_read_watchers || return 1
     [ "${#STATUS_PIDS[@]}" -gt 0 ] || return 1
-    local kind
-    for kind in "${!STATUS_PIDS[@]}"; do
-        status_read_watcher_health "$kind" || return 1
+    local target
+    for target in "${!STATUS_PIDS[@]}"; do
+        status_read_watcher_health "$target" || return 1
         [ "$STATUS_WATCHER_FAILURES" -eq 0 ] 2>/dev/null || return 1
     done
 }
@@ -167,9 +167,9 @@ status_heartbeat_fresh() {
 status_all_watchers_alive() {
     status_read_watchers || return 1
     [ "${#STATUS_PIDS[@]}" -gt 0 ] || return 1
-    local kind pid
-    for kind in "${!STATUS_PIDS[@]}"; do
-        pid=${STATUS_PIDS[$kind]}
+    local target pid
+    for target in "${!STATUS_PIDS[@]}"; do
+        pid=${STATUS_PIDS[$target]}
         # kill -0 0 targets the process group, not pid 0 itself.
         [ "$pid" -gt 0 ] 2>/dev/null || return 1
         kill -0 "$pid" 2>/dev/null || return 1

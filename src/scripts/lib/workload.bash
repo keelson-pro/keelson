@@ -14,20 +14,44 @@
 # KEELSON_WATCHED_KINDS is required at runtime; validate_config enforces it
 # at boot. Module-level reads would block --help so we defer the check.
 
-# workload_list_kind <kind>
-# Echoes the kubectl JSON list for <kind>, scope-aware (KEELSON_SCOPE).
-workload_list_kind() {
-    local kind=$1
+# workload_namespaces
+# Sets WORKLOAD_NAMESPACES to the namespaces every lister and watcher works
+# over: one empty entry in cluster scope, meaning --all-namespaces, and one
+# entry per configured namespace otherwise.
+#
+# The single place KEELSON_SCOPE is turned into namespaces, so the callers
+# below take a namespace and do as they are told. One namespace or fifty is
+# then the same code path, and there is no second opinion about what scope
+# means.
+#
+# Commas are tolerated as separators here as well as at boot: the entrypoints
+# that do not run validate_config (keelson-user-recheck) read this too, and a
+# list that works for the controller has to work for them.
+declare -ga WORKLOAD_NAMESPACES=()
+workload_namespaces() {
+    local raw
     case "${KEELSON_SCOPE:?KEELSON_SCOPE required}" in
         namespace)
-            kubectl get "$kind" \
-                -n "${KEELSON_NAMESPACE:?KEELSON_NAMESPACE required when KEELSON_SCOPE=namespace}" \
-                -o json
+            raw=${KEELSON_NAMESPACES:?KEELSON_NAMESPACES required when KEELSON_SCOPE=namespace}
+            # shellcheck disable=SC2206
+            WORKLOAD_NAMESPACES=(${raw//,/ })
             ;;
         cluster|*)
-            kubectl get "$kind" --all-namespaces -o json
+            WORKLOAD_NAMESPACES=("")
             ;;
     esac
+}
+
+# workload_list_kind <kind> [ns]
+# Echoes the kubectl JSON list for <kind>. An empty or absent <ns> lists every
+# namespace; anything else lists that one.
+workload_list_kind() {
+    local kind=$1 ns=${2:-}
+    if [ -n "$ns" ]; then
+        kubectl get "$kind" -n "$ns" -o json
+    else
+        kubectl get "$kind" --all-namespaces -o json
+    fi
 }
 
 # workload_get_one <kind> <ns> <name>

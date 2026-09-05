@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 #
-# Watcher primitives: one kubectl --watch per kind, with reconnect/backoff.
+# Watcher primitives: one kubectl --watch per target, with reconnect/backoff.
 # Sourced; not directly executable.
 #
 # Each event from kubectl produces one line of "<type> <ns> <name>" via
@@ -28,16 +28,70 @@
 #
 # Depends on (must be sourced first):
 #   lib/log.bash, lib/clock.bash, lib/queue.bash, lib/status.bash,
-#   lib/inventory.bash
+#   lib/inventory.bash, lib/workload.bash
 
 # A stream lasting this long before ending is the API server's own idle
 # timeout, not a fault: those land in the 1800-3600s band all day and all
 # night. Shorter than this is worth a warn.
 WATCH_ROUTINE_STREAM_SECONDS=1800
 
-# watch_run_kind <kind>
+# watch_targets
+# Sets WATCH_TARGETS to one entry per stream that has to be held open: the
+# bare kind in cluster scope, "<Kind>.<namespace>" once per namespace
+# otherwise.
+#
+# The target, not the kind, is the unit the supervisor spawns, backs off and
+# publishes health for. kubectl --watch takes one namespace or all of them and
+# there is no third option, so watching three namespaces is three processes,
+# and they fail, recover and reconnect independently of one another.
+#
+# The string is the key: the supervisor's PID map, the status files and the
+# probe's readiness list are all keyed by it. Neither a kind nor a namespace
+# name can contain a '.', so splitting it back apart is unambiguous, and it is
+# legal in a filename.
+declare -ga WATCH_TARGETS=()
+watch_targets() {
+    local kind ns
+    WATCH_TARGETS=()
+    workload_namespaces
+    for kind in ${KEELSON_WATCHED_KINDS:?KEELSON_WATCHED_KINDS required}; do
+        for ns in "${WORKLOAD_NAMESPACES[@]}"; do
+            if [ -n "$ns" ]; then
+                WATCH_TARGETS+=("$kind.$ns")
+            else
+                WATCH_TARGETS+=("$kind")
+            fi
+        done
+    done
+}
+
+# watch_target_split <target>
+# Sets WATCH_TARGET_KIND and WATCH_TARGET_NS from a target. The namespace is
+# empty for a cluster-scope target, which is what every caller passes on to
+# mean every namespace.
+WATCH_TARGET_KIND=
+WATCH_TARGET_NS=
+watch_target_split() {
+    local target=$1
+    case "$target" in
+        *.*)
+            WATCH_TARGET_KIND=${target%%.*}
+            WATCH_TARGET_NS=${target#*.}
+            ;;
+        *)
+            WATCH_TARGET_KIND=$target
+            WATCH_TARGET_NS=
+            ;;
+    esac
+}
+
+# watch_run_target <target>
 # Long-running reconnect loop. Each iteration runs one kubectl --watch
 # until it exits, then sleeps with exponential backoff before retrying.
+#
+# One target, one process, one backoff. A namespace whose RBAC is missing
+# backs off on its own without slowing the namespaces that are streaming
+# fine, and its failure is published under its own key.
 #
 # A stream that held for KEELSON_WATCHER_RECONNECT_RESET clears the backoff.
 # Streams end for routine reasons (API server rollout, resourceVersion
@@ -50,20 +104,32 @@ WATCH_ROUTINE_STREAM_SECONDS=1800
 # watch_handle_events', which returns 0 whenever stdin closes, so a three
 # hour stream ending and kubectl exiting instantly are indistinguishable by
 # status. How long it lasted tells them apart.
-watch_run_kind() {
-    local kind=$1
+watch_run_target() {
+    local target=$1
     local initial=${KEELSON_WATCHER_RECONNECT_INITIAL:?KEELSON_WATCHER_RECONNECT_INITIAL required}
     local cap=${KEELSON_WATCHER_RECONNECT_MAX:?KEELSON_WATCHER_RECONNECT_MAX required}
     local reset=${KEELSON_WATCHER_RECONNECT_RESET:?KEELSON_WATCHER_RECONNECT_RESET required}
     local max_iter=${KEELSON_WATCH_MAX_ITERATIONS:-0}
     local backoff=$initial
     local iter=0 opened held rc fails=0 err detail errfile rcfile
-    errfile="${KEELSON_STATUS_DIR}/watcher-${kind}.stderr"
-    rcfile="${KEELSON_STATUS_DIR}/watcher-${kind}.rc"
-    status_write_watcher_health "$kind" 0 ""
+    local kind what
+    watch_target_split "$target"
+    kind=$WATCH_TARGET_KIND
+    # What the messages call this watcher. A cluster-scope watcher covers
+    # every namespace and has nothing to add; a namespaced one has to say
+    # which, or three warns about Deployments read as the same warn three
+    # times over.
+    if [ -n "$WATCH_TARGET_NS" ]; then
+        what="kind '$kind' in namespace '$WATCH_TARGET_NS'"
+    else
+        what="kind '$kind'"
+    fi
+    errfile="${KEELSON_STATUS_DIR}/watcher-${target}.stderr"
+    rcfile="${KEELSON_STATUS_DIR}/watcher-${target}.rc"
+    status_write_watcher_health "$target" 0 ""
     while [ "$max_iter" -eq 0 ] || [ "$iter" -lt "$max_iter" ]; do
-        log_debug watch-start kind="$kind" \
-            msg="Watching kind '$kind' for changes."
+        log_debug watch-start kind="$kind" target="$target" \
+            msg="Watching $what for changes."
         clock_read
         opened=$CLOCK_NOW_US
         # kubectl's own exit code, recorded inside the pipeline's left-hand
@@ -79,7 +145,7 @@ watch_run_kind() {
         # in there too, and would otherwise tear the subshell down the moment
         # kubectl fails, before the code could be recorded. The newline
         # matters too, or read hits EOF and returns 1.
-        { watch_kubectl_stream "$kind" 2>"$errfile" || rc=$?; \
+        { watch_kubectl_stream "$target" 2>"$errfile" || rc=$?; \
           printf '%s\n' "$rc" >"$rcfile"; } \
             | watch_handle_events "$kind"
         read -r rc <"$rcfile" 2>/dev/null || rc=0
@@ -88,7 +154,7 @@ watch_run_kind() {
         if [ "$rc" -ne 0 ]; then
             err=$(watch_error_hint "$errfile")
             fails=$(( fails + 1 ))
-            status_write_watcher_health "$kind" "$fails" "$err"
+            status_write_watcher_health "$target" "$fails" "$err"
             detail=
             if [ -r "$errfile" ]; then
                 detail=$(<"$errfile")
@@ -98,21 +164,22 @@ watch_run_kind() {
             # writes it regardless of the stdout level, so it is on disk in the
             # pod even when nobody asked for debug.
             log_flatten "$detail"
-            log_debug watch-failed-detail kind="$kind" rc="$rc" \
-                msg="Watch for kind '$kind' failed (exit $rc), full output: ${LOG_FLAT:-no error output}"
-            log_warn watch-failed kind="$kind" rc="$rc" fails="$fails" \
+            log_debug watch-failed-detail kind="$kind" target="$target" rc="$rc" \
+                msg="Watch for $what failed (exit $rc), full output: ${LOG_FLAT:-no error output}"
+            log_warn watch-failed kind="$kind" target="$target" rc="$rc" fails="$fails" \
                 backoff="$backoff" \
-                msg="Watch for kind '$kind' failed (exit $rc, $fails in a row): ${err:-no error output}. Retrying in ${backoff}s."
+                msg="Watch for $what failed (exit $rc, $fails in a row): ${err:-no error output}. Retrying in ${backoff}s."
         else
             if [ "$held" -ge "$reset" ]; then
                 backoff=$initial
                 fails=0
-                status_write_watcher_health "$kind" 0 ""
+                status_write_watcher_health "$target" 0 ""
             fi
             local level=log_warn
             [ "$held" -ge "$WATCH_ROUTINE_STREAM_SECONDS" ] && level=log_debug
-            "$level" watch-disconnected kind="$kind" backoff="$backoff" held="$held" \
-                msg="Watch for kind '$kind' lasted ${held}s before disconnecting."
+            "$level" watch-disconnected kind="$kind" target="$target" \
+                backoff="$backoff" held="$held" \
+                msg="Watch for $what lasted ${held}s before disconnecting."
         fi
         sleep "$backoff"
         backoff=$(( backoff * 2 ))
@@ -140,27 +207,26 @@ watch_error_hint() {
     done < "$file"
 }
 
-# watch_kubectl_stream <kind>
+# watch_kubectl_stream <target>
 # Emits one line per event as "<type> <namespace> <name>".
-# Honours KEELSON_SCOPE.
+#
+# The target says what to watch: a bare kind streams every namespace, a
+# "<Kind>.<namespace>" target streams that one. Scope was decided once, in
+# watch_targets, so there is no second reading of it here.
 #
 # --output-watch-events wraps each object with its type, which is the only
 # way to tell a delete from an update: without it a deleted object arrives
 # looking exactly like a live one, and the cache would never evict.
 watch_kubectl_stream() {
-    local kind=$1
     local jp="{.type} {.object.metadata.namespace} {.object.metadata.name}{\"\n\"}"
-    case "${KEELSON_SCOPE:?KEELSON_SCOPE required}" in
-        namespace)
-            kubectl get "$kind" \
-                -n "${KEELSON_NAMESPACE:?KEELSON_NAMESPACE required when KEELSON_SCOPE=namespace}" \
-                --watch --output-watch-events=true -o jsonpath="$jp"
-            ;;
-        cluster|*)
-            kubectl get "$kind" --all-namespaces \
-                --watch --output-watch-events=true -o jsonpath="$jp"
-            ;;
-    esac
+    watch_target_split "$1"
+    if [ -n "$WATCH_TARGET_NS" ]; then
+        kubectl get "$WATCH_TARGET_KIND" -n "$WATCH_TARGET_NS" \
+            --watch --output-watch-events=true -o jsonpath="$jp"
+    else
+        kubectl get "$WATCH_TARGET_KIND" --all-namespaces \
+            --watch --output-watch-events=true -o jsonpath="$jp"
+    fi
 }
 
 # watch_handle_events <kind>
@@ -190,11 +256,12 @@ watch_handle_events() {
 }
 
 # watch_start_all
-# Spawns one watch_run_kind background job per watched kind. Echoes pids.
+# Spawns one watch_run_target background job per target. Echoes pids.
 watch_start_all() {
-    local kind pids=()
-    for kind in $KEELSON_WATCHED_KINDS; do
-        watch_run_kind "$kind" &
+    local target pids=()
+    watch_targets
+    for target in "${WATCH_TARGETS[@]}"; do
+        watch_run_target "$target" &
         pids+=($!)
     done
     printf '%s\n' "${pids[@]}"

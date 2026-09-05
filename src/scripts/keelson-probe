@@ -8,8 +8,8 @@
 #   heartbeat  written by the controller loop every tick
 #   watchers   written by the watcher supervisor when the PID map changes
 #
-#   startup    heartbeat fresh AND every watched-kind PID alive
-#   readiness  every watched-kind PID alive       (reads watchers only)
+#   startup    heartbeat fresh AND every watch-target PID alive
+#   readiness  every watch-target PID alive       (reads watchers only)
 #   liveness   heartbeat fresh                    (reads heartbeat only)
 #
 # Exit 0 on pass, 1 on fail. No output on success; one log line on failure.
@@ -58,8 +58,8 @@ probe_readiness() {
     # A live PID only proves the watcher process exists. Each watcher
     # publishes whether its watch is actually streaming.
     if ! status_all_watchers_streaming; then
-        log_error probe-readiness-fail file="$KEELSON_STATUS_DIR/watcher-<kind>" \
-            msg="Readiness probe failed: a watcher process is alive but its watch is not streaming; see the watcher-<kind> files in '$KEELSON_STATUS_DIR'."
+        log_error probe-readiness-fail file="$KEELSON_STATUS_DIR/watcher-<target>" \
+            msg="Readiness probe failed: a watcher process is alive but its watch is not streaming; see the watcher-<target> files in '$KEELSON_STATUS_DIR'."
         return 1
     fi
 }

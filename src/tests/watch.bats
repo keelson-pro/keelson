@@ -31,6 +31,8 @@ setup() {
     source "$SCRIPT_DIR/lib/inventory.bash"
     # shellcheck source=../scripts/lib/status.bash
     source "$SCRIPT_DIR/lib/status.bash"
+    # shellcheck source=../scripts/lib/workload.bash
+    source "$SCRIPT_DIR/lib/workload.bash"
     # shellcheck source=../scripts/lib/watch.bash
     source "$SCRIPT_DIR/lib/watch.bash"
 
@@ -98,16 +100,71 @@ SH
     grep -q -- "--watch" "$TMP_DIR/kubectl.args"
 }
 
-@test "watch_kubectl_stream: namespace scope passes -n" {
+@test "watch_kubectl_stream: a target carrying a namespace passes -n" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 echo "$@" >>"$TMP_DIR/kubectl.args"
 exit 0
 SH
-    KEELSON_SCOPE=namespace KEELSON_NAMESPACE=team-a \
-        watch_kubectl_stream Deployment >/dev/null
+    watch_kubectl_stream Deployment.team-a >/dev/null
     grep -q -- "-n team-a" "$TMP_DIR/kubectl.args"
     ! grep -q -- "--all-namespaces" "$TMP_DIR/kubectl.args"
+}
+
+@test "watch_kubectl_stream: a namespace with hyphens survives the split" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "$@" >>"$TMP_DIR/kubectl.args"
+exit 0
+SH
+    watch_kubectl_stream CronJob.team-a-staging >/dev/null
+    grep -q -- "CronJob -n team-a-staging" "$TMP_DIR/kubectl.args"
+}
+
+# --- watch_targets ---
+
+@test "watch_targets: cluster scope is one target per kind, the bare kind" {
+    KEELSON_SCOPE=cluster KEELSON_WATCHED_KINDS="Deployment CronJob" watch_targets
+    [ "${#WATCH_TARGETS[@]}" -eq 2 ]
+    [ "${WATCH_TARGETS[0]}" = "Deployment" ]
+    [ "${WATCH_TARGETS[1]}" = "CronJob" ]
+}
+
+@test "watch_targets: namespace scope is one target per kind per namespace" {
+    KEELSON_SCOPE=namespace KEELSON_NAMESPACES="team-a team-b" \
+        KEELSON_WATCHED_KINDS="Deployment CronJob" watch_targets
+    [ "${#WATCH_TARGETS[@]}" -eq 4 ]
+    [ "${WATCH_TARGETS[0]}" = "Deployment.team-a" ]
+    [ "${WATCH_TARGETS[1]}" = "Deployment.team-b" ]
+    [ "${WATCH_TARGETS[2]}" = "CronJob.team-a" ]
+    [ "${WATCH_TARGETS[3]}" = "CronJob.team-b" ]
+}
+
+@test "watch_targets: a single namespace is still one target per kind" {
+    KEELSON_SCOPE=namespace KEELSON_NAMESPACES=team-a \
+        KEELSON_WATCHED_KINDS="Deployment" watch_targets
+    [ "${#WATCH_TARGETS[@]}" -eq 1 ]
+    [ "${WATCH_TARGETS[0]}" = "Deployment.team-a" ]
+}
+
+@test "watch_targets: commas separate namespaces as well as spaces" {
+    KEELSON_SCOPE=namespace KEELSON_NAMESPACES="team-a,team-b" \
+        KEELSON_WATCHED_KINDS="Deployment" watch_targets
+    [ "${#WATCH_TARGETS[@]}" -eq 2 ]
+    [ "${WATCH_TARGETS[0]}" = "Deployment.team-a" ]
+    [ "${WATCH_TARGETS[1]}" = "Deployment.team-b" ]
+}
+
+@test "watch_target_split: a bare kind means every namespace" {
+    watch_target_split Deployment
+    [ "$WATCH_TARGET_KIND" = "Deployment" ]
+    [ -z "$WATCH_TARGET_NS" ]
+}
+
+@test "watch_target_split: kind and namespace come back apart" {
+    watch_target_split StatefulSet.team-a-staging
+    [ "$WATCH_TARGET_KIND" = "StatefulSet" ]
+    [ "$WATCH_TARGET_NS" = "team-a-staging" ]
 }
 
 @test "watch_kubectl_stream: emits namespace + name lines from a kubectl shim" {
@@ -121,9 +178,9 @@ SH
     [[ "$output" == *"default other"* ]]
 }
 
-# --- watch_run_kind: reconnect loop with backoff ---
+# --- watch_run_target: reconnect loop with backoff ---
 
-@test "watch_run_kind: streams events then reconnects on disconnect" {
+@test "watch_run_target: streams events then reconnects on disconnect" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 printf 'MODIFIED default app\n'
@@ -136,7 +193,7 @@ exit 0
 SH
     KEELSON_WATCH_MAX_ITERATIONS=2 KEELSON_WATCHER_RECONNECT_INITIAL=1 \
     KEELSON_LOG_LEVEL=DEBUG \
-        run emit watch_run_kind Deployment
+        run emit watch_run_target Deployment
     [ "$status" -eq 0 ]
     # Two iterations -> two "Watching kind" log lines.
     [ "$(printf '%s\n' "$output" | grep -c "Watching kind 'Deployment'")" = "2" ]
@@ -145,7 +202,7 @@ SH
     [ -f "$KEELSON_QUEUE_DIR/Deployment--default--app" ]
 }
 
-@test "watch_run_kind: backoff caps at KEELSON_WATCHER_RECONNECT_MAX" {
+@test "watch_run_target: backoff caps at KEELSON_WATCHER_RECONNECT_MAX" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -158,7 +215,7 @@ SH
     KEELSON_WATCH_MAX_ITERATIONS=5 \
     KEELSON_WATCHER_RECONNECT_INITIAL=8 \
     KEELSON_WATCHER_RECONNECT_MAX=10 \
-        watch_run_kind Deployment 2>/dev/null
+        watch_run_target Deployment 2>/dev/null
     # Sleeps observed: 8, 10, 10, 10, 10 (clamped after first double)
     [ "$(head -n 1 "$TMP_DIR/sleeps")" = "8" ]
     [ "$(tail -n 1 "$TMP_DIR/sleeps")" = "10" ]
@@ -166,7 +223,7 @@ SH
 
 # --- a failing kubectl must not take the watcher down with it ---
 
-@test "watch_run_kind: survives a kubectl that exits non-zero" {
+@test "watch_run_target: survives a kubectl that exits non-zero" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 echo "Error from server (Forbidden): cronjobs is forbidden" >&2
@@ -176,13 +233,13 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-    KEELSON_WATCH_MAX_ITERATIONS=3 KEELSON_LOG_LEVEL=DEBUG run emit watch_run_kind CronJob
+    KEELSON_WATCH_MAX_ITERATIONS=3 KEELSON_LOG_LEVEL=DEBUG run emit watch_run_target CronJob
     [ "$status" -eq 0 ]
     # All three iterations ran: set -e did not kill the loop on the first.
     [ "$(printf '%s\n' "$output" | grep -c "Watching kind 'CronJob'")" = "3" ]
 }
 
-@test "watch_run_kind: publishes the failure outward" {
+@test "watch_run_target: publishes the failure outward" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 echo "Error from server (Forbidden): cronjobs is forbidden" >&2
@@ -192,13 +249,15 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-    KEELSON_WATCH_MAX_ITERATIONS=2 watch_run_kind CronJob 2>/dev/null
+    KEELSON_WATCH_MAX_ITERATIONS=2 watch_run_target CronJob 2>/dev/null
     status_read_watcher_health CronJob
     [ "$STATUS_WATCHER_FAILURES" = "2" ]
     [[ "$STATUS_WATCHER_ERROR" == *"Forbidden"* ]]
 }
 
-@test "watch_run_kind: logs why kubectl failed instead of swallowing it" {
+@test "watch_run_target: a namespaced target publishes under its own key" {
+    # One namespace denied must not read as the kind being broken everywhere:
+    # health is per target, so team-b's watcher is untouched by team-a's.
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 echo "Error from server (Forbidden): cronjobs is forbidden" >&2
@@ -208,7 +267,38 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-    KEELSON_WATCH_MAX_ITERATIONS=1 run emit watch_run_kind CronJob
+    KEELSON_WATCH_MAX_ITERATIONS=2 watch_run_target CronJob.team-a 2>/dev/null
+    status_read_watcher_health CronJob.team-a
+    [ "$STATUS_WATCHER_FAILURES" = "2" ]
+    [[ "$STATUS_WATCHER_ERROR" == *"Forbidden"* ]]
+    ! status_read_watcher_health CronJob
+}
+
+@test "watch_run_target: a namespaced failure says which namespace" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "Error from server (Forbidden): cronjobs is forbidden" >&2
+exit 1
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=1 run emit watch_run_target CronJob.team-a
+    [[ "$output" == *"kind 'CronJob' in namespace 'team-a'"* ]]
+}
+
+@test "watch_run_target: logs why kubectl failed instead of swallowing it" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "Error from server (Forbidden): cronjobs is forbidden" >&2
+exit 1
+SH
+    install_shim sleep <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_WATCH_MAX_ITERATIONS=1 run emit watch_run_target CronJob
     [[ "$output" == *"Forbidden"* ]]
 }
 
@@ -232,19 +322,19 @@ exit 0
 SH
 }
 
-@test "watch_run_kind: the warn line hints at the error, without the object dump" {
+@test "watch_run_target: the warn line hints at the error, without the object dump" {
     install_jsonpath_failure_shim
     KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=INFO \
-        run emit watch_run_kind Deployment
+        run emit watch_run_target Deployment
     [[ "$output" == *"error: error executing jsonpath"* ]]
     [[ "$output" == *"Retrying in"* ]]
     [[ "$output" != *"DUMPMARKER"* ]]
 }
 
-@test "watch_run_kind: the full kubectl output is there at debug" {
+@test "watch_run_target: the full kubectl output is there at debug" {
     install_jsonpath_failure_shim
     KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=DEBUG \
-        run emit watch_run_kind Deployment
+        run emit watch_run_target Deployment
     [[ "$output" == *"DUMPMARKER"* ]]
 }
 
@@ -281,7 +371,7 @@ SH
     [ -z "$output" ]
 }
 
-@test "watch_run_kind: marks itself healthy while a stream is open" {
+@test "watch_run_target: marks itself healthy while a stream is open" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 printf 'MODIFIED default app\n'
@@ -293,12 +383,12 @@ exit 0
 SH
     KEELSON_WATCH_MAX_ITERATIONS=1 \
     KEELSON_WATCHER_RECONNECT_RESET=0 \
-        watch_run_kind Deployment 2>/dev/null
+        watch_run_target Deployment 2>/dev/null
     status_read_watcher_health Deployment
     [ "$STATUS_WATCHER_FAILURES" = "0" ]
 }
 
-@test "watch_run_kind: a good stream clears an earlier failure" {
+@test "watch_run_target: a good stream clears an earlier failure" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 n=$(cat "$TMP_DIR/kcount" 2>/dev/null || echo 0)
@@ -317,7 +407,7 @@ exit 0
 SH
     KEELSON_WATCH_MAX_ITERATIONS=3 \
     KEELSON_WATCHER_RECONNECT_RESET=1 \
-        watch_run_kind Deployment 2>/dev/null
+        watch_run_target Deployment 2>/dev/null
     status_read_watcher_health Deployment
     [ "$STATUS_WATCHER_FAILURES" = "0" ]
 }
@@ -329,7 +419,7 @@ SH
 # never comes back down, so a perfectly healthy watcher ends up with the
 # longest possible blind window between reconnects for the pod's whole life.
 
-@test "watch_run_kind: a stream that held past the reset clears the backoff" {
+@test "watch_run_target: a stream that held past the reset clears the backoff" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 /bin/sleep 1.2
@@ -344,12 +434,12 @@ SH
     KEELSON_WATCHER_RECONNECT_INITIAL=1 \
     KEELSON_WATCHER_RECONNECT_MAX=10 \
     KEELSON_WATCHER_RECONNECT_RESET=1 \
-        watch_run_kind Deployment 2>/dev/null
+        watch_run_target Deployment 2>/dev/null
     # Every stream held 1.2s >= 1s, so every reconnect is back at initial.
     [ "$(tr '\n' ' ' <"$TMP_DIR/sleeps")" = "1 1 1 " ]
 }
 
-@test "watch_run_kind: a stream that died instantly does not clear the backoff" {
+@test "watch_run_target: a stream that died instantly does not clear the backoff" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -363,11 +453,11 @@ SH
     KEELSON_WATCHER_RECONNECT_INITIAL=1 \
     KEELSON_WATCHER_RECONNECT_MAX=10 \
     KEELSON_WATCHER_RECONNECT_RESET=30 \
-        watch_run_kind Deployment 2>/dev/null
+        watch_run_target Deployment 2>/dev/null
     [ "$(tr '\n' ' ' <"$TMP_DIR/sleeps")" = "1 2 4 " ]
 }
 
-@test "watch_run_kind: backoff escalates, then recovers once a stream holds" {
+@test "watch_run_target: backoff escalates, then recovers once a stream holds" {
     # First two streams die instantly, the third and fourth hold.
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
@@ -386,12 +476,12 @@ SH
     KEELSON_WATCHER_RECONNECT_INITIAL=1 \
     KEELSON_WATCHER_RECONNECT_MAX=10 \
     KEELSON_WATCHER_RECONNECT_RESET=1 \
-        watch_run_kind Deployment 2>/dev/null
+        watch_run_target Deployment 2>/dev/null
     # 1, 2 while failing; back to 1 as soon as a stream held.
     [ "$(tr '\n' ' ' <"$TMP_DIR/sleeps")" = "1 2 1 1 " ]
 }
 
-@test "watch_run_kind: reports how long the stream lasted" {
+@test "watch_run_target: reports how long the stream lasted" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -402,7 +492,7 @@ exit 0
 SH
     KEELSON_WATCH_MAX_ITERATIONS=1 \
     KEELSON_WATCHER_RECONNECT_RESET=30 \
-        run emit watch_run_kind Deployment
+        run emit watch_run_target Deployment
     [[ "$output" == *"lasted 0s before disconnecting"* ]]
 }
 
@@ -533,7 +623,7 @@ SH
 # A stream ending after half an hour is the API server's idle timeout, which
 # happened all night on a working cluster. Only a short one is a signal.
 
-@test "watch_run_kind: reopening a stream is not an info-level event" {
+@test "watch_run_target: reopening a stream is not an info-level event" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -543,11 +633,11 @@ SH
 exit 0
 SH
     KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=INFO \
-        run emit watch_run_kind Deployment
+        run emit watch_run_target Deployment
     [[ "$output" != *"Watching kind"* ]]
 }
 
-@test "watch_run_kind: a routine-length stream ending is not a warn" {
+@test "watch_run_target: a routine-length stream ending is not a warn" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -559,11 +649,11 @@ SH
     # The stream lasts no time at all here, so move the threshold instead.
     WATCH_ROUTINE_STREAM_SECONDS=0
     KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=INFO \
-        run emit watch_run_kind Deployment
+        run emit watch_run_target Deployment
     [[ "$output" != *"lasted"* ]]
 }
 
-@test "watch_run_kind: a short stream ending is a warn" {
+@test "watch_run_target: a short stream ending is a warn" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -574,7 +664,7 @@ exit 0
 SH
     WATCH_ROUTINE_STREAM_SECONDS=1800
     KEELSON_WATCH_MAX_ITERATIONS=1 KEELSON_LOG_LEVEL=INFO \
-        run emit watch_run_kind Deployment
+        run emit watch_run_target Deployment
     [[ "$output" == *"WARN"* ]]
     [[ "$output" == *"lasted 0s before disconnecting"* ]]
 }

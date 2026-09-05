@@ -142,17 +142,29 @@ scan_refresh_kind() {
     clock_read
     _scan_now=$(( CLOCK_NOW_US / 1000000 ))
 
-    local list_json count i
-    if ! list_json=$(workload_list_kind "$kind" 2>/dev/null); then
-        log_error kubectl-list-failed kind="$kind" \
-            msg="Full refresh of $kind skipped: could not list from kubectl. The cache is left as it was."
-        return 0
-    fi
+    local list_json count i ns
+    local -a lists=()
+    # Every namespace listed before anything is dropped, not one at a time:
+    # the cache is wiped per kind, so a list that fails on the third of three
+    # namespaces after two had been rebuilt would leave that namespace's
+    # workloads missing until the next full refresh.
+    workload_namespaces
+    for ns in "${WORKLOAD_NAMESPACES[@]}"; do
+        if ! list_json=$(workload_list_kind "$kind" "$ns" 2>/dev/null); then
+            log_error kubectl-list-failed kind="$kind" ns="${ns:-all}" \
+                msg="Full refresh of $kind skipped: could not list from kubectl${ns:+ in namespace '$ns'}. The cache is left as it was."
+            return 0
+        fi
+        lists+=("$list_json")
+    done
 
     inventory_evict_kind "$kind"
 
-    scan_each_workload "$list_json" "$kind"
-    count=$SCAN_KIND_COUNT
+    count=0
+    for list_json in "${lists[@]}"; do
+        scan_each_workload "$list_json" "$kind"
+        count=$(( count + SCAN_KIND_COUNT ))
+    done
 
     log_info_always inventory-refreshed kind="$kind" workloads="$count" \
         managed="$_scan_managed" \
@@ -277,25 +289,37 @@ scan_each_workload() {
 }
 
 scan_kind() {
-    local kind=$1 list_json count i
-    if ! list_json=$(workload_list_kind "$kind" 2>/dev/null); then
-        log_error kubectl-list-failed kind="$kind" \
-            msg="Could not list $kind workloads from kubectl."
-        _scan_error=$((_scan_error + 1))
-        return 0
-    fi
-    # Only a kind we actually listed is a candidate for eviction below.
-    SCAN_LISTED["$kind"]=1
+    local kind=$1 list_json ns failed=0 total=0
+    workload_namespaces
+    for ns in "${WORKLOAD_NAMESPACES[@]}"; do
+        if ! list_json=$(workload_list_kind "$kind" "$ns" 2>/dev/null); then
+            log_error kubectl-list-failed kind="$kind" ns="${ns:-all}" \
+                msg="Could not list $kind workloads from kubectl${ns:+ in namespace '$ns'}."
+            _scan_error=$((_scan_error + 1))
+            failed=1
+            continue
+        fi
 
-    # One yq for the whole kind, not one per workload. Extracting per workload
-    # re-parsed the entire list document every time, which on fifty workloads
-    # was ~850 forks and ~3 CPU-seconds every reconcile -- a constant cost
-    # whether the estate was asleep or saturated, and two thirds of all CPU.
-    # It is the same shape that was removed from state_load one layer down.
-    #
-    # No separate count call either: the records themselves say how many there
-    # are, so the length query goes with it.
-    scan_each_workload "$list_json" "$kind"
+        # One yq for the whole list, not one per workload. Extracting per
+        # workload re-parsed the entire list document every time, which on
+        # fifty workloads was ~850 forks and ~3 CPU-seconds every reconcile --
+        # a constant cost whether the estate was asleep or saturated, and two
+        # thirds of all CPU. It is the same shape that was removed from
+        # state_load one layer down.
+        #
+        # No separate count call either: the records themselves say how many
+        # there are, so the length query goes with it.
+        scan_each_workload "$list_json" "$kind"
+        total=$(( total + SCAN_KIND_COUNT ))
+    done
+    SCAN_KIND_COUNT=$total
+    # Only a kind we listed in full is a candidate for eviction below. One
+    # namespace that would not list is enough to hold the whole kind back:
+    # eviction works from what the scan saw, so proceeding would forget every
+    # workload in the namespace that failed and undo it all on the next pass.
+    if [ "$failed" -eq 0 ]; then
+        SCAN_LISTED["$kind"]=1
+    fi
 }
 
 # scan_extract_workload <list-json> <kind> <index>

@@ -47,8 +47,13 @@ inventory, and the status files).
      seconds at microsecond precision (`heartbeat=1786867629.967696`) and
      `keelson-probe` compares in microseconds too, so the answer is never
      rounded across the limit by where a second boundary happened to fall.
-   - **Supervise watchers.** Each kind in `KEELSON_WATCHED_KINDS` gets one
-     `kubectl get --watch --output-watch-events` child. The stream carries the
+   - **Supervise watchers.** Each *watch target* gets one
+     `kubectl get --watch --output-watch-events` child. A target is a kind
+     from `KEELSON_WATCHED_KINDS` in cluster scope, and that kind in one
+     namespace (`<Kind>.<namespace>`) when `KEELSON_SCOPE=namespace`, since
+     `--watch` takes a single namespace or all of them and there is no third
+     option. Four kinds across three namespaces is twelve children, each
+     failing, backing off and recovering on its own. The stream carries the
      event type and the workload's identity and nothing else: an event cannot
      say *what* changed, so the watcher draws no conclusions from it. A delete
      evicts the cache entry, since there is nothing left to read; anything else
@@ -126,7 +131,7 @@ inventory, and the status files).
      misread half the sub-second ticks as overruns.
 
    The watcher PID map lives beside it in `/keelson/work/status/watchers`,
-   one `<Kind>=<pid>` line per watched kind, and is written by the supervisor
+   one `<target>=<pid>` line per watch target, and is written by the supervisor
    step above rather than here. The supervisor owns the map, so it publishes
    it the moment it changes it: a death or a respawn, not once per tick. That
    keeps the map on disk current for `keelson-probe readiness` instead of
@@ -134,7 +139,7 @@ inventory, and the status files).
    week from being rewritten 86,400 times a day.
 
    Each watcher publishes its own health to
-   `/keelson/work/status/watcher-<Kind>`, carrying `failures=<consecutive>`
+   `/keelson/work/status/watcher-<target>`, carrying `failures=<consecutive>`
    and `error=<last kubectl stderr line>`. One writer per file, so watchers
    never contend. Readiness needs this as well as the PID map, because a live
    PID only proves the watcher process exists: the process outlives a watch
@@ -161,13 +166,13 @@ stale heartbeat never affects readiness.
 | Subcommand | Pass when |
 |---|---|
 | `startup` | Everything `readiness` needs, **and** the heartbeat fresh. |
-| `readiness` | Every watched-kind PID alive **and** every watcher streaming (`failures=0`). |
+| `readiness` | Every watch-target PID alive **and** every watcher streaming (`failures=0`). |
 | `liveness` | Heartbeat younger than `KEELSON_HEARTBEAT_MAX_AGE`. |
 
 Readiness needs both halves because they answer different questions. The PID
 says the watcher process exists; the health file says its watch is actually
 working. A watcher whose `kubectl` is being refused stays alive and keeps
-retrying, so the PID alone would report a broken kind as Ready.
+retrying, so the PID alone would report a broken target as Ready.
 
 Startup deliberately demands the same as readiness: a kind Keelson was
 configured to watch but cannot is a misconfiguration, and the Pod should
