@@ -60,6 +60,26 @@ parallel to support stragglers. The table may fall behind package availability,
 but the scheme extends unchanged into future versions.
 
 
+## Security Through Least Privilege
+
+Keelson's base RBAC collection has all permissions for the full feature set so
+as to work out of the box with any configuration. However, most installations
+do not require the full feature set and can operate effectively on a smaller
+permission set. It is recommended that you run Keelson with the minimum set of
+permissions possible for the registry and auth setup that you use.
+
+Ways that you can reduce permissions:
+
+1. In cluster scope mode you can remove the global Namespace permission and redundant own-ns role pair
+2. In namespace scope mode you can remove the all-ns ClusterRole and binding and supply per namespace
+3. If no imagePullSecrets are used and you only use one of the three cloud workload identity auth modes you can remove the Secret permissions
+4. With `KEELSON_RESPECT_SA_PULL_SECRETS` false you can remove the ServiceAccount permission
+5. Reduce all of the kept `*-ns` [cluster]roles to the perms for the watched kinds
+6. If you have no special suspended annotated cronjobs you can remove the Job creation permission
+
+How to achieve this depends on your deployment method - see the sub section in those sections below.
+
+
 ## Kaptain
 
 For Kaptain users, just add a one-line entry in your platform product or
@@ -76,6 +96,14 @@ Where X, Y, and Z are as explained further up in this document. Available
 versions can be browsed on the [`keelson-package` release page](https://github.com/keelson-pro/keelson-package/releases).
 
 
+### Kaptain Least Privilege
+
+In Kaptain you need to tune the manifest application to suit your setup by
+manipulating the manifest file set and file contents using the available
+mechanisms. Once the environment system is complete and documentation is
+published the appropriate section of the docs will be linked from here.
+
+
 ## Helm
 
 A [Helm chart](https://github.com/keelson-pro/keelson-helm-chart) consumes the
@@ -86,6 +114,13 @@ repo. Note that using a [`keelson-package` version](https://github.com/keelson-p
 that does not match the manifests in the Helm chart could cause it to fail on
 startup. But if the image does match, then it should work as well as any other
 deployment method.
+
+
+### Helm Least Privilege
+
+The chart automatically reduces some permissions based on values provided. For
+more detail see the [least privilege section](https://github.com/keelson-pro/keelson-helm-chart/blob/main/charts/keelson/README.md#security-through-least-privilege)
+of the Helm chart README.
 
 
 ## Raw Apply
@@ -127,6 +162,15 @@ for manifest in keelson-package/*.yaml; do
 done
 kubectl apply --server-side --field-manager="yourFieldManager" -R -f keelson-package
 ```
+
+
+### Raw Apply Least Privilege
+
+Clearly just remove the unneeded files and modify the ones that remain to suit
+your cluster configuration/setup. For several specifically listed namespaces
+just add more role/rolebinding pairs to sibling directories and apply with the
+correct namespace specified for each directory. That is, permit Keelson to
+monitor and update your namespaces from within your namespaces.
 
 
 ## Configuration
