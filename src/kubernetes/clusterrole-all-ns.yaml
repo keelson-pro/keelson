@@ -20,21 +20,52 @@ metadata:
   annotations:
     kaptain.org/source-repository: ${RepositoryOwner}/${RepositoryName}
 rules:
-  # Workloads Keelson reads, watches, and updates the image on
+  # Index 0
+  # For kubernetes.io/dockerconfigjson Secrets: workload/SA imagePullSecrets and registry-wide ones
+  # Remove if using aws-irsa, azure-wi, gcp-wi, or their synonyms exclusively
+  # Narrow by specifying resourceNames if you know the list up front
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+
+  # Index 1
+  # Workload ServiceAccounts for when KEELSON_RESPECT_SA_PULL_SECRETS is true
+  # Remove if KEELSON_RESPECT_SA_PULL_SECRETS is false
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get"]
+
+  # Index 2
+  # For updating images on Deployments
+  # Remove if you don't need Deployments watched
   - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    resources: ["deployments"]
     verbs: ["get", "list", "watch", "patch", "update"]
+
+  # Index 3
+  # For updating images on StatefulSets
+  # Remove if you don't need StatefulSets watched
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+
+  # Index 4
+  # For updating images on DaemonSets
+  # Remove if you don't need DaemonSets watched
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+
+  # Index 5
+  # For updating images on CronJobs (special suspended AND normal ones)
+  # Remove if you don't need Cronjobs of either type watched
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
     verbs: ["get", "list", "watch", "patch", "update"]
 
-  # Trigger a one-off Job from a CronJob — kubectl create job --from=cronjob/<name>
+  # Index 6
+  # For creating one-off Jobs from CronJobs
+  # Remove if you have no special suspended CronJobs
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create"]
-
-  # Per-registry credential Secrets (image pull secrets in workloads' namespaces)
-  # and workload ServiceAccounts (for KEELSON_RESPECT_SA_PULL_SECRETS walk).
-  - apiGroups: [""]
-    resources: ["secrets", "serviceaccounts"]
-    verbs: ["get"]
