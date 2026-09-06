@@ -351,6 +351,87 @@ SH
     [ -z "$output" ]
 }
 
+# --- central secret path: Secret naming convention and its overrides ---
+
+# kubectl shim for the central secret path. Records the Secret name it was
+# asked for so the naming convention is assertable, and answers with a docker
+# config keyed by <auths-key>.
+kubectl_secret_shim() {
+    local auths_key=$1 user=$2 pass=$3 payload b64
+    payload=$(make_dockerconfig "$auths_key" "$user" "$pass")
+    b64=$(printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64)
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+printf '%s' "\$3" > "$TMP_DIR/secret.name"
+printf '%s' '$b64'
+SH
+}
+
+# Central-mode entry for reg.example:5000, plus any extra entry lines given.
+write_ported_registry() {
+    {
+        printf 'registries:\n  reg.example:5000:\n'
+        printf '    auth-mode: secret\n    namespace: keelson-system\n'
+        local line
+        for line in "$@"; do
+            printf '    %s\n' "$line"
+        done
+    } > "$KEELSON_REGISTRIES_FILE"
+    registry_init
+}
+
+@test "central secret: a port in the host becomes a hyphen in the Secret name" {
+    write_ported_registry
+    kubectl_secret_shim 'reg.example:5000' port-user port-pass
+    run registry_resolve_creds reg.example:5000/x/y:1.0 '[]' default \
+        'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ "$output" = "port-user:port-pass" ]
+    [ "$(cat "$TMP_DIR/secret.name")" = "reg.example-5000" ]
+}
+
+@test "central secret: a host with no port is still the Secret name verbatim" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  ghcr.io:
+    auth-mode: secret
+    namespace: keelson-system
+YAML
+    registry_init
+    kubectl_secret_shim ghcr.io plain-user plain-pass
+    run registry_resolve_creds ghcr.io/x/y:1.0 '[]' default \
+        'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ "$(cat "$TMP_DIR/secret.name")" = "ghcr.io" ]
+}
+
+@test "central secret: secret-name-override beats the derived name" {
+    write_ported_registry 'secret-name-override: shared-pull'
+    kubectl_secret_shim 'reg.example:5000' shared-user shared-pass
+    run registry_resolve_creds reg.example:5000/x/y:1.0 '[]' default \
+        'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ "$output" = "shared-user:shared-pass" ]
+    [ "$(cat "$TMP_DIR/secret.name")" = "shared-pull" ]
+}
+
+@test "central secret: secret-key-override changes the auths key looked up" {
+    write_ported_registry 'secret-key-override: https://reg.example:5000/v1/'
+    kubectl_secret_shim 'https://reg.example:5000/v1/' proto-user proto-pass
+    run registry_resolve_creds reg.example:5000/x/y:1.0 '[]' default \
+        'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ "$output" = "proto-user:proto-pass" ]
+}
+
+@test "central secret: secret-key-override does not change the Secret name" {
+    write_ported_registry 'secret-key-override: https://reg.example:5000/v1/'
+    kubectl_secret_shim 'https://reg.example:5000/v1/' proto-user proto-pass
+    run registry_resolve_creds reg.example:5000/x/y:1.0 '[]' default \
+        'keelson.pro/credentials=central'
+    [ "$(cat "$TMP_DIR/secret.name")" = "reg.example-5000" ]
+}
+
 @test "registry_creds_from_sa: SA missing (kubectl fails) → non-zero" {
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash

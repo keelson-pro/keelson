@@ -173,15 +173,35 @@ registry_creds_central() {
     esac
 }
 
+# registry_entry_field <entry-json> <field>
+# Echoes an optional string field from a registries entry, empty when absent.
+registry_entry_field() {
+    local value
+    value=$(printf '%s' "$1" | yq -p=json -o=y ".\"$2\" // \"\"")
+    [ "$value" = "null" ] && value=""
+    printf '%s' "$value"
+}
+
 # registry_creds_secret <entry-json> <host>
-# Static-secret resolution. By convention the Secret is named after the host
-# (the map key), so we don't take a secret-name field. The Secret lives in
-# Keelson's own namespace unless the entry overrides with "namespace".
+# Static-secret resolution. Two names come out of one map key. The Secret is
+# named after the host with any port's colon turned into a hyphen, because a
+# colon is not legal in a Kubernetes object name and a registry on a custom
+# port is not a reason to be locked out. The key looked up inside the Secret
+# is the host verbatim, colon and all, because that is what Docker writes
+# into .auths.
+#
+# "secret-name-override" and "secret-key-override" beat each half of that.
+# The name override lets registries on several ports share one Secret; the
+# key override reaches entries written with a scheme or a trailing path.
+# Both are named as overrides so the convention stays the obvious default.
+#
+# The Secret lives in Keelson's own namespace unless the entry overrides
+# with "namespace".
 registry_creds_secret() {
     local cfg=$1 host=$2
-    local ns
-    ns=$(printf '%s' "$cfg" | yq -p=json -o=y '.namespace // ""')
-    if [ -z "$ns" ] || [ "$ns" = "null" ]; then
+    local ns secret key
+    ns=$(registry_entry_field "$cfg" namespace)
+    if [ -z "$ns" ]; then
         ns=$(registry_own_namespace)
     fi
     if [ -z "$ns" ]; then
@@ -189,7 +209,11 @@ registry_creds_secret() {
             msg="Could not determine Kubernetes namespace to look up the imagePullSecret for registry '$host' (no override set and Keelson's own namespace could not be read from the ServiceAccount mount)."
         return 1
     fi
-    registry_creds_from_named_secret "$host" "$ns" "$host"
+    secret=$(registry_entry_field "$cfg" secret-name-override)
+    [ -z "$secret" ] && secret=${host//:/-}
+    key=$(registry_entry_field "$cfg" secret-key-override)
+    [ -z "$key" ] && key=$host
+    registry_creds_from_named_secret "$secret" "$ns" "$key"
 }
 
 registry_creds_from_pull_secrets() {

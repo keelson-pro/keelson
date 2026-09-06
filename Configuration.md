@@ -163,10 +163,39 @@ If a host has no entry, Keelson treats it as anonymous.
 
 ### Auth modes
 
-- **`secret`** — pull `dockerconfigjson` from a Kubernetes Secret in Keelson's own namespace. The Secret's name **must equal the registry host** (the map key). Override the lookup namespace with an optional `namespace:` field on the entry.
+- **`secret`** — pull `dockerconfigjson` from a Kubernetes Secret in Keelson's own namespace. The Secret's name **is derived from the registry host** (the map key), and the key looked up inside it **is the map key verbatim**. See below. Override the lookup namespace with an optional `namespace:` field on the entry.
 - **`aws-irsa`** — fetch credentials via `docker-credential-ecr-login`, which uses the Pod's IRSA role (the standard `AWS_*_TOKEN_FILE` env).
 - **`azure-wi`** — federated workload-identity token → AAD token → ACR refresh token. Requires `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` on the Pod.
 - **`gcp-wi`** — workload-identity access token from the GCE metadata server.
+
+### Secret naming for `auth-mode: secret`
+
+One map key produces two names, and they are not the same when the registry has a port.
+
+| | Value | Why |
+|---|---|---|
+| Secret name | map key, each `:` replaced with `-` | a colon is not legal in a Kubernetes object name |
+| Key inside `.auths` | map key verbatim | that is what Docker writes |
+
+So `reg.example:5000` reads the Secret `reg.example-5000` and looks up `reg.example:5000` inside it. A host with no port is unchanged on both sides.
+
+Two optional fields override each half:
+
+```yaml
+registries:
+  reg.example:1234:
+    auth-mode: secret
+    secret-name-override: reg-example-shared
+  reg.example:5678:
+    auth-mode: secret
+    secret-name-override: reg-example-shared
+    secret-key-override: https://reg.example:5678/v1/
+```
+
+- **`secret-name-override`** names the Secret directly. A `dockerconfigjson` Secret can hold many entries, so several registries can share one, as above.
+- **`secret-key-override`** names the key to read inside `.auths`. Use it for entries written with a scheme or a trailing path, which some tooling produces.
+
+Both are overrides by name because the convention is meant to be the obvious default. Reach for them when a registry forces your hand, not to avoid naming Secrets sensibly.
 
 
 ## Per-workload annotations
