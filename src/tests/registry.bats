@@ -84,6 +84,65 @@ YAML
     [ -z "$output" ]
 }
 
+# --- registry_init: failures are logged, not swallowed ---
+
+# json so the event name is assertable; plain format prints only the message.
+emit_json() {
+    KEELSON_LOG_FORMAT=json "$@" 2>&1
+}
+
+# A file yq cannot parse at all.
+write_unparseable_registries() {
+    printf 'registries:\n  ghcr.io:\n    auth-mode: secret\n  : : :\n' \
+        > "$KEELSON_REGISTRIES_FILE"
+}
+
+# Parses as YAML, but the host key breaks the per-host yq expression.
+write_unextractable_entry() {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  ghcr.io:
+    auth-mode: secret
+  'a"b':
+    auth-mode: secret
+YAML
+}
+
+@test "registry_init: unparseable file logs an error" {
+    write_unparseable_registries
+    run emit_json registry_init
+    [ "$status" -eq 0 ]
+    [[ "$output" == *registry-config-parse-failed* ]]
+}
+
+@test "registry_init: unparseable file loads no entries" {
+    write_unparseable_registries
+    registry_init 2>/dev/null
+    run registry_config_for_host ghcr.io
+    [ -z "$output" ]
+}
+
+@test "registry_init: unextractable entry logs an error" {
+    write_unextractable_entry
+    run emit_json registry_init
+    [ "$status" -eq 0 ]
+    [[ "$output" == *registry-config-entry-failed* ]]
+}
+
+@test "registry_init: unextractable entry does not stop the good ones loading" {
+    write_unextractable_entry
+    registry_init 2>/dev/null
+    run registry_config_for_host ghcr.io
+    [ -n "$output" ]
+}
+
+@test "registry_init: unextractable entry is not cached" {
+    write_unextractable_entry
+    registry_init 2>/dev/null
+    run registry_config_for_host 'a"b'
+    [ -z "$output" ]
+}
+
 # --- registry_creds_from_named_secret ---
 
 @test "named_secret: kubectl returns empty → fail" {

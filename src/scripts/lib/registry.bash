@@ -48,17 +48,31 @@ KEELSON_REGISTRIES_FILE=/configmap/registries.yaml
 # Idempotent. Loads keelson-registries from KEELSON_REGISTRIES_FILE.
 # Missing/unreadable file is fine - that's the "all anonymous" case.
 # The file is a map: { <host>: { auth-mode: ..., namespace: ... }, ... }.
+#
+# A file that will not parse, or a host key that will not extract, is
+# survivable but never silent: falling back to anonymous pulls looks exactly
+# like a registry that needs no credentials until the tags stop listing, so
+# both cases say so and carry on with whatever else loaded. Every caller runs
+# in a per-pass subshell, so the log repeats each pass until the file is fixed.
 registry_init() {
     [ "$_REGISTRY_CONFIG_LOADED" -eq 1 ] && return 0
     local file=$KEELSON_REGISTRIES_FILE
     _REGISTRY_CONFIG_LOADED=1
     [ ! -r "$file" ] && return 0
     local hosts host entry
-    hosts=$(yq -o=y '.registries // {} | keys | .[]' "$file" 2>/dev/null) || return 0
+    if ! hosts=$(yq -o=y '.registries // {} | keys | .[]' "$file" 2>/dev/null); then
+        log_error registry-config-parse-failed file="$file" \
+            msg="Could not parse the registries config '$file', so no central registry credentials are available and every registry will be tried anonymously. Fix the ConfigMap and the next pass picks it up."
+        return 0
+    fi
     [ -z "$hosts" ] && return 0
     while IFS= read -r host; do
         [ -z "$host" ] && continue
-        entry=$(yq -o=json ".registries[\"$host\"]" "$file")
+        if ! entry=$(yq -o=json ".registries[\"$host\"]" "$file" 2>/dev/null); then
+            log_error registry-config-entry-failed host="$host" file="$file" \
+                msg="Could not read the entry for registry '$host' from '$file', so that registry will be tried anonymously. The key is not usable as a registry hostname; every other entry in the file still loaded."
+            continue
+        fi
         _REGISTRY_CONFIG_CACHE["$host"]=$entry
     done <<< "$hosts"
 }
