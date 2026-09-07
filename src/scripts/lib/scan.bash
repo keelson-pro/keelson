@@ -34,6 +34,10 @@ SCAN_WL_SA_NAME=
 SCAN_KIND_RECORDS=
 SCAN_KIND_COUNT=0
 SCAN_POLL_OVERRUNS=0
+SCAN_ROLLOUT_REF_PASSES=0
+# "<ns>/<name>" per annotated Rollout this scan found with no pod template.
+# Filled by scan_cache_workload, drained by scan_report_rollout_no_template.
+declare -a SCAN_ROLLOUT_NO_TEMPLATE=()
 
 # scan_run <apply> [poll-all]
 #
@@ -57,6 +61,7 @@ scan_run() {
 
     local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
           _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
+    SCAN_ROLLOUT_NO_TEMPLATE=()
 
     # Inventory bookkeeping for this pass. SCAN_SEEN is what the cluster
     # still has; SCAN_LISTED is the kinds we actually managed to list, which
@@ -75,6 +80,7 @@ scan_run() {
     done
 
     scan_reconcile_inventory
+    scan_report_rollout_no_template
 
     log_debug scan-summary \
         resources="$_scan_total" \
@@ -469,6 +475,18 @@ scan_workload() {
     # the next pass, not a reason to abandon the other thirty in this one.
     scan_cache_workload "$kind" "$ns" "$name" "$annotations" "$suspend" \
         "$sa_name" "$ips_json" "$container_pairs" || true
+
+    # A Rollout taking its pod template from spec.workloadRef has no containers
+    # of its own, so it is annotated for an update that can never happen.
+    # Collected rather than logged here: one line naming them all beats one per
+    # workload, and the pass has to finish before the count that paces the
+    # warning can be updated. Outside scan_cache_workload deliberately, since
+    # that returns early when the inventory is disabled and a misconfiguration
+    # is worth saying either way.
+    if [ "$kind" = "Rollout" ] && [ -z "$container_pairs" ] \
+            && scan_is_keelson_managed "$annotations"; then
+        SCAN_ROLLOUT_NO_TEMPLATE+=("$ns/$name")
+    fi
 
     if [ "$_scan_poll_all" -eq 1 ]; then
         rest=$container_pairs
@@ -1058,6 +1076,50 @@ scan_sum_tally() {
         fi
     done < "$f"
     rm -f "$f" 2>/dev/null || true
+    return 0
+}
+
+# scan_rollout_ref_count <path> <seen>
+# Sets SCAN_ROLLOUT_REF_PASSES to the number of consecutive scans that have
+# found an annotated Rollout with no pod template, this one included; a scan
+# that found none resets it to zero.
+#
+# On disk for the same reason as the overrun counter below: each scan is its
+# own subshell, so a counter in memory dies with the child that raised it.
+# Only one scan runs at a time, gated on LOOP_SCAN_PID, so there is no writer
+# to race with.
+scan_rollout_ref_count() {
+    local path=$1 seen=$2 n=0
+    if [ "$seen" -eq 1 ]; then
+        [ -r "$path" ] && read -r n < "$path" 2>/dev/null
+        case "$n" in ''|*[!0-9]*) n=0 ;; esac
+        n=$(( n + 1 ))
+    fi
+    SCAN_ROLLOUT_REF_PASSES=$n
+    printf '%s\n' "$n" > "$path" 2>/dev/null || true
+    return 0
+}
+
+# scan_report_rollout_no_template
+# Warns about the Rollouts this pass collected, on a widening gap. The
+# condition does not clear itself: it stands until someone edits the
+# annotation off the Rollout or onto the Deployment Argo reads from, so a
+# line every pass would become wallpaper long before it was acted on.
+scan_report_rollout_no_template() {
+    local seen=0
+    [ "${#SCAN_ROLLOUT_NO_TEMPLATE[@]}" -gt 0 ] && seen=1
+    scan_rollout_ref_count \
+        "${KEELSON_ROLLOUT_WORKLOAD_REF_FILE:-/keelson/work/rollout-workload-ref}" "$seen"
+    [ "$seen" -eq 1 ] || return 0
+    log_backoff_should_emit "$SCAN_ROLLOUT_REF_PASSES" \
+        "${KEELSON_ROLLOUT_WORKLOAD_REF_WARNING_BACKOFF_LIMIT:?KEELSON_ROLLOUT_WORKLOAD_REF_WARNING_BACKOFF_LIMIT required}" \
+        || return 0
+    local list
+    printf -v list '%s ' "${SCAN_ROLLOUT_NO_TEMPLATE[@]}"
+    log_warn rollout-workload-ref-no-template \
+        rollouts="${list% }" count="${#SCAN_ROLLOUT_NO_TEMPLATE[@]}" \
+        consecutive="$SCAN_ROLLOUT_REF_PASSES" \
+        msg="${#SCAN_ROLLOUT_NO_TEMPLATE[@]} annotated Rollout(s) have no pod template of their own and so no image Keelson can update: ${list% }. A Rollout using spec.workloadRef takes its template from the workload it references, and that is where the image lives, so annotate the referenced Deployment instead of the Rollout. That is $SCAN_ROLLOUT_REF_PASSES scans in a row; this is reported with a widening gap between reports, not once per scan."
     return 0
 }
 

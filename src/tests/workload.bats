@@ -31,6 +31,15 @@ setup() {
     [ "$output" = ".spec.template.spec" ]
 }
 
+# A Rollout's spec.template is a plain PodTemplateSpec, same as a Deployment.
+# A Rollout using spec.workloadRef instead has no template at all; the scan's
+# "// []" leaves it with no containers rather than erroring.
+@test "pod_spec_path: Rollout" {
+    run workload_pod_spec_path Rollout
+    [ "$status" -eq 0 ]
+    [ "$output" = ".spec.template.spec" ]
+}
+
 @test "pod_spec_path: CronJob nests under jobTemplate" {
     run workload_pod_spec_path CronJob
     [ "$status" -eq 0 ]
@@ -59,7 +68,7 @@ setup() {
     [ "$status" -eq 1 ]
 }
 
-@test "is_watched: Rollout is not (deferred)" {
+@test "is_watched: Rollout is not, until it is asked for" {
     run workload_is_watched Rollout
     [ "$status" -eq 1 ]
 }

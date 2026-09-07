@@ -65,6 +65,25 @@ mf_update_kubectl() {
     [ "$output" = '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"containers":[{"name":"worker","image":"ghcr.io/x/y:1.2.4"}]}}}}}}' ]
 }
 
+@test "patch_json: Rollout uses the same template path" {
+    run update_patch_json Rollout containers main ghcr.io/x/y:1.2.4
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"spec":{"template":{"spec":{"containers":[{"name":"main","image":"ghcr.io/x/y:1.2.4"}]}}}}' ]
+}
+
+@test "apiversion: Rollout is an Argo CRD, not apps/v1" {
+    run update_apiversion Rollout
+    [ "$status" -eq 0 ]
+    [ "$output" = "argoproj.io/v1alpha1" ]
+}
+
+@test "minimal_manifest: Rollout carries the Argo apiVersion" {
+    run update_minimal_manifest Rollout default app containers main ghcr.io/x/y:1.2.4
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"apiVersion: argoproj.io/v1alpha1"* ]]
+    [[ "$output" == *"kind: Rollout"* ]]
+}
+
 @test "patch_json: unknown kind returns non-zero" {
     run update_patch_json Pod containers main ghcr.io/x/y:1.0.0
     [ "$status" -ne 0 ]
@@ -443,4 +462,51 @@ exit 1
 SH
     run update_fetch_managed_fields Deployment default app
     [ "$status" -eq 1 ]
+}
+
+# --- custom resources cannot take a strategic merge patch ---
+
+@test "update_apply: a Rollout uses apply, never kubectl patch" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "$@" >>"$TMP_DIR/kubectl.log"
+exit 0
+SH
+    run emit update_apply Rollout default app containers main ghcr.io/x/y:1.2.4 1.2.3
+    [ "$status" -eq 0 ]
+    grep -q -- "--server-side" "$TMP_DIR/kubectl.log"
+    ! grep -q -- "--type=strategic" "$TMP_DIR/kubectl.log"
+}
+
+@test "update_apply: a Deployment still takes the strategic patch" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "$@" >>"$TMP_DIR/kubectl.log"
+exit 0
+SH
+    run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
+    [ "$status" -eq 0 ]
+    grep -q -- "--type=strategic" "$TMP_DIR/kubectl.log"
+}
+
+@test "update_apply: a failed patch says why" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "unsupported media type" >&2
+exit 1
+SH
+    run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unsupported media type"* ]]
+}
+
+@test "update_apply: a forced apply still reports the configured strategy" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    KEELSON_LOG_FORMAT=json run emit update_apply Rollout default app containers main ghcr.io/x/y:1.2.4 1.2.3
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"strategy":"patch"'* ]]
+    [[ "$output" == *'"operation":"Apply"'* ]]
 }

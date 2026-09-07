@@ -66,8 +66,12 @@ setup() {
     KEELSON_REGISTRY_POLL_CONCURRENCY=2
     KEELSON_POLL_TALLY_FILE="$TMP_DIR/poll-tally"
     KEELSON_POLL_OVERRUN_FILE="$TMP_DIR/poll-overrun"
+    KEELSON_ROLLOUT_WORKLOAD_REF_FILE="$TMP_DIR/rollout-workload-ref"
+    KEELSON_ROLLOUT_WORKLOAD_REF_WARNING_BACKOFF_LIMIT=64
     KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT=64
-    export KEELSON_POLL_TALLY_FILE KEELSON_POLL_OVERRUN_FILE \
+    export KEELSON_ROLLOUT_WORKLOAD_REF_FILE \
+        KEELSON_ROLLOUT_WORKLOAD_REF_WARNING_BACKOFF_LIMIT \
+        KEELSON_POLL_TALLY_FILE KEELSON_POLL_OVERRUN_FILE \
            KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT
     export KEELSON_FIRST_POLL_DELAY_MAX KEELSON_REGISTRY_POLL_CONCURRENCY
     KEELSON_QUEUE_DIR="$TMP_DIR/queue"
@@ -2300,4 +2304,62 @@ printf '{"Tags":["1.2.3"]}'
 SH
     run emit scan_poll_due 0 "$LATE"
     [[ "$output" == *'"resources":"5"'* ]]
+}
+
+# --- Rollout with spec.workloadRef and no pod template ---
+
+# Argo takes the pod template, and the image, from the referenced Deployment,
+# so a Rollout like this has nothing for Keelson to update. Annotating it is a
+# misconfiguration: the Deployment is the thing to annotate.
+workload_ref_rollout_json() {
+    cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {"keelson.pro/policy": "minor"}
+      },
+      "spec": {
+        "workloadRef": {
+          "apiVersion": "apps/v1",
+          "kind": "Deployment",
+          "name": "app-deployment"
+        }
+      }
+    }
+  ]
+}
+JSON
+}
+
+@test "rollout workloadRef: an annotated Rollout with no template warns" {
+    kubectl_returns "$(workload_ref_rollout_json)"
+    KEELSON_WATCHED_KINDS=Rollout run emit scan_run 0 0
+    [[ "$output" == *rollout-workload-ref-no-template* ]]
+}
+
+@test "rollout workloadRef: the warning names the workload" {
+    kubectl_returns "$(workload_ref_rollout_json)"
+    KEELSON_WATCHED_KINDS=Rollout run emit scan_run 0 0
+    [[ "$output" == *"default/app"* ]]
+}
+
+@test "rollout workloadRef: a Rollout with a template does not warn" {
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    KEELSON_WATCHED_KINDS=Rollout run emit scan_run 0 0
+    [[ "$output" != *rollout-workload-ref-no-template* ]]
+}
+
+@test "rollout workloadRef: the warning backs off rather than repeating" {
+    kubectl_returns "$(workload_ref_rollout_json)"
+    export KEELSON_WATCHED_KINDS=Rollout
+    # 1st and 2nd occurrences report, the 3rd does not.
+    emit scan_run 0 0 > "$TMP_DIR/pass1" 2>&1
+    emit scan_run 0 0 > "$TMP_DIR/pass2" 2>&1
+    emit scan_run 0 0 > "$TMP_DIR/pass3" 2>&1
+    grep -q rollout-workload-ref-no-template "$TMP_DIR/pass1"
+    grep -q rollout-workload-ref-no-template "$TMP_DIR/pass2"
+    ! grep -q rollout-workload-ref-no-template "$TMP_DIR/pass3"
 }

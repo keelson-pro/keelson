@@ -58,7 +58,7 @@ update_patch_json() {
             printf '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"%s":[{"name":"%s","image":"%s"}]}}}}}}' \
                 "$clist" "$container" "$image"
             ;;
-        Deployment|StatefulSet|DaemonSet)
+        Deployment|StatefulSet|DaemonSet|Rollout)
             printf '{"spec":{"template":{"spec":{"%s":[{"name":"%s","image":"%s"}]}}}}' \
                 "$clist" "$container" "$image"
             ;;
@@ -74,6 +74,7 @@ update_apiversion() {
     case "$1" in
         CronJob) printf 'batch/v1' ;;
         Deployment|StatefulSet|DaemonSet) printf 'apps/v1' ;;
+        Rollout) printf 'argoproj.io/v1alpha1' ;;
         *) return 1 ;;
     esac
 }
@@ -213,13 +214,45 @@ update_apply() {
                 "$apply_owner" "$from_tag" mimic
             ;;
         patch)
-            update_apply_patch "$kind" "$ns" "$name" "$clist" "$container" "$image" \
-                keelson "$from_tag" patch
+            # A custom resource cannot take a strategic merge patch: the
+            # API server has no patch metadata for it and rejects the media
+            # type outright, so "patch" would fail on every attempt. Server-
+            # side apply is the same intent by the only means available, and
+            # under the same manager, so the substitution changes how the
+            # write is made and not who owns the field.
+            if update_supports_strategic "$kind"; then
+                update_apply_patch "$kind" "$ns" "$name" "$clist" "$container" "$image" \
+                    keelson "$from_tag" patch
+            else
+                log_debug update-strategy-forced-apply kind="$kind" ns="$ns" name="$name" \
+                    msg="Strategy 'patch' cannot be used on $kind '$name' in '$ns' because a strategic merge patch is not supported for custom resources; applying server-side as 'keelson' instead."
+                # Still reported as the strategy that was configured, because
+                # that is what someone filtering the log is looking for. How
+                # the write was made is already on the line: operation=Apply
+                # rather than operation=Update.
+                update_apply_ssa "$kind" "$ns" "$name" "$clist" "$container" "$image" \
+                    keelson "$from_tag" patch
+            fi
             ;;
         claim)
             update_apply_ssa "$kind" "$ns" "$name" "$clist" "$container" "$image" \
                 keelson "$from_tag" claim
             ;;
+    esac
+}
+
+# update_supports_strategic <kind>
+# True for kinds the API server can strategic-merge-patch, which means the
+# built-in ones: the merge directives come from struct tags on the Go type,
+# and a custom resource has none, so the request is refused with an
+# unsupported media type rather than merged badly.
+#
+# Listed rather than excluded, so a kind added later has to be thought about
+# once instead of failing in production on its first update.
+update_supports_strategic() {
+    case "$1" in
+        Deployment|StatefulSet|DaemonSet|CronJob) return 0 ;;
+        *) return 1 ;;
     esac
 }
 
@@ -233,9 +266,12 @@ update_apply_patch() {
             msg="Cannot update $kind '$name' in '$ns': kind not supported."
         return 1
     fi
+    local tmperr detail="" reason=""
+    tmperr=$(mktemp 2>/dev/null) || tmperr=/dev/null
     if kubectl patch "$kind" "$name" -n "$ns" \
             --type=strategic --field-manager="$manager" \
-            --patch "$patch" >/dev/null 2>&1; then
+            --patch "$patch" >/dev/null 2>"$tmperr"; then
+        [ "$tmperr" != "/dev/null" ] && rm -f "$tmperr"
         log_info_always update-applied \
             kind="$kind" ns="$ns" name="$name" container="$container" \
             image="$image" from="$from_tag" to="$to_tag" repo="$repo" \
@@ -243,10 +279,25 @@ update_apply_patch() {
             msg="$kind '$name' in '$ns' updated from $from_tag to $to_tag for image '$repo'."
         return 0
     fi
+    if [ -r "$tmperr" ] && [ "$tmperr" != "/dev/null" ]; then
+        detail=$(<"$tmperr")
+        rm -f "$tmperr"
+    fi
+    # Same shape as the apply path: the whole complaint at debug, a clip of it
+    # on the error line. Discarding it entirely left every failure looking
+    # alike, so a patch the server refused outright read no differently from
+    # one it merely lost a race on.
+    log_flatten "$detail"
+    log_debug update-patch-failed-detail \
+        kind="$kind" ns="$ns" name="$name" container="$container" \
+        msg="Patch of $kind '$name'/$container in '$ns' failed, full output: ${LOG_FLAT:-no error output}"
+    log_hint "$detail"
+    reason=$LOG_HINT
     log_error update-failed \
         kind="$kind" ns="$ns" name="$name" container="$container" \
         image="$image" manager="$manager" operation=Update strategy="$strategy" \
-        msg="Could not patch $kind '$name'/$container in '$ns' to image '$image' (manager '$manager', operation Update)."
+        detail="$reason" \
+        msg="Could not patch $kind '$name'/$container in '$ns' to image '$image' (manager '$manager', operation Update)${reason:+: $reason}."
     return 1
 }
 
