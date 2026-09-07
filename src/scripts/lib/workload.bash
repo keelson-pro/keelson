@@ -4,12 +4,20 @@
 # kubectl helpers and per-kind path resolution.
 # Sourced; not directly executable.
 #
-# Watched kinds: Deployment, StatefulSet, DaemonSet, CronJob.
+# Watchable kinds: Deployment, StatefulSet, DaemonSet, CronJob, Rollout.
+# Rollout is the Argo one, and is allowed but not watched by default: it needs
+# the CRD installed and the permissions from keelson-argo-rollouts-rbac, so it
+# is opt-in through KEELSON_WATCHED_KINDS rather than assumed.
+#
+# A Rollout that takes its pod template from spec.workloadRef rather than
+# spec.template has no image of its own to update; Argo reads it from the
+# referenced Deployment, which is the thing to annotate instead. Such a
+# Rollout yields no containers here and is passed over.
+#
 # ReplicaSet is intentionally NOT watched: a Deployment-owned ReplicaSet
 # inherits the Deployment's annotations, so watching both would cause
 # Keelson to operate on the same container twice. Bare ReplicaSets (no
 # Deployment) are not supported; convert them to a Deployment first.
-# Rollouts deferred to the listener stage.
 
 # KEELSON_WATCHED_KINDS is required at runtime; validate_config enforces it
 # at boot. Module-level reads would block --help so we defer the check.
@@ -76,7 +84,7 @@ workload_pod_spec_path() {
         CronJob)
             printf '.spec.jobTemplate.spec.template.spec'
             ;;
-        Deployment|StatefulSet|DaemonSet)
+        Deployment|StatefulSet|DaemonSet|Rollout)
             printf '.spec.template.spec'
             ;;
         *)

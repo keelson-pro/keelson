@@ -11,6 +11,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/log.bash"
 # shellcheck source=lib/validate.bash
 source "${SCRIPT_DIR}/lib/validate.bash"
+# The registry key and Secret name rules live with the registry code that also
+# enforces them at runtime, so validation checks against one definition.
+# shellcheck source=lib/registry.bash
+source "${SCRIPT_DIR}/lib/registry.bash"
 
 usage() {
     cat <<'USAGE'

@@ -101,6 +101,24 @@ setup() {
     [ "$IMAGE_HOST" = "docker.io" ]
 }
 
+# Hostnames are case-insensitive, and the reference grammar allows uppercase
+# in the domain while forbidding it in the path, so the host is folded here
+# rather than left for every consumer to fold or forget.
+@test "image_host: an uppercase host is lowercased" {
+    image_host "REG.Example.COM/team/app:1.0"
+    [ "$IMAGE_HOST" = "reg.example.com" ]
+}
+
+@test "image_host: an uppercase host with a port is lowercased" {
+    image_host "REG.Example.COM:5000/team/app:1.0"
+    [ "$IMAGE_HOST" = "reg.example.com:5000" ]
+}
+
+@test "image_host: uppercase localhost is still localhost" {
+    image_host "LocalHost/team/app:1.0"
+    [ "$IMAGE_HOST" = "localhost" ]
+}
+
 # --- image_skip_reason ---
 
 @test "image_skip_reason: digest-pinned" {

@@ -30,6 +30,10 @@ setup() {
     source "$SCRIPT_DIR/lib/log.bash"
     # shellcheck source=../scripts/lib/validate.bash
     source "$SCRIPT_DIR/lib/validate.bash"
+    # Registry key and Secret name rules live with the registry code that
+    # also enforces them at runtime; validation reads the same definitions.
+    # shellcheck source=../scripts/lib/registry.bash
+    source "$SCRIPT_DIR/lib/registry.bash"
 
     KEELSON_REGISTRIES_FILE="$TMP_DIR/registries.yaml"
     KEELSON_WORK_DIR="$TMP_DIR/work"
@@ -80,6 +84,7 @@ set_required_env() {
     export KEELSON_FULL_REFRESH_INTERVAL=3600
     export KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT=64
     export KEELSON_RECONCILE_OVERRUN_WARNING_BACKOFF_LIMIT=64
+    export KEELSON_ROLLOUT_WORKLOAD_REF_WARNING_BACKOFF_LIMIT=64
     export KEELSON_TICK_INTERVAL=1
     export KEELSON_HEARTBEAT_MAX_AGE=5
     export KEELSON_WATCHER_RESPAWN_BACKOFF_MAX=300
@@ -240,6 +245,92 @@ registries:
     auth-mode: secret
 YAML
     v_run validate_registries_auth_modes
+    [ "$status" -eq 0 ]
+}
+
+# --- registries key and Secret name handling ---
+
+# Writes a registries file from the entry lines given, one host block per
+# "host|field: value|field: value" argument.
+write_registries() {
+    local arg host rest field
+    printf 'registries:\n' > "$KEELSON_REGISTRIES_FILE"
+    for arg in "$@"; do
+        host=${arg%%|*}
+        rest=${arg#*|}
+        printf '  "%s":\n' "$host" >> "$KEELSON_REGISTRIES_FILE"
+        while [ -n "$rest" ]; do
+            field=${rest%%|*}
+            printf '    %s\n' "$field" >> "$KEELSON_REGISTRIES_FILE"
+            [ "$rest" = "$field" ] && break
+            rest=${rest#*|}
+        done
+    done
+}
+
+@test "registries keys: absent file is OK" {
+    rm -f "$KEELSON_REGISTRIES_FILE"
+    run validate_registries_keys
+    [ "$status" -eq 0 ]
+}
+
+@test "registries keys: a host and a ported host both pass" {
+    write_registries 'ghcr.io|auth-mode: secret' 'reg.example:5000|auth-mode: secret'
+    run validate_registries_keys
+    [ "$status" -eq 0 ]
+}
+
+@test "registries keys: the same key twice fails" {
+    write_registries 'ghcr.io|auth-mode: secret' 'ghcr.io|auth-mode: aws-irsa'
+    run emit validate_registries_keys
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"more than once"* ]]
+}
+
+@test "registries keys: a key that is not a registry reference fails" {
+    write_registries 'not a host|auth-mode: secret'
+    run emit validate_registries_keys
+    [ "$status" -ne 0 ]
+}
+
+@test "registries keys: an IPv6 host with no override fails and suggests one" {
+    write_registries '[::1]:123|auth-mode: secret'
+    run emit validate_registries_keys
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"secret-name-override"* ]]
+}
+
+@test "registries keys: an IPv6 host with a valid override passes" {
+    write_registries '[::1]:123|auth-mode: secret|secret-name-override: local-v6'
+    run validate_registries_keys
+    [ "$status" -eq 0 ]
+}
+
+@test "registries keys: an IPv6 host needs a Secret name under any auth mode" {
+    write_registries '[::1]:123|auth-mode: aws-irsa'
+    run emit validate_registries_keys
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"secret-name-override"* ]]
+}
+
+@test "registries keys: an override that is not a legal object name fails" {
+    write_registries 'ghcr.io|auth-mode: secret|secret-name-override: Not_Legal'
+    run emit validate_registries_keys
+    [ "$status" -ne 0 ]
+}
+
+@test "registries keys: two keys deriving one Secret name fail" {
+    write_registries 'reg.example:5000|auth-mode: secret' 'reg.example-5000|auth-mode: secret'
+    run emit validate_registries_keys
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Two distinct registries would share the same secret name"* ]]
+}
+
+@test "registries keys: sharing one Secret is fine when both say so" {
+    write_registries \
+        'reg.example:1234|auth-mode: secret|secret-name-override: shared' \
+        'reg.example:5678|auth-mode: secret|secret-name-override: shared'
+    run validate_registries_keys
     [ "$status" -eq 0 ]
 }
 
@@ -587,4 +678,40 @@ SH
     v_run emit validate_config
     [ "$status" -ne 0 ]
     [[ "$output" == *"KEELSON_PACKAGE_VERSION"* ]]
+}
+
+# --- registries key case folding ---
+
+@test "registries keys: an uppercase host is accepted and warned about" {
+    write_registries 'REG.Example.COM|auth-mode: secret'
+    run emit validate_registries_keys
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"not lowercase"* ]]
+}
+
+@test "registries keys: the same host in two cases is a duplicate" {
+    write_registries 'REG.example.com|auth-mode: secret' 'reg.example.com|auth-mode: secret'
+    run emit validate_registries_keys
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"more than once"* ]]
+}
+
+# --- Secret name collisions across the override boundary ---
+
+@test "registries keys: a derived name colliding with an override fails" {
+    write_registries \
+        'other.example|auth-mode: secret|secret-name-override: reg.example-5000' \
+        'reg.example:5000|auth-mode: secret'
+    run emit validate_registries_keys
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Two distinct registries would share the same secret name"* ]]
+}
+
+@test "registries keys: an override colliding with a derived name fails" {
+    write_registries \
+        'reg.example:5000|auth-mode: secret' \
+        'other.example|auth-mode: secret|secret-name-override: reg.example-5000'
+    run emit validate_registries_keys
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Two distinct registries would share the same secret name"* ]]
 }

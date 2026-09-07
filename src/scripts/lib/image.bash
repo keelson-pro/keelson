@@ -57,6 +57,12 @@ image_tag() {
 # image_host <ref>  -> IMAGE_HOST
 # The registry hostname (with port if present). For refs with no explicit
 # host, "docker.io" (Docker's default).
+#
+# Lowercased. Hostnames are case-insensitive and the reference grammar allows
+# uppercase in the domain while forbidding it in the path, so "REG.io/x" and
+# "reg.io/x" name one registry. Folding here rather than at each consumer
+# keeps a registries entry, a credential lookup and a workload's image from
+# having to agree on spelling as well as on host.
 image_host() {
     local repo
     image_repo "$1"
@@ -64,6 +70,7 @@ image_host() {
     case "$repo" in
         */*)
             local first=${repo%%/*}
+            first=${first,,}
             # Heuristic: a host has a ".", a ":", or is "localhost".
             case "$first" in
                 *.*|*:*|localhost) IMAGE_HOST=$first ;;

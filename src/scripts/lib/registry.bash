@@ -41,24 +41,108 @@ declare -g _REGISTRY_OWN_NAMESPACE=""
 # opaque "could not list tags". Cleared on success.
 declare -g REGISTRY_LAST_ERROR=""
 
-# Fixed mount location for the keelson ConfigMap. Tests reassign after sourcing.
-KEELSON_REGISTRIES_FILE=/configmap/registries.yaml
+# Default mount location for the keelson ConfigMap, matching validate.bash so
+# an operator's override survives whichever lib is sourced last. A bare
+# assignment here silently beat that override in every entrypoint that sources
+# this file, which is all three of them.
+KEELSON_REGISTRIES_FILE="${KEELSON_REGISTRIES_FILE:-/configmap/registries.yaml}"
+
+# The rules below are the single definition of what a registries map key may
+# be and what Secret name it resolves to. Boot validation reads them to refuse
+# a bad config outright; registry_init reads them to skip a bad entry that
+# arrived in a ConfigMap edit after boot. One rule, two consequences.
+
+# registry_key_valid <key>
+# True when the key is a registry reference: a hostname or a bracketed IPv6
+# literal, either with an optional port. The bracket form is accepted because
+# that is how a raw IPv6 address is written, even though the Secret name it
+# derives never is.
+registry_key_valid() {
+    [[ $1 =~ ^(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?)(:[0-9]+)?$ ]]
+}
+
+# registry_secret_name_for <key>
+# The Secret name a key resolves to by convention: every colon becomes a
+# hyphen, because a colon is not legal in a Kubernetes object name.
+registry_secret_name_for() {
+    printf '%s' "${1//:/-}"
+}
+
+# registry_object_name_valid <name>
+# True for an RFC 1123 subdomain, which is what a Secret name has to be.
+# Applied to the derived name and to secret-name-override alike: an override
+# that cannot name a Secret is no better than a key that cannot.
+registry_object_name_valid() {
+    [ -n "$1" ] && [ "${#1}" -le 253 ] || return 1
+    [[ $1 =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$ ]]
+}
 
 # registry_init
 # Idempotent. Loads keelson-registries from KEELSON_REGISTRIES_FILE.
 # Missing/unreadable file is fine - that's the "all anonymous" case.
 # The file is a map: { <host>: { auth-mode: ..., namespace: ... }, ... }.
+#
+# A file that will not parse, or a host key that will not extract, is
+# survivable but never silent: falling back to anonymous pulls looks exactly
+# like a registry that needs no credentials until the tags stop listing, so
+# both cases say so and carry on with whatever else loaded. Every caller runs
+# in a per-pass subshell, so the log repeats each pass until the file is fixed.
 registry_init() {
     [ "$_REGISTRY_CONFIG_LOADED" -eq 1 ] && return 0
     local file=$KEELSON_REGISTRIES_FILE
     _REGISTRY_CONFIG_LOADED=1
     [ ! -r "$file" ] && return 0
     local hosts host entry
-    hosts=$(yq -o=y '.registries // {} | keys | .[]' "$file" 2>/dev/null) || return 0
+    if ! hosts=$(yq -o=y '.registries // {} | keys | .[]' "$file" 2>/dev/null); then
+        log_error registry-config-parse-failed file="$file" \
+            msg="Could not parse the registries config '$file', so no central registry credentials are available and every registry will be tried anonymously. Fix the ConfigMap and the next pass picks it up."
+        return 0
+    fi
     [ -z "$hosts" ] && return 0
-    while IFS= read -r host; do
-        [ -z "$host" ] && continue
-        entry=$(yq -o=json ".registries[\"$host\"]" "$file")
+    local override name key
+    local -A seen=() claimed_by=() claimed_explicit=()
+    while IFS= read -r key; do
+        [ -z "$key" ] && continue
+        # Folded to match image_host, so config and image refs never have to
+        # agree on spelling. Boot validation warns about the difference; here
+        # it is taken quietly, since a nag every pass is noise, not news.
+        host=${key,,}
+        if [ -n "${seen[$host]:-}" ]; then
+            log_error registry-config-key-duplicate host="$host" file="$file" \
+                msg="Registry '$host' is declared more than once in '$file'. The first entry is being used and this one ignored; boot validation refuses this outright, so it can only have arrived in a ConfigMap edit."
+            continue
+        fi
+        seen[$host]=1
+        if ! registry_key_valid "$host"; then
+            log_error registry-config-key-invalid host="$host" file="$file" \
+                msg="Registry key '$host' in '$file' is not a registry hostname or bracketed IPv6 literal with an optional port, so the entry is ignored and that registry will be tried anonymously."
+            continue
+        fi
+        if ! entry=$(yq -o=json ".registries[\"$key\"]" "$file" 2>/dev/null); then
+            log_error registry-config-entry-failed host="$host" file="$file" \
+                msg="Could not read the entry for registry '$host' from '$file', so that registry will be tried anonymously. Every other entry in the file still loaded."
+            continue
+        fi
+        override=$(registry_entry_field "$entry" secret-name-override)
+        name=$override
+        [ -z "$name" ] && name=$(registry_secret_name_for "$host")
+        if ! registry_object_name_valid "$name"; then
+            log_error registry-config-secret-name-invalid host="$host" secret-name="$name" \
+                msg="Registry '$host' resolves to Secret name '$name', which is not a valid Kubernetes object name, so the entry is ignored. Set secret-name-override on it to name the Secret explicitly."
+            continue
+        fi
+        # Every claim is recorded, derived or overridden, and sharing is only
+        # allowed where both sides said so. An override is not a licence for
+        # someone else's derived name to land on the same Secret.
+        if [ -n "${claimed_by[$name]:-}" ] \
+                && ! { [ -n "$override" ] && [ -n "${claimed_explicit[$name]:-}" ]; }; then
+            log_error registry-config-secret-name-collision host="$host" \
+                other="${claimed_by[$name]}" secret-name="$name" \
+                msg="Registries '${claimed_by[$name]}' and '$host' both resolve to Secret name '$name', so '$host' is ignored rather than sent another registry's credentials. If sharing one Secret is intended, set secret-name-override on both."
+            continue
+        fi
+        claimed_by[$name]=$host
+        [ -n "$override" ] && claimed_explicit[$name]=1
         _REGISTRY_CONFIG_CACHE["$host"]=$entry
     done <<< "$hosts"
 }
@@ -159,15 +243,35 @@ registry_creds_central() {
     esac
 }
 
+# registry_entry_field <entry-json> <field>
+# Echoes an optional string field from a registries entry, empty when absent.
+registry_entry_field() {
+    local value
+    value=$(printf '%s' "$1" | yq -p=json -o=y ".\"$2\" // \"\"")
+    [ "$value" = "null" ] && value=""
+    printf '%s' "$value"
+}
+
 # registry_creds_secret <entry-json> <host>
-# Static-secret resolution. By convention the Secret is named after the host
-# (the map key), so we don't take a secret-name field. The Secret lives in
-# Keelson's own namespace unless the entry overrides with "namespace".
+# Static-secret resolution. Two names come out of one map key. The Secret is
+# named after the host with any port's colon turned into a hyphen, because a
+# colon is not legal in a Kubernetes object name and a registry on a custom
+# port is not a reason to be locked out. The key looked up inside the Secret
+# is the host verbatim, colon and all, because that is what Docker writes
+# into .auths.
+#
+# "secret-name-override" and "secret-key-override" beat each half of that.
+# The name override lets registries on several ports share one Secret; the
+# key override reaches entries written with a scheme or a trailing path.
+# Both are named as overrides so the convention stays the obvious default.
+#
+# The Secret lives in Keelson's own namespace unless the entry overrides
+# with "namespace".
 registry_creds_secret() {
     local cfg=$1 host=$2
-    local ns
-    ns=$(printf '%s' "$cfg" | yq -p=json -o=y '.namespace // ""')
-    if [ -z "$ns" ] || [ "$ns" = "null" ]; then
+    local ns secret key
+    ns=$(registry_entry_field "$cfg" namespace)
+    if [ -z "$ns" ]; then
         ns=$(registry_own_namespace)
     fi
     if [ -z "$ns" ]; then
@@ -175,7 +279,11 @@ registry_creds_secret() {
             msg="Could not determine Kubernetes namespace to look up the imagePullSecret for registry '$host' (no override set and Keelson's own namespace could not be read from the ServiceAccount mount)."
         return 1
     fi
-    registry_creds_from_named_secret "$host" "$ns" "$host"
+    secret=$(registry_entry_field "$cfg" secret-name-override)
+    [ -z "$secret" ] && secret=$(registry_secret_name_for "$host")
+    key=$(registry_entry_field "$cfg" secret-key-override)
+    [ -z "$key" ] && key=$host
+    registry_creds_from_named_secret "$secret" "$ns" "$key"
 }
 
 registry_creds_from_pull_secrets() {

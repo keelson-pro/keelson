@@ -35,10 +35,10 @@ Both are reported on the boot line: `Keelson <version> (package <package-version
 | `KEELSON_LOG_FORMAT`<br>`Keelson/LogFormat` | `plain` | `plain` or `json`. |
 | `KEELSON_LOG_MANAGED_WORKLOADS`<br>`Keelson/LogManagedWorkloads` | `true` | List every workload Keelson will act on, grouped by namespace, once as soon as the first scan has filled the cache. The header carries the ratio (`7 of 312 cached workloads`), which is how you tell an annotation that did not take from one that did. Read from the cache, not the cluster, so it costs nothing. Set `false` on clusters where the list would run to hundreds of lines. |
 | `KEELSON_RESPECT_SA_PULL_SECRETS`<br>`Keelson/RespectServiceAccountPullSecrets` | `false` | Set `true` to walk the workload's ServiceAccount `imagePullSecrets` after the Pod's own, matching what the kubelet sees post-admission. Costs one extra `get sa` per scan. |
-| `KEELSON_WATCHED_KINDS`<br>`Keelson/WatchedKinds` | `Deployment StatefulSet DaemonSet CronJob` | Space-separated list. Anything not in this set is rejected by `keelson-validate`. ReplicaSets are intentionally excluded: a Deployment-owned ReplicaSet inherits its parent's annotations, so watching both would double-update; bare ReplicaSets are unsupported — convert to a Deployment. |
+| `KEELSON_WATCHED_KINDS`<br>`Keelson/WatchedKinds` | `Deployment StatefulSet DaemonSet CronJob` | Space-separated list, drawn from `Deployment StatefulSet DaemonSet CronJob Rollout`. Anything else is rejected by `keelson-validate`. `Rollout` is the Argo one, allowed but not in the default: add it only where the CRD is installed and the permissions from `keelson-argo-rollouts-rbac` are applied. Without the CRD every scan of that kind fails with `the server doesn't have a resource type "Rollout"`; with the CRD but without the permissions it fails on `Forbidden`. A Rollout that takes its pod template from `spec.workloadRef` has no image of its own; Argo reads it from the referenced Deployment, so annotate that Deployment instead. ReplicaSets are intentionally excluded: a Deployment-owned ReplicaSet inherits its parent's annotations, so watching both would double-update; bare ReplicaSets are unsupported — convert to a Deployment. |
 | `KEELSON_STATE_CONFIGMAP`<br>`Keelson/StateConfigMap` | `keelson-state` | Name of the ConfigMap carrying what must survive a pod restart. Written by server-side apply of the whole ledger under field manager `keelson`, the same identity Keelson claims workloads with — there is no patch path, so a key Keelson has forgotten is simply absent from the next write and the server drops it. Exactly one process writes it: the controller's children are subshells that inherit the loaded ledger, record what they change to a spool directory, and never contact the API themselves; the tick loop drains that spool and writes once, before spawning anything. Two writers applying the whole ledger would each drop what the other had just written, and a lost CronJob trigger record re-fires a Job that already ran. Conflicts are forced: the ConfigMap is wholly Keelson's, so if something else has taken a field, Keelson takes it back and carries on rather than stopping. There is nothing here to negotiate over. It carries six provenance annotations — `keelson.pro/createdAt`, `createdByVersion`, `createdByPackage` and the matching `updated*` three — so the record says which build wrote it, which the image tag, the label and the env can all disagree about. Two kinds of key: `w--<kind>--<ns>--<name>` records that Keelson has seen a workload (`first-seen`, written once) and whether it is acting on it (`managed`, rewritten only when it changes); `j--<kind>--<ns>--<name>` records the per-CronJob always-once trigger. No schedule is stored — `next-due` is derived from a hash of the workload's identity, so it is the same on every cold start and needs no ledger to survive a restart. A poll therefore writes nothing here. |
 | `KEELSON_FIELD_MANAGER_STRATEGY_OWNED`<br>`Keelson/FieldManagerStrategyOwned` | `mimic` | Chooses between attributing the change to them (the detected Apply-op owner) or to us (`keelson`) when an Apply-op manager already owns the image field. `mimic` = SSA as their manager (no ownership churn, attribution to them). `patch` = strategic-merge patch as `keelson` (attribution to us, adds a Keelson Update entry). Per-workload override: annotation `keelson.pro/fieldManagerStrategy`. |
-| `KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED`<br>`Keelson/FieldManagerStrategyUnowned` | `patch` | Chooses the write method — patch or SSA — when no Apply-op manager owns the image field (Update-op ownership counts as unowned; Update entries don't participate in SSA conflict resolution). Attribution is always to us (`keelson`) in this row. `patch` = strategic-merge patch (adds a Keelson Update entry). `claim` = SSA (adds a Keelson Apply entry). Per-workload override: annotation `keelson.pro/fieldManagerStrategy`. |
+| `KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED`<br>`Keelson/FieldManagerStrategyUnowned` | `patch` | Chooses the write method — patch or SSA — when no Apply-op manager owns the image field (Update-op ownership counts as unowned; Update entries don't participate in SSA conflict resolution). Attribution is always to us (`keelson`) in this row. `patch` = strategic-merge patch (adds a Keelson Update entry). `claim` = SSA (adds a Keelson Apply entry). Per-workload override: annotation `keelson.pro/fieldManagerStrategy`. Custom resources are the exception: a strategic merge patch needs the merge directives the API server only holds for built-in types, so `patch` on a `Rollout` would be refused outright as an unsupported media type. Keelson applies server-side as `keelson` instead, which is the same attribution by the only means available, and logs `update-strategy-forced-apply` at debug when it does. |
 
 ### Tick loop and scan cadence
 
@@ -51,6 +51,7 @@ Both are reported on the boot line: `Keelson <version> (package <package-version
 | `KEELSON_REGISTRY_POLL_CONCURRENCY`<br>`Keelson/RegistryPollConcurrency` | `2` | How many workloads the due-poll checks at once. A registry lookup is roughly two seconds of waiting for sixty milliseconds of work, so a serial poll spends nearly all of it idle: six workloads take 13.3s at `1`, 6.5s at `2`, 4.4s at `4`. **Coupled to `Keelson/Memory`** — each concurrent check is a `skopeo`, or a `kubectl` if it updates, at roughly 30-50MB resident. Raising this without raising memory gets the Pod OOM-killed, which reads as a crashloop rather than a misconfiguration. Sizing: base is 64-89Mi measured, plus concurrency times ~50MB. |
 | `KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT`<br>`Keelson/PollOverrunWarningBackoffLimit` | `64` | How far the `poll-pass-overrun` warning backs off, in passes. A poll pass that takes longer than the shortest poll schedule among the workloads it polled cannot hold that schedule, so it warns; consecutive overruns are reported on the 1st, 2nd, 4th, 8th and so on, then every this-many-th, and a pass that fits resets the count. Passes, not seconds: a pass is as long as it is, which is the thing being complained about. The count is kept on disk because each pass runs in its own subshell, which is also why `KEELSON_LOG_WARN_REPEAT_INTERVAL` cannot throttle it. Lower for a louder warning, raise for a quieter one; there is no value that silences it altogether, deliberately, because the condition does not clear itself. |
 | `KEELSON_RECONCILE_OVERRUN_WARNING_BACKOFF_LIMIT`<br>`Keelson/ReconcileOverrunWarningBackoffLimit` | `64` | How far the `reconcile-pass-overrun` warning backs off, in scans. A reconcile scan that takes longer than `ReconcileInterval` means the cluster is being listed as fast as it can be rather than on the cadence configured, which is otherwise entirely silent: the next scan simply starts on the following tick, never overlapping, never saying so. Reported on the 1st, 2nd, 4th, 8th consecutive overrun and so on, then every this-many-th, with a scan that fits resetting the count. Same shape as `PollOverrunWarningBackoffLimit` and separate from it, because a slow list and a slow registry are different problems with different fixes. |
+| `KEELSON_ROLLOUT_WORKLOAD_REF_WARNING_BACKOFF_LIMIT`<br>`Keelson/RolloutWorkloadRefWarningBackoffLimit` | `64` | How far the `rollout-workload-ref-no-template` warning backs off, in scans. An Argo Rollout that takes its pod template from `spec.workloadRef` has no image of its own, so annotating it asks for an update that can never happen: Argo reads the template, and the image, from the referenced Deployment, which is what should carry the annotation. The condition does not clear itself, so it is reported on the 1st, 2nd, 4th, 8th consecutive scan that finds one and so on, then every this-many-th, with a scan that finds none resetting the count. Only reachable when `Rollout` is in `WatchedKinds`. |
 | `KEELSON_FULL_REFRESH_INTERVAL`<br>`Keelson/FullRefreshInterval` | `86400` (24h) | Seconds between full refreshes. A refresh throws the local workload cache away and rebuilds it from the cluster, one kind per tick so no single pass runs long, then reconciles the ledger against what came back: entries for kinds no longer watched are dropped, and ledger keys whose workload no longer exists are removed. Belt and braces rather than the mechanism: watch events and the reconcile scan keep the cache current between refreshes, so this exists to correct drift nothing else can see, such as a hand-edited ConfigMap or a cache file that went bad. Makes no registry calls. |
 | `KEELSON_HEARTBEAT_MAX_AGE`<br>`Keelson/HeartbeatMaxAge` | `5` | Seconds before the kubelet's liveness probe treats the heartbeat as stale. Whole seconds here, but the comparison is made in microseconds at both ends, so the limit is exact rather than plus or minus a second. Keep close to `KEELSON_TICK_INTERVAL` — too generous masks a wedged loop, too tight false-positives on jitter. The lower end of that is enforced: it must be **at least twice `KEELSON_TICK_INTERVAL`**, checked by `keelson-validate` at boot. The loop writes the heartbeat once per tick, so a smaller allowance leaves no room for scheduling jitter and the kubelet kills a healthy controller; two ticks means one whole tick may be missed before liveness is entitled to call the loop wedged. Raising `KEELSON_TICK_INTERVAL` therefore requires raising this with it. Nothing enforces the upper end — that one is on you. |
 
@@ -143,6 +144,13 @@ In parallel with stdout/stderr, **every emission from the controller is also wri
 JSON format adds `ts` and `level` keys to every line; plain format prefixes each line with `<ISO-timestamp> <LEVEL>` followed by the event name and pairs.
 
 
+## Minimum Argo Rollouts CRD Version
+
+Keelson only works correctly with Argo Rollouts 1.9.0 or newer. Earlier
+versions of the CRD are flawed and will result in corrupted resources if used
+with Keelson.
+
+
 ## Central registry config
 
 Keelson reads `/configmap/registries.yaml`, mounted from the keelson ConfigMap. The file is a map keyed by registry host; the value carries an `auth-mode` and any mode-specific fields.
@@ -163,10 +171,64 @@ If a host has no entry, Keelson treats it as anonymous.
 
 ### Auth modes
 
-- **`secret`** — pull `dockerconfigjson` from a Kubernetes Secret in Keelson's own namespace. The Secret's name **must equal the registry host** (the map key). Override the lookup namespace with an optional `namespace:` field on the entry.
+- **`secret`** — pull `dockerconfigjson` from a Kubernetes Secret in Keelson's own namespace. The Secret's name **is derived from the registry host** (the map key), and the key looked up inside it **is the map key verbatim**. See below. Override the lookup namespace with an optional `namespace:` field on the entry.
 - **`aws-irsa`** — fetch credentials via `docker-credential-ecr-login`, which uses the Pod's IRSA role (the standard `AWS_*_TOKEN_FILE` env).
 - **`azure-wi`** — federated workload-identity token → AAD token → ACR refresh token. Requires `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` on the Pod.
 - **`gcp-wi`** — workload-identity access token from the GCE metadata server.
+
+### Secret naming for `auth-mode: secret`
+
+One map key produces two names, and they are not the same when the registry has a port.
+
+| | Value | Why |
+|---|---|---|
+| Secret name | map key, each `:` replaced with `-` | a colon is not legal in a Kubernetes object name |
+| Key inside `.auths` | map key verbatim | that is what Docker writes |
+
+So `reg.example:5000` reads the Secret `reg.example-5000` and looks up `reg.example:5000` inside it. A host with no port is unchanged on both sides.
+
+Two optional fields override each half:
+
+```yaml
+registries:
+  reg.example:1234:
+    auth-mode: secret
+    secret-name-override: reg-example-shared
+  reg.example:5678:
+    auth-mode: secret
+    secret-name-override: reg-example-shared
+    secret-key-override: https://reg.example:5678/v1/
+```
+
+- **`secret-name-override`** names the Secret directly. A `dockerconfigjson` Secret can hold many entries, so several registries can share one, as above.
+- **`secret-key-override`** names the key to read inside `.auths`. Use it for entries written with a scheme or a trailing path, which some tooling produces.
+
+Both are overrides by name because the convention is meant to be the obvious default. Reach for them when a registry forces your hand, not to avoid naming Secrets sensibly.
+
+### What is checked, and when
+
+Keelson refuses to boot on any of the following, naming the entry at fault. If one appears in a ConfigMap edit after boot, the offending entry is dropped, the rest of the file still loads, and an error is logged each pass until it is fixed.
+
+| Rejected | Why |
+|---|---|
+| A key that is not a hostname or bracketed IPv6 literal, with an optional port | it cannot be read as a registry, and the entry would not extract |
+| The same key twice | one entry wins arbitrarily and the other is silently lost |
+| A derived Secret name that is not a valid object name | there is no Secret it could ever read; set `secret-name-override` |
+| A `secret-name-override` that is not a valid object name | an override that cannot name a Secret is no better than a key that cannot |
+| Two keys arriving at the same Secret name, unless both set `secret-name-override` | one registry would be sent another's credentials by accident |
+
+An object name here is an RFC 1123 subdomain: lowercase letters, digits, hyphens and dots, starting and ending alphanumeric, 253 characters at most.
+
+Case is normalised rather than rejected. Hostnames are case-insensitive and the reference grammar allows uppercase in the domain, so `REG.example.com` is read as `reg.example.com` and matches an image written either way. Boot warns once so the config gets tidied; it does not refuse. Two spellings of one host are therefore the same key, and count as declaring it twice.
+
+A raw IPv6 host is the case that needs the override in practice. `[::1]:123` derives `[--1]-123`, which Kubernetes will not accept, so name the Secret yourself:
+
+```yaml
+registries:
+  "[::1]:123":
+    auth-mode: secret
+    secret-name-override: local-v6
+```
 
 
 ## Per-workload annotations
@@ -293,12 +355,9 @@ them yet.
   ConfigMap can hold a notifications block, but Keelson emits to none of the
   usual targets (Slack, webhook, email). Watch the changelog before wiring
   workloads to expect alerts.
-- **Argo Rollouts** — `Rollout` is a recognised kind but Keelson does not
-  watch or patch it yet. Treat managed Rollouts as out of scope for the
-  current release.
 - **HelmRelease (Flux) and other CRD-shaped workloads** — Keelson watches
-  only the core kinds listed under `KEELSON_WATCHED_KINDS`
-  (Deployment, StatefulSet, DaemonSet, CronJob).
+  only the kinds listed under `KEELSON_WATCHED_KINDS`
+  (Deployment, StatefulSet, DaemonSet, CronJob, Rollout).
 - **ReplicaSet** — not watched. A Deployment-owned ReplicaSet inherits
   the Deployment's annotations and is updated by patching the Deployment;
   watching ReplicaSets directly would cause the same container to be
