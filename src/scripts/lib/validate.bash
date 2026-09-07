@@ -263,6 +263,94 @@ validate_yq_v4() {
     return 1
 }
 
+# validate_registries_keys
+# Every registries map key has to be a registry reference, has to be declared
+# once, and has to end up with a Secret name that Kubernetes will accept and
+# that no other registry has already claimed.
+#
+# Checked whatever the auth-mode. Only "secret" reads a Secret today, but an
+# entry whose name could never resolve is a latent break the moment that
+# changes, and a config that is checked one way everywhere is easier to
+# reason about than one with a carve-out.
+#
+# Indexed rather than keyed because yq reports a duplicated key twice, and
+# that duplication is one of the things being caught.
+validate_registries_keys() {
+    [ -r "$KEELSON_REGISTRIES_FILE" ] || return 0
+    local file=$KEELSON_REGISTRIES_FILE
+    local count i raw key override name errors=0
+    local -A seen_key=() claimed_by=() claimed_explicit=()
+    if ! count=$(yq -o=y '.registries // {} | length' "$file" 2>/dev/null); then
+        log_error validate-registries-parse-failed file="$file" \
+            msg="Validation failed: could not parse registries file '$file'."
+        return 1
+    fi
+    for ((i=0; i<count; i++)); do
+        raw=$(yq -o=y ".registries // {} | to_entries | .[$i].key" "$file")
+        override=$(yq -o=y ".registries // {} | to_entries | .[$i].value.\"secret-name-override\" // \"\"" "$file")
+
+        # Folded to match image_host, so a key and a workload's image ref
+        # never have to agree on spelling. Accepted rather than refused, but
+        # said out loud once here so the config gets tidied.
+        key=${raw,,}
+        if [ "$raw" != "$key" ]; then
+            log_warn validate-registries-key-not-lowercase registry="$raw" file="$file" \
+                msg="Registry '$raw' in '$file' is not lowercase. Hostnames are case-insensitive, so it is read as '$key' and matches images written either way, but write it lowercase to match what Keelson logs and the Secret name it derives."
+        fi
+
+        if [ -n "${seen_key[$key]:-}" ]; then
+            log_error validate-registries-key-duplicate registry="$key" file="$file" \
+                msg="Validation failed: registry '$key' is declared more than once in '$file'. One entry would win arbitrarily and the other would be silently lost."
+            errors=$((errors+1))
+            continue
+        fi
+        seen_key[$key]=1
+
+        if ! registry_key_valid "$key"; then
+            log_error validate-registries-key-invalid registry="$key" file="$file" \
+                msg="Validation failed: registry key '$key' in '$file' is not a registry hostname or bracketed IPv6 literal, with an optional port."
+            errors=$((errors+1))
+            continue
+        fi
+
+        if [ -n "$override" ]; then
+            if ! registry_object_name_valid "$override"; then
+                log_error validate-registries-override-invalid registry="$key" \
+                    secret-name-override="$override" \
+                    msg="Validation failed: secret-name-override '$override' on registry '$key' is not a valid Kubernetes object name (lowercase letters, digits, hyphens and dots, starting and ending alphanumeric)."
+                errors=$((errors+1))
+                continue
+            fi
+            name=$override
+        else
+            name=$(registry_secret_name_for "$key")
+            if ! registry_object_name_valid "$name"; then
+                log_error validate-registries-secret-name-invalid registry="$key" secret-name="$name" \
+                    msg="Validation failed: registry '$key' resolves to Secret name '$name', which is not a valid Kubernetes object name. Set secret-name-override on the entry to name the Secret explicitly."
+                errors=$((errors+1))
+                continue
+            fi
+        fi
+
+        # Every claim is recorded, whether derived or overridden, and sharing
+        # is allowed only when both sides said so. Recording overrides only
+        # against each other would let a derived name land on a Secret an
+        # override had already claimed, which is the accidental sharing this
+        # exists to stop and is not what "explicit" means.
+        if [ -n "${claimed_by[$name]:-}" ] \
+                && ! { [ -n "$override" ] && [ -n "${claimed_explicit[$name]:-}" ]; }; then
+            log_error validate-registries-secret-name-collision registry="$key" \
+                other="${claimed_by[$name]}" secret-name="$name" \
+                msg="Validation failed: registries '${claimed_by[$name]}' and '$key' both resolve to Secret name '$name'. Two distinct registries would share the same secret name, if this is intended make it explicit by setting it in the secret-name-override field of both."
+            errors=$((errors+1))
+            continue
+        fi
+        claimed_by[$name]=$key
+        [ -n "$override" ] && claimed_explicit[$name]=1
+    done
+    [ "$errors" -eq 0 ]
+}
+
 validate_registries_auth_modes() {
     [ -r "$KEELSON_REGISTRIES_FILE" ] || return 0
     local modes mode errors=0
@@ -379,6 +467,7 @@ validate_config() {
     done
     validate_yq_v4 || errors=$((errors+1))
 
+    validate_registries_keys || errors=$((errors+1))
     validate_registries_auth_modes || errors=$((errors+1))
     validate_filesystem || errors=$((errors+1))
 

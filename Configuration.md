@@ -197,6 +197,31 @@ registries:
 
 Both are overrides by name because the convention is meant to be the obvious default. Reach for them when a registry forces your hand, not to avoid naming Secrets sensibly.
 
+### What is checked, and when
+
+Keelson refuses to boot on any of the following, naming the entry at fault. If one appears in a ConfigMap edit after boot, the offending entry is dropped, the rest of the file still loads, and an error is logged each pass until it is fixed.
+
+| Rejected | Why |
+|---|---|
+| A key that is not a hostname or bracketed IPv6 literal, with an optional port | it cannot be read as a registry, and the entry would not extract |
+| The same key twice | one entry wins arbitrarily and the other is silently lost |
+| A derived Secret name that is not a valid object name | there is no Secret it could ever read; set `secret-name-override` |
+| A `secret-name-override` that is not a valid object name | an override that cannot name a Secret is no better than a key that cannot |
+| Two keys arriving at the same Secret name, unless both set `secret-name-override` | one registry would be sent another's credentials by accident |
+
+An object name here is an RFC 1123 subdomain: lowercase letters, digits, hyphens and dots, starting and ending alphanumeric, 253 characters at most.
+
+Case is normalised rather than rejected. Hostnames are case-insensitive and the reference grammar allows uppercase in the domain, so `REG.example.com` is read as `reg.example.com` and matches an image written either way. Boot warns once so the config gets tidied; it does not refuse. Two spellings of one host are therefore the same key, and count as declaring it twice.
+
+A raw IPv6 host is the case that needs the override in practice. `[::1]:123` derives `[--1]-123`, which Kubernetes will not accept, so name the Secret yourself:
+
+```yaml
+registries:
+  "[::1]:123":
+    auth-mode: secret
+    secret-name-override: local-v6
+```
+
 
 ## Per-workload annotations
 

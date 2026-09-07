@@ -84,6 +84,26 @@ YAML
     [ -z "$output" ]
 }
 
+# --- KEELSON_REGISTRIES_FILE default ---
+
+# Sourced in a clean shell, because setup() reassigns the path after sourcing
+# and so cannot see whether the assignment respected an existing value.
+@test "registries file: an operator env override survives sourcing" {
+    run env KEELSON_REGISTRIES_FILE=/custom/registries.yaml bash -c '
+        source "$1/lib/registry.bash"
+        printf "%s" "$KEELSON_REGISTRIES_FILE"
+    ' _ "$SCRIPT_DIR"
+    [ "$output" = "/custom/registries.yaml" ]
+}
+
+@test "registries file: the mount location is the default with no override" {
+    run env -u KEELSON_REGISTRIES_FILE bash -c '
+        source "$1/lib/registry.bash"
+        printf "%s" "$KEELSON_REGISTRIES_FILE"
+    ' _ "$SCRIPT_DIR"
+    [ "$output" = "/configmap/registries.yaml" ]
+}
+
 # --- registry_init: failures are logged, not swallowed ---
 
 # json so the event name is assertable; plain format prints only the message.
@@ -97,7 +117,8 @@ write_unparseable_registries() {
         > "$KEELSON_REGISTRIES_FILE"
 }
 
-# Parses as YAML, but the host key breaks the per-host yq expression.
+# Parses as YAML, but the host key is not a registry reference. It used to
+# surface as a per-host extraction failure; the key rule now names it first.
 write_unextractable_entry() {
     cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
 registries:
@@ -126,7 +147,7 @@ YAML
     write_unextractable_entry
     run emit_json registry_init
     [ "$status" -eq 0 ]
-    [[ "$output" == *registry-config-entry-failed* ]]
+    [[ "$output" == *registry-config-key-invalid* ]]
 }
 
 @test "registry_init: unextractable entry does not stop the good ones loading" {
@@ -351,6 +372,69 @@ SH
     [ -z "$output" ]
 }
 
+# --- registry_init: entries boot validation would have rejected ---
+#
+# Boot refuses to start on any of these. They only reach registry_init when
+# the ConfigMap is edited after boot, and there the entry is dropped and the
+# rest of the file still loads.
+
+@test "registry_init: a key that is not a registry reference is skipped" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  "not a host":
+    auth-mode: secret
+  ghcr.io:
+    auth-mode: secret
+YAML
+    run emit_json registry_init
+    [[ "$output" == *registry-config-key-invalid* ]]
+}
+
+@test "registry_init: a key that is not a registry reference leaves the rest loaded" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  "not a host":
+    auth-mode: secret
+  ghcr.io:
+    auth-mode: secret
+YAML
+    registry_init 2>/dev/null
+    run registry_config_for_host ghcr.io
+    [ -n "$output" ]
+}
+
+@test "registry_init: an illegal derived Secret name is skipped" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  "[::1]:123":
+    auth-mode: secret
+YAML
+    run emit_json registry_init
+    [[ "$output" == *registry-config-secret-name-invalid* ]]
+}
+
+@test "registry_init: an illegal derived Secret name is skipped under any auth mode" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  "[::1]:123":
+    auth-mode: aws-irsa
+YAML
+    run emit_json registry_init
+    [[ "$output" == *registry-config-secret-name-invalid* ]]
+}
+
+@test "registry_init: a duplicated key keeps the first and logs the second" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  ghcr.io:
+    auth-mode: secret
+  ghcr.io:
+    auth-mode: aws-irsa
+YAML
+    run emit_json registry_init
+    [[ "$output" == *registry-config-key-duplicate* ]]
+}
+
 # --- central secret path: Secret naming convention and its overrides ---
 
 # kubectl shim for the central secret path. Records the Secret name it was
@@ -548,4 +632,59 @@ exit 1
 SH
     run registry_list_tags ghcr.io/x/y:1.0
     [ "$status" -ne 0 ]
+}
+
+# --- host case folding ---
+
+@test "registry_init: an uppercase key is cached under its lowercase form" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  REG.Example.COM:
+    auth-mode: secret
+    namespace: keelson-system
+YAML
+    registry_init 2>/dev/null
+    run registry_config_for_host reg.example.com
+    [ -n "$output" ]
+}
+
+@test "registry_init: two spellings of one host are a duplicate" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  REG.example.com:
+    auth-mode: secret
+  reg.example.com:
+    auth-mode: secret
+YAML
+    run emit_json registry_init
+    [[ "$output" == *registry-config-key-duplicate* ]]
+}
+
+@test "central secret: an uppercase image host resolves a lowercase entry" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  reg.example.com:
+    auth-mode: secret
+    namespace: keelson-system
+YAML
+    registry_init
+    kubectl_secret_shim reg.example.com case-user case-pass
+    run registry_resolve_creds REG.Example.COM/x/y:1.0 '[]' default \
+        'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ "$output" = "case-user:case-pass" ]
+    [ "$(cat "$TMP_DIR/secret.name")" = "reg.example.com" ]
+}
+
+@test "registry_init: a derived name colliding with an override is skipped" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  other.example:
+    auth-mode: secret
+    secret-name-override: reg.example-5000
+  reg.example:5000:
+    auth-mode: secret
+YAML
+    run emit_json registry_init
+    [[ "$output" == *registry-config-secret-name-collision* ]]
 }
