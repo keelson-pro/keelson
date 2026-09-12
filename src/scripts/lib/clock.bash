@@ -145,6 +145,14 @@ clock_parse_duration() {
     done
 
     [ "$matched" -eq 1 ] || return 1
+    # Bash arithmetic is 64-bit signed and wraps without complaint, so a
+    # duration long enough to overflow the millisecond accumulator arrives
+    # here negative. Refused rather than clamped: the caller already knows
+    # what to do with a duration it cannot read, and a negative interval
+    # would otherwise reach the fingerprint and the next-due arithmetic as
+    # though someone had meant it. The bar is around 106751991168d, so this
+    # is a guard against a typo, not against a plausible value.
+    [ "$total" -lt 0 ] && return 1
     CLOCK_DURATION=$(( (total + 500) / 1000 ))
     return 0
 }
