@@ -2363,3 +2363,95 @@ JSON
     grep -q rollout-workload-ref-no-template "$TMP_DIR/pass2"
     ! grep -q rollout-workload-ref-no-template "$TMP_DIR/pass3"
 }
+
+# --- credential fallback: a credential that resolves but does not work ---
+#
+# Until now resolution picked one credential and a failure there ended the
+# attempt. A pod Secret that is stale or scoped to the wrong repo therefore
+# masked a perfectly good central credential.
+
+# A Deployment whose pod secret covers the registry, with a central entry
+# covering it too, so both sources have something to offer.
+both_sources_json() {
+    cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {"keelson.pro/policy": "minor"}
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "imagePullSecrets": [{"name": "pod-secret"}],
+            "containers": [{"name": "main", "image": "reg.example/x/y:1.2.3"}]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+}
+
+# kubectl answers the list call with the workload, and each Secret read with
+# a docker config for reg.example carrying that Secret's own credentials, so
+# the two sources are distinguishable at the registry.
+b64_dockerconfig() {
+    local creds=$1 payload
+    payload=$(printf '{"auths":{"reg.example":{"auth":"%s"}}}' \
+        "$(printf '%s' "$creds" | base64 -w0 2>/dev/null || printf '%s' "$creds" | base64)")
+    printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64
+}
+
+kubectl_two_secrets() {
+    local pod central
+    pod=$(b64_dockerconfig 'pod:stale')
+    central=$(b64_dockerconfig 'central:good')
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+case "\$*" in
+    *"get secret pod-secret"*)     printf '%s' '$pod' ;;
+    *"get secret central-secret"*) printf '%s' '$central' ;;
+    *"get secret"*)                printf '' ;;
+    *) cat <<'FIXTURE'
+$(both_sources_json)
+FIXTURE
+    ;;
+esac
+SH
+}
+
+# skopeo rejects the pod credential and accepts the central one.
+skopeo_rejects_stale() {
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    case "$arg" in
+        --creds=pod:stale)
+            echo "unauthorized: authentication required" >&2
+            exit 1
+            ;;
+    esac
+done
+printf '{"Tags":["1.2.0","1.2.4"]}'
+SH
+}
+
+@test "creds fallback: a failing pod credential falls through to central" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  reg.example:
+    auth-mode: secret
+    namespace: keelson-system
+    secret-name-override: central-secret
+YAML
+    kubectl_two_secrets
+    skopeo_rejects_stale
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"would-update"* ]]
+    [[ "$output" != *'"error":"1"'* ]]
+}

@@ -811,8 +811,7 @@ scan_container() {
     policy=${fields%% *}
     position=${fields##* }
 
-    local creds
-    if ! creds=$(registry_resolve_creds "$cimage" "$ips_json" "$ns" "$ann" "$sa_name" "$cname"); then
+    if ! registry_creds_source_order "$ann" "$cname"; then
         log_error registry-creds-failed \
             kind="$kind" ns="$ns" name="$name" container="$cname" \
             detail="$cimage" \
@@ -821,8 +820,32 @@ scan_container() {
         return 0
     fi
 
-    local tags_raw
-    if ! tags_raw=$(registry_list_tags "$cimage" "$creds"); then
+    # Each source in turn, and the registry decides. A credential that
+    # resolves is not a credential that works: a pull Secret can be stale, or
+    # scoped to a different repo on the same host, and stopping at the first
+    # one that merely exists let it mask a credential that would have worked.
+    # An attempt that gets nothing from a source costs no registry call.
+    local tags_raw creds source host tried=0 listed=0
+    image_host "$cimage"
+    host=$IMAGE_HOST
+    for source in "${REGISTRY_CREDS_SOURCES[@]}"; do
+        creds=$(registry_creds_from_source "$source" "$host" "$ips_json" "$ns" "$sa_name") || continue
+        [ -n "$creds" ] || continue
+        tried=1
+        if tags_raw=$(registry_list_tags "$cimage" "$creds"); then
+            listed=1
+            break
+        fi
+        log_debug registry-creds-source-rejected \
+            kind="$kind" ns="$ns" name="$name" container="$cname" \
+            source="$source" detail="$cimage" \
+            msg="Credentials from '$source' were rejected listing tags for '$cimage'; trying the next source."
+    done
+    # No source had anything, so the host is either public or unconfigured.
+    if [ "$listed" -eq 0 ] && [ "$tried" -eq 0 ]; then
+        tags_raw=$(registry_list_tags "$cimage" "") && listed=1
+    fi
+    if [ "$listed" -eq 0 ]; then
         local reason=${REGISTRY_LAST_ERROR:-}
         log_flatten "$reason"
         log_debug registry-list-tags-detail \

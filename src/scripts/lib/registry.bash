@@ -45,6 +45,8 @@ declare -g _REGISTRY_OWN_NAMESPACE=""
 # failure so callers can surface a hint in their error log instead of an
 # opaque "could not list tags". Cleared on success.
 declare -g REGISTRY_LAST_ERROR=""
+# Credential sources to try, in order, set by registry_creds_source_order.
+declare -ga REGISTRY_CREDS_SOURCES=()
 
 # Default mount location for the keelson ConfigMap, matching validate.bash so
 # an operator's override survives whichever lib is sourced last. A bare
@@ -179,40 +181,73 @@ registry_config_for_host() {
 # walk and the central fall-through.
 # The container arg is optional; when non-empty, per-container annotation
 # overrides (e.g. keelson.pro/credentials.<container>) take precedence.
-registry_resolve_creds() {
-    local image=$1 ips_json=$2 ns=$3 ann=$4 sa=${5:-} container=${6:-}
-    local host mode creds
-    image_host "$image"
-    host=$IMAGE_HOST
+# registry_creds_source_order <annotation-lines> [<container>]
+# Sets REGISTRY_CREDS_SOURCES to the credential sources to try, in order.
+# Returns 2 for a credentials annotation naming no known mode.
+#
+# Sources are named here and resolved later, one at a time, because resolving
+# one costs a kubectl call or a token fetch and the point is to stop at the
+# first that works. Naming them also lets the caller try the next when a
+# credential resolves but the registry rejects it, which a function returning
+# a single credential cannot express.
+registry_creds_source_order() {
+    local ann=$1 container=${2:-} mode
     annotation_get "$ann" credentials "$container"
-    mode=$ANNOTATION_VALUE
-    mode=${mode:-respect-pod}
-
+    mode=${ANNOTATION_VALUE:-respect-pod}
+    REGISTRY_CREDS_SOURCES=()
     case "$mode" in
         respect-pod)
-            if creds=$(registry_creds_from_pull_secrets "$ips_json" "$ns" "$host") \
-                    && [ -n "$creds" ]; then
-                printf '%s' "$creds"
-                return 0
+            REGISTRY_CREDS_SOURCES=(pod)
+            if [ "${KEELSON_RESPECT_SA_PULL_SECRETS:?KEELSON_RESPECT_SA_PULL_SECRETS required}" = "true" ]; then
+                REGISTRY_CREDS_SOURCES+=(sa)
             fi
-            if [ "${KEELSON_RESPECT_SA_PULL_SECRETS:?KEELSON_RESPECT_SA_PULL_SECRETS required}" = "true" ] \
-                    && [ -n "$sa" ]; then
-                if creds=$(registry_creds_from_sa "$sa" "$ns" "$host") \
-                        && [ -n "$creds" ]; then
-                    printf '%s' "$creds"
-                    return 0
-                fi
-            fi
+            REGISTRY_CREDS_SOURCES+=(central)
             ;;
         central|ignore-pod)
-            : # fall through
+            REGISTRY_CREDS_SOURCES=(central)
             ;;
         *)
             return 2
             ;;
     esac
+}
 
-    registry_creds_central "$host"
+# registry_creds_from_source <source> <host> <ips-json> <namespace> [<sa>]
+# Echoes credentials from one named source. Empty output or non-zero means
+# this source has nothing for this host, which is not an error: the caller
+# moves to the next one.
+registry_creds_from_source() {
+    local source=$1 host=$2 ips_json=$3 ns=$4 sa=${5:-}
+    case "$source" in
+        pod)     registry_creds_from_pull_secrets "$ips_json" "$ns" "$host" ;;
+        sa)      [ -n "$sa" ] || return 1
+                 registry_creds_from_sa "$sa" "$ns" "$host" ;;
+        central) registry_creds_central "$host" ;;
+        *)       return 1 ;;
+    esac
+}
+
+# registry_resolve_creds <image-ref> <imagePullSecrets-json> <namespace> <annotation-lines> [<service-account-name>] [<container-name>]
+# Echoes the first credential any source yields, or empty for anonymous.
+#
+# The single-answer form, for callers with no way to retry. The scan walks
+# the sources itself so that a credential the registry rejects is followed by
+# the next source rather than ending the attempt.
+registry_resolve_creds() {
+    local image=$1 ips_json=$2 ns=$3 ann=$4 sa=${5:-} container=${6:-}
+    local host source creds
+    image_host "$image"
+    host=$IMAGE_HOST
+    registry_creds_source_order "$ann" "$container" || return 2
+    for source in "${REGISTRY_CREDS_SOURCES[@]}"; do
+        if creds=$(registry_creds_from_source "$source" "$host" "$ips_json" "$ns" "$sa") \
+                && [ -n "$creds" ]; then
+            printf '%s' "$creds"
+            return 0
+        fi
+    done
+    printf ''
+    return 0
 }
 
 # registry_creds_from_sa <sa-name> <namespace> <host>
