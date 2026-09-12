@@ -232,7 +232,7 @@ SH
 
 # --- registry_resolve_creds ---
 
-@test "resolve_creds: respect-pod with matching pod secret uses it" {
+@test "resolve_creds: respect-pod-spec with matching pod secret uses it" {
     local payload b64
     payload=$(make_dockerconfig ghcr.io pod-user pod-pass)
     b64=$(printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64)
@@ -240,25 +240,25 @@ SH
 #!/usr/bin/env bash
 printf '%s' '$b64'
 SH
-    run registry_resolve_creds ghcr.io/x/y:1.0 '[{"name":"a"}]' default 'keelson.pro/credentials=respect-pod'
+    run registry_resolve_creds ghcr.io/x/y:1.0 '[{"name":"a"}]' default 'keelson.pro/credentials=respect-pod-spec'
     [ "$status" -eq 0 ]
     [ "$output" = "pod-user:pod-pass" ]
 }
 
-@test "resolve_creds: respect-pod falls through to central when pod secret has no match" {
+@test "resolve_creds: respect-pod-spec with no matching pod secret is anonymous" {
     rm -f "$KEELSON_REGISTRIES_FILE"
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 printf ''
 SH
-    run registry_resolve_creds ghcr.io/x/y:1.0 '[{"name":"a"}]' default 'keelson.pro/credentials=respect-pod'
+    run registry_resolve_creds ghcr.io/x/y:1.0 '[{"name":"a"}]' default 'keelson.pro/credentials=respect-pod-spec'
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
 
 @test "resolve_creds: central skips pod secrets" {
     rm -f "$KEELSON_REGISTRIES_FILE"
-    # If kubectl is called, fail loudly so we know respect-pod path leaked.
+    # If kubectl is called, fail loudly so we know the pod-spec path leaked.
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 echo "kubectl should not have been called" >&2
@@ -286,7 +286,7 @@ SH
     [ "$status" -eq 2 ]
 }
 
-@test "resolve_creds: default mode is respect-pod" {
+@test "resolve_creds: the default mode needs no annotation" {
     local payload b64
     payload=$(make_dockerconfig ghcr.io u p)
     b64=$(printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64)
@@ -313,7 +313,7 @@ esac
 printf ''
 SH
     run registry_resolve_creds ghcr.io/x/y:1.0 '[{"name":"podsec"}]' default \
-        'keelson.pro/credentials=respect-pod' my-sa
+        'keelson.pro/credentials=respect-pod-spec' my-sa
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
@@ -333,7 +333,7 @@ esac
 SH
     # Empty pod-spec list, so pod walk yields nothing and SA walk runs.
     run registry_resolve_creds ghcr.io/x/y:1.0 '[]' default \
-        'keelson.pro/credentials=respect-pod' my-sa
+        'keelson.pro/credentials=respect-pod-spec' my-sa
     [ "$status" -eq 0 ]
     [ "$output" = "sa-user:sa-pass" ]
 }
@@ -351,7 +351,7 @@ case "\$*" in
 esac
 SH
     run registry_resolve_creds ghcr.io/x/y:1.0 '[{"name":"podsec"}]' default \
-        'keelson.pro/credentials=respect-pod' my-sa
+        'keelson.pro/credentials=respect-pod-spec' my-sa
     [ "$status" -eq 0 ]
     [ "$output" = "pod-user:pod-pass" ]
 }
@@ -367,7 +367,7 @@ esac
 printf ''
 SH
     run registry_resolve_creds ghcr.io/x/y:1.0 '[]' default \
-        'keelson.pro/credentials=respect-pod' ''
+        'keelson.pro/credentials=respect-pod-spec' ''
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
@@ -687,4 +687,281 @@ registries:
 YAML
     run emit_json registry_init
     [[ "$output" == *registry-config-secret-name-collision* ]]
+}
+
+# --- auth-mode aliases ---
+#
+# The canonical names describe a mechanism; operators think in terms of their
+# cloud or their registry product, and the mechanisms outlive their names.
+
+@test "auth-mode alias: aws-ecr resolves as the AWS mode" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  123.dkr.ecr.us-east-1.amazonaws.com:
+    auth-mode: aws-ecr
+YAML
+    install_shim docker-credential-ecr-login <<'SH'
+#!/usr/bin/env bash
+printf '{"Username":"AWS","Secret":"tok123"}'
+SH
+    registry_init
+    run registry_resolve_creds 123.dkr.ecr.us-east-1.amazonaws.com/x/y:1.0 '[]' default 'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ "$output" = "AWS:tok123" ]
+}
+
+@test "auth-mode alias: aws-pi resolves as the AWS mode" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  123.dkr.ecr.us-east-1.amazonaws.com:
+    auth-mode: aws-pi
+YAML
+    install_shim docker-credential-ecr-login <<'SH'
+#!/usr/bin/env bash
+printf '{"Username":"AWS","Secret":"tok123"}'
+SH
+    registry_init
+    run registry_resolve_creds 123.dkr.ecr.us-east-1.amazonaws.com/x/y:1.0 '[]' default 'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ "$output" = "AWS:tok123" ]
+}
+
+@test "auth-mode alias: gcp-gar resolves as the GCP mode" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  europe-docker.pkg.dev:
+    auth-mode: gcp-gar
+YAML
+    install_shim curl <<'SH'
+#!/usr/bin/env bash
+printf '{"access_token":"gcp-tok-xyz","expires_in":3600}'
+SH
+    registry_init
+    run registry_resolve_creds europe-docker.pkg.dev/x/y:1.0 '[]' default 'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ "$output" = "oauth2accesstoken:gcp-tok-xyz" ]
+}
+
+@test "auth-mode alias: an unknown mode is still anonymous" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  ghcr.io:
+    auth-mode: not-a-mode
+YAML
+    registry_init
+    run registry_resolve_creds ghcr.io/x/y:1.0 '[]' default 'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "auth-mode: the bare cloud name is the canonical mode" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  123.dkr.ecr.us-east-1.amazonaws.com:
+    auth-mode: aws
+YAML
+    install_shim docker-credential-ecr-login <<'SH'
+#!/usr/bin/env bash
+printf '{"Username":"AWS","Secret":"tok123"}'
+SH
+    registry_init
+    run registry_resolve_creds 123.dkr.ecr.us-east-1.amazonaws.com/x/y:1.0 '[]' default 'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ "$output" = "AWS:tok123" ]
+}
+
+@test "auth-mode: normalise echoes the bare cloud name" {
+    run registry_normalise_auth_mode aws-irsa
+    [ "$output" = "aws" ]
+    run registry_normalise_auth_mode gcp-gar
+    [ "$output" = "gcp" ]
+    run registry_normalise_auth_mode azure-acr
+    [ "$output" = "azure" ]
+}
+
+# --- credential precedence: central first ---
+#
+# The operator's registries.yaml is consulted before the workload's own
+# Secrets, so a host Keelson is configured for costs no Secret read at all.
+# The workload remains the fallback for anything central cannot answer.
+
+# kubectl answers each Secret name with its own credentials for ghcr.io.
+kubectl_named_secrets() {
+    local pod central podb centralb
+    pod=$(make_dockerconfig ghcr.io pod pw)
+    central=$(make_dockerconfig ghcr.io central cw)
+    podb=$(printf '%s' "$pod" | base64 -w0 2>/dev/null || printf '%s' "$pod" | base64)
+    centralb=$(printf '%s' "$central" | base64 -w0 2>/dev/null || printf '%s' "$central" | base64)
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+case "\$*" in
+    *"get secret ghcr.io"*)   printf '%s' '$centralb' ;;
+    *"get secret pod-secret"*) printf '%s' '$podb' ;;
+    *)                         printf '' ;;
+esac
+SH
+}
+
+write_central_ghcr() {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  ghcr.io:
+    auth-mode: secret
+    namespace: keelson-system
+YAML
+    registry_init
+}
+
+@test "precedence: the default consults central before the pod spec" {
+    write_central_ghcr
+    kubectl_named_secrets
+    run registry_resolve_creds ghcr.io/x/y:1.0 '[{"name":"pod-secret"}]' default ''
+    [ "$status" -eq 0 ]
+    [ "$output" = "central:cw" ]
+}
+
+@test "precedence: the default falls back to the pod spec when central has nothing" {
+    rm -f "$KEELSON_REGISTRIES_FILE"
+    registry_init
+    kubectl_named_secrets
+    run registry_resolve_creds ghcr.io/x/y:1.0 '[{"name":"pod-secret"}]' default ''
+    [ "$status" -eq 0 ]
+    [ "$output" = "pod:pw" ]
+}
+
+@test "precedence: central-then-pod-spec spells the default out" {
+    write_central_ghcr
+    kubectl_named_secrets
+    run registry_resolve_creds ghcr.io/x/y:1.0 '[{"name":"pod-secret"}]' default \
+        'keelson.pro/credentials=central-then-pod-spec'
+    [ "$status" -eq 0 ]
+    [ "$output" = "central:cw" ]
+}
+
+@test "precedence: respect-pod-spec never consults central" {
+    write_central_ghcr
+    kubectl_named_secrets
+    run registry_resolve_creds ghcr.io/x/y:1.0 '[{"name":"pod-secret"}]' default \
+        'keelson.pro/credentials=respect-pod-spec'
+    [ "$status" -eq 0 ]
+    [ "$output" = "pod:pw" ]
+}
+
+@test "precedence: the old respect-pod spelling is rejected, not reinterpreted" {
+    run registry_resolve_creds ghcr.io/x/y:1.0 '[]' default 'keelson.pro/credentials=respect-pod'
+    [ "$status" -eq 2 ]
+}
+
+# --- central credential cache ---
+#
+# The poll child forks one grandchild per workload, so anything resolved
+# inside a grandchild dies with it. Priming before the fan-out is the only
+# point at which the work is shared.
+
+@test "creds cache: priming resolves the configured registries once" {
+    write_central_ghcr
+    kubectl_named_secrets
+    registry_prime_central_creds
+    [ "${_REGISTRY_CREDS_CACHE[ghcr.io]}" = "central:cw" ]
+}
+
+@test "creds cache: a primed host needs no further kubectl call" {
+    write_central_ghcr
+    kubectl_named_secrets
+    registry_prime_central_creds
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "kubectl should not have been called for a primed host" >&2
+exit 99
+SH
+    run registry_creds_from_source central ghcr.io '[]' default
+    [ "$status" -eq 0 ]
+    [ "$output" = "central:cw" ]
+}
+
+@test "creds cache: an unprimed host still resolves the slow way" {
+    write_central_ghcr
+    kubectl_named_secrets
+    run registry_creds_from_source central ghcr.io '[]' default
+    [ "$status" -eq 0 ]
+    [ "$output" = "central:cw" ]
+}
+
+@test "creds cache: the pod spec is never served from the central cache" {
+    write_central_ghcr
+    kubectl_named_secrets
+    registry_prime_central_creds
+    run registry_creds_from_source pod ghcr.io '[{"name":"pod-secret"}]' default
+    [ "$status" -eq 0 ]
+    [ "$output" = "pod:pw" ]
+}
+
+# --- auths key matching: registries spell themselves inconsistently ---
+#
+# docker login writes "https://index.docker.io/v1/" for Docker Hub, and some
+# tooling writes a scheme or a trailing path for private registries. The host
+# Keelson has is always bare, so an exact match misses all of those.
+
+@test "named_secret: a scheme and path key matches the bare host" {
+    local payload b64
+    payload=$(make_dockerconfig 'https://reg.example:5000/v1/' fred sekret)
+    b64=$(printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64)
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+printf '%s' '$b64'
+SH
+    run registry_creds_from_named_secret pull-secret default reg.example:5000
+    [ "$status" -eq 0 ]
+    [ "$output" = "fred:sekret" ]
+}
+
+@test "named_secret: docker.io matches the index.docker.io key docker login writes" {
+    local payload b64
+    payload=$(make_dockerconfig 'https://index.docker.io/v1/' hub hubpw)
+    b64=$(printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64)
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+printf '%s' '$b64'
+SH
+    run registry_creds_from_named_secret pull-secret default docker.io
+    [ "$status" -eq 0 ]
+    [ "$output" = "hub:hubpw" ]
+}
+
+@test "named_secret: an exact key still matches, and wins" {
+    local payload b64
+    payload=$(make_dockerconfig ghcr.io exact pw)
+    b64=$(printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64)
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+printf '%s' '$b64'
+SH
+    run registry_creds_from_named_secret pull-secret default ghcr.io
+    [ "$status" -eq 0 ]
+    [ "$output" = "exact:pw" ]
+}
+
+@test "named_secret: a different host still misses" {
+    local payload b64
+    payload=$(make_dockerconfig 'https://other.example/v1/' a b)
+    b64=$(printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64)
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+printf '%s' '$b64'
+SH
+    run registry_creds_from_named_secret pull-secret default reg.example
+    [ "$status" -ne 0 ]
+}
+
+@test "pod walk: a workload secret with a scheme key resolves" {
+    local payload b64
+    payload=$(make_dockerconfig 'https://reg.example/v1/' pod podpw)
+    b64=$(printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64)
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+printf '%s' '$b64'
+SH
+    run registry_creds_from_pull_secrets '[{"name":"a"}]' default reg.example
+    [ "$status" -eq 0 ]
+    [ "$output" = "pod:podpw" ]
 }

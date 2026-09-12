@@ -387,6 +387,8 @@ scan_extract_kind() {
             | \"container=containers \" + .name + \"=\" + .image),
         (\$w${base}.initContainers // [] | .[]
             | \"container=initContainers \" + .name + \"=\" + .image),
+        (\$w${base}.volumes // [] | .[] | select(.image.reference != null)
+            | \"container=imageVolumes \" + .name + \"=\" + .image.reference),
         \"annotations=\",
         (\$w.metadata.annotations // {} | to_entries | .[]
             | select(.key | test(\"^(keelson\\.pro|keel\\.sh)/\"))
@@ -724,7 +726,26 @@ scan_container_monitored() {
         [ "$want" = "true" ] || return 1
     fi
 
-    annotation_get "$ann" monitorContainers
+    # Image volumes are opt-in on the same terms, and for the same reason: a
+    # workload that has always had one has never had Keelson touch it, and
+    # switching that on by upgrading is not a decision Keelson gets to make.
+    if [ "$clist" = "imageVolumes" ]; then
+        annotation_get "$ann" imageVolumes
+        want=$ANNOTATION_VALUE
+        [ "$want" = "true" ] || return 1
+    fi
+
+    # Volumes have their own selector. A regular expression written to pick
+    # containers has no business deciding which image volumes are watched,
+    # and a workload with both would otherwise need one pattern covering two
+    # unrelated sets of names.
+    local key=monitorContainers noun=container
+    if [ "$clist" = "imageVolumes" ]; then
+        key=monitorVolumes
+        noun=volume
+    fi
+
+    annotation_get "$ann" "$key"
     re=$ANNOTATION_VALUE
     [ -n "$re" ] || return 0
     case "$re" in REJECT:*) return 1 ;; esac
@@ -737,7 +758,7 @@ scan_container_monitored() {
     if [ "$rc" -gt 1 ]; then
         log_error annotation-monitor-containers-invalid pattern="$re" \
             container="$cname" \
-            msg="monitorContainers pattern '$re' is not a usable regular expression; no container is monitored until it is fixed."
+            msg="$key pattern '$re' is not a usable regular expression; no $noun is monitored until it is fixed."
     fi
     return 1
 }
@@ -781,6 +802,12 @@ scan_container() {
     local kind=$1 ns=$2 name=$3 clist=$4 cname=$5 cimage=$6 ann=$7 ips_json=$8 \
           mf_json=${9:-} sa_name=${10:-}
 
+    # Which sub-namespace this target's annotations live in. A pod may hold a
+    # container and an image volume of the same name, so the name alone
+    # cannot say which one an annotation is addressing.
+    local atarget=containers
+    [ "$clist" = "imageVolumes" ] && atarget=volumes
+
     if ! scan_container_monitored "$ann" "$clist" "$cname"; then
         log_debug skip-not-monitored \
             kind="$kind" ns="$ns" name="$name" container="$cname" list="$clist" \
@@ -790,7 +817,7 @@ scan_container() {
     fi
 
     local result
-    eligibility_check "$ann" "$cimage" "$cname" || true
+    eligibility_check "$ann" "$cimage" "$cname" "$atarget" || true
     result=$ELIGIBILITY_RESULT
     case "$result" in
         SKIP\ *)
@@ -811,8 +838,7 @@ scan_container() {
     policy=${fields%% *}
     position=${fields##* }
 
-    local creds
-    if ! creds=$(registry_resolve_creds "$cimage" "$ips_json" "$ns" "$ann" "$sa_name" "$cname"); then
+    if ! registry_creds_source_order "$ann" "$cname"; then
         log_error registry-creds-failed \
             kind="$kind" ns="$ns" name="$name" container="$cname" \
             detail="$cimage" \
@@ -821,8 +847,38 @@ scan_container() {
         return 0
     fi
 
-    local tags_raw
-    if ! tags_raw=$(registry_list_tags "$cimage" "$creds"); then
+    # Each source in turn, and the registry decides. A credential that
+    # resolves is not a credential that works: a pull Secret can be stale, or
+    # scoped to a different repo on the same host, and stopping at the first
+    # one that merely exists let it mask a credential that would have worked.
+    # An attempt that gets nothing from a source costs no registry call.
+    local tags_raw creds source host tried=0 listed=0
+    image_host "$cimage"
+    host=$IMAGE_HOST
+    for source in "${REGISTRY_CREDS_SOURCES[@]}"; do
+        creds=$(registry_creds_from_source "$source" "$host" "$ips_json" "$ns" "$sa_name") || continue
+        [ -n "$creds" ] || continue
+        tried=1
+        # An empty list counts as a failure, not as "no newer tags". We are
+        # running an image out of this repo, so it has at least the tag in
+        # front of us: zero tags means the listing was wrong, and a credential
+        # scoped to another repo is answered that way by some registries
+        # rather than with a 401. A list missing only the running tag is fine,
+        # since a deleted tag leaves the others behind.
+        if tags_raw=$(registry_list_tags "$cimage" "$creds") && [ -n "$tags_raw" ]; then
+            listed=1
+            break
+        fi
+        log_debug registry-creds-source-rejected \
+            kind="$kind" ns="$ns" name="$name" container="$cname" \
+            source="$source" detail="$cimage" \
+            msg="Credentials from '$source' listed no tags for '$cimage'; trying the next source."
+    done
+    # No source had anything, so the host is either public or unconfigured.
+    if [ "$listed" -eq 0 ] && [ "$tried" -eq 0 ]; then
+        tags_raw=$(registry_list_tags "$cimage" "") && [ -n "$tags_raw" ] && listed=1
+    fi
+    if [ "$listed" -eq 0 ]; then
         local reason=${REGISTRY_LAST_ERROR:-}
         log_flatten "$reason"
         log_debug registry-list-tags-detail \
@@ -832,6 +888,7 @@ scan_container() {
         reason=$LOG_HINT
         local reason_clause=""
         [ -n "$reason" ] && reason_clause=": $reason"
+        [ -z "$reason" ] && reason_clause=": the registry returned no tags at all, which usually means the credentials are scoped to a different repository"
         log_error registry-list-tags-failed \
             kind="$kind" ns="$ns" name="$name" container="$cname" \
             detail="$cimage" reason="$reason" \
@@ -841,9 +898,9 @@ scan_container() {
     fi
 
     local match_tag match_mode current_tag winner candidate
-    annotation_get "$ann" matchTag "$cname"
+    annotation_get "$ann" matchTag "$cname" "$atarget"
     match_tag=$ANNOTATION_VALUE
-    annotation_get "$ann" matchMode "$cname"
+    annotation_get "$ann" matchMode "$cname" "$atarget"
     match_mode=$ANNOTATION_VALUE
     match_mode=${match_mode:-glob}
     image_tag "$cimage"
@@ -1154,6 +1211,9 @@ scan_poll_due() {
           _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0 \
           _scan_min_interval=0
     registry_init
+    # Before the fan-out, so every child inherits the resolved credentials
+    # rather than each one paying for its own Secret read or token fetch.
+    registry_prime_central_creds
 
     clock_read
     local start_us=$CLOCK_NOW_US

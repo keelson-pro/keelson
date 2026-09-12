@@ -23,7 +23,7 @@ metadata:
 rules:
   # Index 0
   # For kubernetes.io/dockerconfigjson Secrets: workload/SA imagePullSecrets and registry-wide ones
-  # Remove if using aws-irsa, azure-wi, gcp-wi, or their synonyms exclusively
+  # Remove if using aws, azure, gcp, or their aliases exclusively
   # Narrow by specifying resourceNames if you know the list up front
   - apiGroups: [""]
     resources: ["secrets"]

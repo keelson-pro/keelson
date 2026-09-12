@@ -1344,7 +1344,7 @@ SH
         "annotations": {
           "keelson.pro/policy": "minor",
           "keelson.pro/initContainers": "true",
-          "keelson.pro/policy.migrate": "never"
+          "keelson.pro/policy.containers.migrate": "never"
         }
       },
       "spec": {
@@ -1438,7 +1438,7 @@ SH
 }
 
 @test "managed: a per-container policy counts" {
-    run scan_is_keelson_managed 'keelson.pro/policy.web=major'
+    run scan_is_keelson_managed 'keelson.pro/policy.containers.web=major'
     [ "$status" -eq 0 ]
 }
 
@@ -2362,4 +2362,338 @@ JSON
     grep -q rollout-workload-ref-no-template "$TMP_DIR/pass1"
     grep -q rollout-workload-ref-no-template "$TMP_DIR/pass2"
     ! grep -q rollout-workload-ref-no-template "$TMP_DIR/pass3"
+}
+
+# --- credential fallback: a credential that resolves but does not work ---
+#
+# Until now resolution picked one credential and a failure there ended the
+# attempt. A pod Secret that is stale or scoped to the wrong repo therefore
+# masked a perfectly good central credential.
+
+# A Deployment whose pod secret covers the registry, with a central entry
+# covering it too, so both sources have something to offer.
+both_sources_json() {
+    cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {"keelson.pro/policy": "minor"}
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "imagePullSecrets": [{"name": "pod-secret"}],
+            "containers": [{"name": "main", "image": "reg.example/x/y:1.2.3"}]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+}
+
+# kubectl answers the list call with the workload, and each Secret read with
+# a docker config for reg.example carrying that Secret's own credentials, so
+# the two sources are distinguishable at the registry.
+b64_dockerconfig() {
+    local creds=$1 payload
+    payload=$(printf '{"auths":{"reg.example":{"auth":"%s"}}}' \
+        "$(printf '%s' "$creds" | base64 -w0 2>/dev/null || printf '%s' "$creds" | base64)")
+    printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64
+}
+
+kubectl_two_secrets() {
+    local pod central
+    pod=$(b64_dockerconfig 'pod:stale')
+    central=$(b64_dockerconfig 'central:good')
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+case "\$*" in
+    *"get secret pod-secret"*)     printf '%s' '$pod' ;;
+    *"get secret central-secret"*) printf '%s' '$central' ;;
+    *"get secret"*)                printf '' ;;
+    *) cat <<'FIXTURE'
+$(both_sources_json)
+FIXTURE
+    ;;
+esac
+SH
+}
+
+# skopeo rejects the pod credential and accepts the central one.
+skopeo_rejects_stale() {
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    case "$arg" in
+        --creds=pod:stale)
+            echo "unauthorized: authentication required" >&2
+            exit 1
+            ;;
+    esac
+done
+printf '{"Tags":["1.2.0","1.2.4"]}'
+SH
+}
+
+@test "creds fallback: a failing pod credential falls through to central" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  reg.example:
+    auth-mode: secret
+    namespace: keelson-system
+    secret-name-override: central-secret
+YAML
+    kubectl_two_secrets
+    skopeo_rejects_stale
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"would-update"* ]]
+    [[ "$output" != *'"error":"1"'* ]]
+}
+
+# --- an empty tag list is a failed listing, not "no newer tags" ---
+#
+# A credential can be accepted and still be scoped to the wrong repo, and some
+# registries answer that with an empty list rather than a 401. We are running
+# an image out of this repo, so zero tags is never a healthy answer. A list
+# missing only the running tag is fine: a deleted tag leaves the others.
+
+# Central is tried first, so it is central that has to answer empty for the
+# fallback to be exercised at all. The pod credential then returns real tags.
+skopeo_empty_for_central() {
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    case "$arg" in
+        --creds=central:good) printf '{"Tags":[]}'; exit 0 ;;
+    esac
+done
+printf '{"Tags":["1.2.0","1.2.4"]}'
+SH
+}
+
+skopeo_empty_always() {
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":[]}'
+SH
+}
+
+@test "empty tags: an empty list falls through to the next source" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  reg.example:
+    auth-mode: secret
+    namespace: keelson-system
+    secret-name-override: central-secret
+YAML
+    kubectl_two_secrets
+    skopeo_empty_for_central
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    # Names the source, so this cannot pass by never having consulted central.
+    [[ "$output" == *'"event":"registry-creds-source-rejected"'* ]]
+    [[ "$output" == *'"source":"central"'* ]]
+    [[ "$output" == *"would-update"* ]]
+    [[ "$output" != *'"error":"1"'* ]]
+}
+
+@test "empty tags: every source empty is an error, not a no-change" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  reg.example:
+    auth-mode: secret
+    namespace: keelson-system
+    secret-name-override: central-secret
+YAML
+    kubectl_two_secrets
+    skopeo_empty_always
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"error":"1"'* ]]
+    [[ "$output" != *'"no-change":"1"'* ]]
+}
+
+@test "empty tags: a list without the running tag is still valid" {
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.4","1.2.5"]}'
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'"error":"1"'* ]]
+    [[ "$output" == *"would-update"* ]]
+}
+
+# --- image volumes (spec.volumes[].image.reference) ---
+
+image_volume_json() {
+    local ref=$1 policy=${2:-minor} gate=${3:-true}
+    cat <<JSON
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {"keelson.pro/policy": "$policy", "keelson.pro/imageVolumes": "$gate"}
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [{"name": "main", "image": "ghcr.io/x/y:9.9.9"}],
+            "volumes": [
+              {"name": "conf", "configMap": {"name": "c"}},
+              {"name": "art", "image": {"reference": "$ref"}}
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+}
+
+@test "image volume: a newer reference is a would-update" {
+    kubectl_returns "$(image_volume_json ghcr.io/x/y:1.2.3)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.2.4"]}'
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"container":"art"'* ]]
+    [[ "$output" == *"dry-run-would-update"* ]]
+}
+
+@test "image volume: a non-image volume is ignored" {
+    kubectl_returns "$(image_volume_json ghcr.io/x/y:1.2.3)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.2.4"]}'
+SH
+    run emit scan_run 0
+    [[ "$output" != *'"container":"conf"'* ]]
+}
+
+@test "image volume: policy.volumes wins over the workload-wide policy" {
+    kubectl_returns "$(cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "never",
+          "keelson.pro/imageVolumes": "true",
+          "keelson.pro/policy.volumes.art": "minor"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "volumes": [{"name": "art", "image": {"reference": "ghcr.io/x/y:1.2.3"}}]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.2.4"]}'
+SH
+    run emit scan_run 0
+    [[ "$output" == *"dry-run-would-update"* ]]
+}
+
+@test "image volume: monitorContainers does not filter volumes" {
+    kubectl_returns "$(cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "minor",
+          "keelson.pro/imageVolumes": "true",
+          "keelson.pro/monitorContainers": "^nothing$"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "volumes": [{"name": "art", "image": {"reference": "ghcr.io/x/y:1.2.3"}}]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.2.4"]}'
+SH
+    run emit scan_run 0
+    [[ "$output" == *"dry-run-would-update"* ]]
+}
+
+@test "image volume: monitorVolumes selects which volumes are watched" {
+    kubectl_returns "$(cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "minor",
+          "keelson.pro/imageVolumes": "true",
+          "keelson.pro/monitorVolumes": "^nothing$"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "volumes": [{"name": "art", "image": {"reference": "ghcr.io/x/y:1.2.3"}}]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.2.4"]}'
+SH
+    run emit scan_run 0
+    [[ "$output" != *"dry-run-would-update"* ]]
+    [[ "$output" == *"skip-not-monitored"* ]]
+}
+
+@test "image volume: ignored until imageVolumes opts in" {
+    kubectl_returns "$(image_volume_json ghcr.io/x/y:1.2.3 minor false)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.2.4"]}'
+SH
+    run emit scan_run 0
+    [[ "$output" == *'"event":"skip-not-monitored"'* ]]
+    [[ "$output" == *'"list":"imageVolumes"'* ]]
+    [[ "$output" != *"dry-run-would-update"* ]]
 }

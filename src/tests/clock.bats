@@ -241,3 +241,22 @@ setup() {
     run clock_parse_duration "5w"
     [ "$status" -eq 1 ]
 }
+
+# Bash arithmetic is 64-bit signed and wraps silently, so a duration long
+# enough to overflow the millisecond accumulator would otherwise come back
+# negative and be handled as a real interval.
+
+@test "parse_duration: a thousand years still parses" {
+    clock_parse_duration 365000d
+    [ "$CLOCK_DURATION" = "31536000000" ]
+}
+
+@test "parse_duration: a duration that overflows is rejected" {
+    run clock_parse_duration 106751991168d
+    [ "$status" -ne 0 ]
+}
+
+@test "parse_duration: an absurd duration is rejected, not wrapped" {
+    run clock_parse_duration 9999999999999999999d
+    [ "$status" -ne 0 ]
+}

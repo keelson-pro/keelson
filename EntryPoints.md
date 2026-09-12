@@ -206,8 +206,9 @@ pod shell to debug a misconfigured Deployment.
   `EPOCHREALTIME`); `kubectl`, `skopeo`, `yq` (v4), `awk`, `sed`,
   `head`, `tail`, `date` are all on `PATH`.
 - If `registries.yaml` is present, every declared `auth-mode` has its
-  helper binary available (`docker-credential-ecr-login` for `aws-irsa`,
-  `curl` for `azure-wi`/`gcp-wi`; `secret` needs no helper).
+  helper binary available (`docker-credential-ecr-login` for `aws`,
+  `curl` for `azure`/`gcp`; `secret` needs no helper). Aliases are checked as
+  the mode they resolve to, so `aws-irsa` needs the same helper as `aws`.
 - The work directory is writable.
 
 Errors accumulate across every check so a misconfigured Pod logs the full

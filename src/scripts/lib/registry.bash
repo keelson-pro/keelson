@@ -10,15 +10,25 @@
 #   skopeo, yq, kubectl, base64, curl, docker-credential-ecr-login
 #
 # Credential resolution per workload's keelson.pro/credentials annotation
-# (default "respect-pod"):
-#   respect-pod   - walk the workload's imagePullSecrets first; fall through
-#                   to the central path if none cover the registry.
-#                   When KEELSON_RESPECT_SA_PULL_SECRETS=true, also walks the
-#                   workload's ServiceAccount imagePullSecrets between the
-#                   pod-spec walk and the central fall-through (matches what
-#                   the kubelet sees post-admission).
-#   central       - skip pod creds; go straight to central.
+# (default "central-then-pod-spec"):
+#   central-then-pod-spec - the central config first, falling back to the
+#                   workload's own imagePullSecrets. Central first because a
+#                   host the operator has configured then costs no Secret
+#                   read per workload at all, and because the operator's
+#                   credential is the one they can reason about.
+#   central       - central only, no fallback.
 #   ignore-pod    - synonym for "central".
+#   respect-pod-spec - the workload's own credentials only; central is never
+#                   consulted. For a registry where the team's token is the
+#                   only one that works.
+#
+# Wherever the pod spec is consulted, the workload's ServiceAccount
+# imagePullSecrets are walked after it when KEELSON_RESPECT_SA_PULL_SECRETS
+# is true, matching what the kubelet sees post-admission.
+#
+# A credential that resolves is not a credential that works, so the scan
+# tries each source against the registry in turn rather than committing to
+# the first one that answers.
 #
 # Central path consults the keelson-registries config at
 # /configmap/registries.yaml (mounted from the keelson ConfigMap). The file is
@@ -27,9 +37,14 @@
 #               own namespace from the SA mount), decode .dockerconfigjson.
 #               The Secret name is the map key by convention; the optional
 #               "namespace" override points to a different ns if needed.
-#   aws-irsa  - docker-credential-ecr-login (relies on AWS_*_TOKEN_FILE / role)
-#   azure-wi  - federated token -> AAD token -> ACR refresh token
-#   gcp-wi    - GCE metadata server access_token
+#   aws       - docker-credential-ecr-login, so whatever the SDK credential
+#               chain provides: EKS Pod Identity, IRSA, or an instance role
+#   azure     - federated token -> Entra token -> ACR refresh token
+#   gcp       - GCE metadata server access_token
+#
+# The cloud modes are named for the cloud rather than the mechanism, because
+# the mechanisms get superseded and the credential source does not. Every
+# mechanism spelling is still accepted as an alias.
 
 # -g so the cache survives across function scopes when this lib is sourced
 # from inside a function (e.g. bats setup, future restart-and-reload paths).
@@ -40,6 +55,13 @@ declare -g _REGISTRY_OWN_NAMESPACE=""
 # failure so callers can surface a hint in their error log instead of an
 # opaque "could not list tags". Cleared on success.
 declare -g REGISTRY_LAST_ERROR=""
+# Credential sources to try, in order, set by registry_creds_source_order.
+declare -ga REGISTRY_CREDS_SOURCES=()
+# Central credentials by host, filled by registry_prime_central_creds before
+# a poll fans out. Read-only afterwards: every consumer runs inside a command
+# substitution or a forked child, so a write made there is thrown away and
+# would only look like caching without being it.
+declare -gA _REGISTRY_CREDS_CACHE=()
 
 # Default mount location for the keelson ConfigMap, matching validate.bash so
 # an operator's override survives whichever lib is sourced last. A bare
@@ -174,40 +196,113 @@ registry_config_for_host() {
 # walk and the central fall-through.
 # The container arg is optional; when non-empty, per-container annotation
 # overrides (e.g. keelson.pro/credentials.<container>) take precedence.
-registry_resolve_creds() {
-    local image=$1 ips_json=$2 ns=$3 ann=$4 sa=${5:-} container=${6:-}
-    local host mode creds
-    image_host "$image"
-    host=$IMAGE_HOST
+# registry_creds_source_order <annotation-lines> [<container>]
+# Sets REGISTRY_CREDS_SOURCES to the credential sources to try, in order.
+# Returns 2 for a credentials annotation naming no known mode.
+#
+# Sources are named here and resolved later, one at a time, because resolving
+# one costs a kubectl call or a token fetch and the point is to stop at the
+# first that works. Naming them also lets the caller try the next when a
+# credential resolves but the registry rejects it, which a function returning
+# a single credential cannot express.
+registry_creds_source_order() {
+    local ann=$1 container=${2:-} mode
     annotation_get "$ann" credentials "$container"
-    mode=$ANNOTATION_VALUE
-    mode=${mode:-respect-pod}
-
+    mode=${ANNOTATION_VALUE:-central-then-pod-spec}
+    REGISTRY_CREDS_SOURCES=()
     case "$mode" in
-        respect-pod)
-            if creds=$(registry_creds_from_pull_secrets "$ips_json" "$ns" "$host") \
-                    && [ -n "$creds" ]; then
-                printf '%s' "$creds"
-                return 0
-            fi
-            if [ "${KEELSON_RESPECT_SA_PULL_SECRETS:?KEELSON_RESPECT_SA_PULL_SECRETS required}" = "true" ] \
-                    && [ -n "$sa" ]; then
-                if creds=$(registry_creds_from_sa "$sa" "$ns" "$host") \
-                        && [ -n "$creds" ]; then
-                    printf '%s' "$creds"
-                    return 0
-                fi
-            fi
+        central-then-pod-spec)
+            REGISTRY_CREDS_SOURCES=(central pod)
             ;;
         central|ignore-pod)
-            : # fall through
+            REGISTRY_CREDS_SOURCES=(central)
+            ;;
+        respect-pod-spec)
+            REGISTRY_CREDS_SOURCES=(pod)
             ;;
         *)
             return 2
             ;;
     esac
+    # The ServiceAccount walk is part of "what the workload has", so it
+    # follows the pod spec wherever the pod spec appears and is absent where
+    # it does not. Gated on the same switch as ever, since it costs a get.
+    case " ${REGISTRY_CREDS_SOURCES[*]} " in
+        *" pod "*)
+            if [ "${KEELSON_RESPECT_SA_PULL_SECRETS:?KEELSON_RESPECT_SA_PULL_SECRETS required}" = "true" ]; then
+                REGISTRY_CREDS_SOURCES+=(sa)
+            fi
+            ;;
+    esac
+}
 
-    registry_creds_central "$host"
+# registry_creds_from_source <source> <host> <ips-json> <namespace> [<sa>]
+# Echoes credentials from one named source. Empty output or non-zero means
+# this source has nothing for this host, which is not an error: the caller
+# moves to the next one.
+registry_creds_from_source() {
+    local source=$1 host=$2 ips_json=$3 ns=$4 sa=${5:-}
+    case "$source" in
+        pod)     registry_creds_from_pull_secrets "$ips_json" "$ns" "$host" ;;
+        sa)      [ -n "$sa" ] || return 1
+                 registry_creds_from_sa "$sa" "$ns" "$host" ;;
+        central)
+            if [ -n "${_REGISTRY_CREDS_CACHE[$host]:-}" ]; then
+                printf '%s' "${_REGISTRY_CREDS_CACHE[$host]}"
+                return 0
+            fi
+            registry_creds_central "$host"
+            ;;
+        *)       return 1 ;;
+    esac
+}
+
+# registry_prime_central_creds
+# Resolves the central credential for every configured registry, once, so the
+# per-workload path is an array read rather than a Secret read or a token
+# fetch. Every configured host, not just the ones due: the list is small, and
+# working out which hosts this pass needs would cost a read of every due
+# workload to save a handful of lookups.
+#
+# Called before a poll fans out, because the children are forked subshells
+# that inherit this by copy. Populated inside one of them it would die with
+# the child, which is why nothing below the fan-out writes to the cache.
+#
+# Deliberately silent. A host that cannot be resolved is left out and takes
+# the slow path, where the workload that actually needed it reports the
+# failure with the workload named. A line here would be about a registry
+# nobody may be polling.
+registry_prime_central_creds() {
+    local host creds
+    for host in "${!_REGISTRY_CONFIG_CACHE[@]}"; do
+        if creds=$(registry_creds_central "$host" 2>/dev/null) && [ -n "$creds" ]; then
+            _REGISTRY_CREDS_CACHE["$host"]=$creds
+        fi
+    done
+    return 0
+}
+
+# registry_resolve_creds <image-ref> <imagePullSecrets-json> <namespace> <annotation-lines> [<service-account-name>] [<container-name>]
+# Echoes the first credential any source yields, or empty for anonymous.
+#
+# The single-answer form, for callers with no way to retry. The scan walks
+# the sources itself so that a credential the registry rejects is followed by
+# the next source rather than ending the attempt.
+registry_resolve_creds() {
+    local image=$1 ips_json=$2 ns=$3 ann=$4 sa=${5:-} container=${6:-}
+    local host source creds
+    image_host "$image"
+    host=$IMAGE_HOST
+    registry_creds_source_order "$ann" "$container" || return 2
+    for source in "${REGISTRY_CREDS_SOURCES[@]}"; do
+        if creds=$(registry_creds_from_source "$source" "$host" "$ips_json" "$ns" "$sa") \
+                && [ -n "$creds" ]; then
+            printf '%s' "$creds"
+            return 0
+        fi
+    done
+    printf ''
+    return 0
 }
 
 # registry_creds_from_sa <sa-name> <namespace> <host>
@@ -226,6 +321,27 @@ registry_creds_from_sa() {
     registry_creds_from_pull_secrets "$ips" "$ns" "$host"
 }
 
+# registry_normalise_auth_mode <value>
+# Echoes the canonical auth-mode for a configured value, or returns 1 for a
+# value that names no mode at all. One definition, read by the dispatch below
+# and by boot validation, so a mode accepted at boot is a mode that resolves.
+#
+# The rule is the cloud name, optionally suffixed with whichever mechanism or
+# registry product the operator thinks of it as. Aliases exist because the
+# canonical names describe a mechanism while operators think in terms of their
+# cloud, and because the mechanisms outlive their names: EKS Pod Identity
+# supersedes IRSA and Artifact Registry supersedes GCR, but
+# docker-credential-ecr-login and the metadata server serve old and new alike.
+registry_normalise_auth_mode() {
+    case "$1" in
+        secret)                            printf 'secret' ;;
+        aws|aws-irsa|aws-pi|aws-ecr)       printf 'aws' ;;
+        gcp|gcp-wi|gcp-gar|gcp-gcr)        printf 'gcp' ;;
+        azure|azure-wi|azure-acr)          printf 'azure' ;;
+        *)                                 return 1 ;;
+    esac
+}
+
 registry_creds_central() {
     local host=$1 cfg auth_mode
     cfg=$(registry_config_for_host "$host")
@@ -234,11 +350,12 @@ registry_creds_central() {
         return 0
     fi
     auth_mode=$(printf '%s' "$cfg" | yq -p=json -o=y '."auth-mode"')
+    auth_mode=$(registry_normalise_auth_mode "$auth_mode") || auth_mode=''
     case "$auth_mode" in
         secret)   registry_creds_secret "$cfg" "$host" ;;
-        aws-irsa) registry_creds_aws_irsa "$host" ;;
-        azure-wi) registry_creds_azure_wi "$host" ;;
-        gcp-wi)   registry_creds_gcp_wi ;;
+        aws)      registry_creds_aws "$host" ;;
+        azure)    registry_creds_azure "$host" ;;
+        gcp)      registry_creds_gcp ;;
         *)        printf '' ;;
     esac
 }
@@ -306,22 +423,62 @@ registry_creds_from_pull_secrets() {
     return 1
 }
 
+# registry_auths_host <value>
+# The bare host from an auths key or a lookup key: scheme and any path
+# removed, so "https://reg.example:5000/v1/" and "reg.example:5000" are the
+# same registry, which is what they are.
+registry_auths_host() {
+    local v=${1#http://}
+    v=${v#https://}
+    printf '%s' "${v%%/*}"
+}
+
+# registry_creds_from_named_secret <secret> <namespace> <key>
+# Echoes "user:pass" from a dockerconfigjson Secret, or non-zero if it holds
+# nothing for this registry.
+#
+# Exact match first, so a secret-key-override naming a key precisely still
+# means precisely that, and nothing that resolves today can start resolving
+# differently. Only on a miss are the keys compared with scheme and path
+# stripped from both sides, because registries do not agree on how to spell
+# themselves: docker login writes "https://index.docker.io/v1/", and other
+# tooling writes a bare host, a scheme, or a trailing path for the same
+# place. Docker Hub needs more than stripping, since the host itself differs
+# rather than being decorated.
+#
+# Ordering is the whole design: the loose pass can only turn a miss into a
+# hit, never change a hit. Where two keys reduce to one host, the first in
+# document order wins.
 registry_creds_from_named_secret() {
-    local secret=$1 ns=$2 host=$3
-    local b64 dockerconfig auth
+    local secret=$1 ns=$2 key=$3
+    local b64 dockerconfig auth want
     b64=$(kubectl get secret "$secret" -n "$ns" \
             -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null) || return 1
     [ -z "$b64" ] && return 1
     dockerconfig=$(printf '%s' "$b64" | base64 -d 2>/dev/null) || return 1
     auth=$(printf '%s' "$dockerconfig" \
-            | yq -p=json -o=y '.auths."'"$host"'".auth // ""')
+            | yq -p=json -o=y '.auths."'"$key"'".auth // ""')
+    if [ -z "$auth" ] || [ "$auth" = "null" ]; then
+        want=$(registry_auths_host "$key")
+        case "$want" in
+            docker.io|index.docker.io) want='(docker\.io|index\.docker\.io)' ;;
+            *)                         want=$(printf '%s' "$want" | sed 's/[.[\*^$()+?{|]/\\&/g') ;;
+        esac
+        auth=$(printf '%s' "$dockerconfig" | yq -p=json -o=y "
+            .auths | to_entries
+            | map(select(.key
+                | sub(\"^https?://\"; \"\")
+                | sub(\"/.*$\"; \"\")
+                | test(\"^${want}\$\")))
+            | .[0].value.auth // \"\"")
+    fi
     if [ -z "$auth" ] || [ "$auth" = "null" ]; then
         return 1
     fi
     printf '%s' "$auth" | base64 -d
 }
 
-registry_creds_aws_irsa() {
+registry_creds_aws() {
     local host=$1 raw user secret
     raw=$(printf '%s' "$host" | docker-credential-ecr-login get 2>/dev/null) || return 1
     [ -z "$raw" ] && return 1
@@ -333,7 +490,7 @@ registry_creds_aws_irsa() {
     printf '%s:%s' "$user" "$secret"
 }
 
-registry_creds_gcp_wi() {
+registry_creds_gcp() {
     local token
     token=$(curl -fsSL -H 'Metadata-Flavor: Google' \
         'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
@@ -344,11 +501,11 @@ registry_creds_gcp_wi() {
     printf 'oauth2accesstoken:%s' "$token"
 }
 
-registry_creds_azure_wi() {
+registry_creds_azure() {
     local host=$1
-    local fed_file=${AZURE_FEDERATED_TOKEN_FILE:?AZURE_FEDERATED_TOKEN_FILE required for azure-wi}
-    local tenant=${AZURE_TENANT_ID:?AZURE_TENANT_ID required for azure-wi}
-    local client=${AZURE_CLIENT_ID:?AZURE_CLIENT_ID required for azure-wi}
+    local fed_file=${AZURE_FEDERATED_TOKEN_FILE:?AZURE_FEDERATED_TOKEN_FILE required for auth-mode azure}
+    local tenant=${AZURE_TENANT_ID:?AZURE_TENANT_ID required for auth-mode azure}
+    local client=${AZURE_CLIENT_ID:?AZURE_CLIENT_ID required for auth-mode azure}
     local fed_token aad_token refresh
     fed_token=$(cat "$fed_file") || return 1
     aad_token=$(curl -fsSL -X POST \

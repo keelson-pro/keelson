@@ -85,6 +85,8 @@ set_required_env() {
     export KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT=64
     export KEELSON_RECONCILE_OVERRUN_WARNING_BACKOFF_LIMIT=64
     export KEELSON_ROLLOUT_WORKLOAD_REF_WARNING_BACKOFF_LIMIT=64
+    export AWS_ECR_DISABLE_CACHE=
+    export AWS_ECR_CACHE_DIR=
     export KEELSON_TICK_INTERVAL=1
     export KEELSON_HEARTBEAT_MAX_AGE=5
     export KEELSON_WATCHER_RESPAWN_BACKOFF_MAX=300
@@ -714,4 +716,81 @@ SH
     run emit validate_registries_keys
     [ "$status" -ne 0 ]
     [[ "$output" == *"Two distinct registries would share the same secret name"* ]]
+}
+
+# --- auth-mode aliases ---
+#
+# a_run rather than v_run: these need the real yq to read the file at all,
+# while still preferring the shims for the helper binaries under test.
+a_run() { PATH="$TMP_BIN:$PATH" run "$@"; }
+
+@test "registries: an aliased cloud mode needs the same helper as its canonical" {
+    cat >"$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  123.dkr.ecr.us-east-1.amazonaws.com:
+    auth-mode: aws-ecr
+YAML
+    install_shim docker-credential-ecr-login <<<'#!/usr/bin/env bash'$'\nexit 0'
+    a_run validate_registries_auth_modes
+    [ "$status" -eq 0 ]
+}
+
+@test "registries: an aliased cloud mode fails when its helper is missing" {
+    cat >"$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  123.dkr.ecr.us-east-1.amazonaws.com:
+    auth-mode: aws-ecr
+YAML
+    a_run emit validate_registries_auth_modes
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"docker-credential-ecr-login"* ]]
+}
+
+@test "registries: a mode that is not an alias of anything still fails" {
+    cat >"$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  ghcr.io:
+    auth-mode: not-a-mode
+YAML
+    a_run emit validate_registries_auth_modes
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not supported"* ]]
+}
+
+# --- env vars that must exist but may legitimately be empty ---
+
+@test "env_defined: passes when the var is set but empty" {
+    export FOO=
+    v_run validate_env_defined FOO
+    [ "$status" -eq 0 ]
+}
+
+@test "env_defined: passes when the var has a value" {
+    export FOO=bar
+    v_run validate_env_defined FOO
+    [ "$status" -eq 0 ]
+}
+
+@test "env_defined: fails when the var is not defined at all" {
+    unset FOO
+    v_run emit validate_env_defined FOO
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FOO"* ]]
+}
+
+@test "validate_config: an undefined AWS_ECR_CACHE_DIR fails" {
+    set_required_env
+    install_required_binaries
+    unset AWS_ECR_CACHE_DIR
+    v_run emit validate_config
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"AWS_ECR_CACHE_DIR"* ]]
+}
+
+@test "validate_config: an empty AWS_ECR_CACHE_DIR is fine" {
+    set_required_env
+    install_required_binaries
+    export AWS_ECR_CACHE_DIR=
+    v_run emit validate_config
+    [ "$status" -eq 0 ]
 }

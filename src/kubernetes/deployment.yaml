@@ -94,6 +94,10 @@ spec:
               value: "${Keelson/ReconcileOverrunWarningBackoffLimit}"
             - name: KEELSON_ROLLOUT_WORKLOAD_REF_WARNING_BACKOFF_LIMIT
               value: "${Keelson/RolloutWorkloadRefWarningBackoffLimit}"
+            - name: AWS_ECR_DISABLE_CACHE
+              value: "${Keelson/AwsEcrDisableCache}"
+            - name: AWS_ECR_CACHE_DIR
+              value: "${Keelson/AwsEcrCacheDir}"
             - name: KEELSON_FULL_REFRESH_INTERVAL
               value: "${Keelson/FullRefreshInterval}"
             - name: KEELSON_TICK_INTERVAL

@@ -9,7 +9,7 @@ Keelson reads configuration from three places, each owned by a different actor:
 
 ## Environment variables
 
-The Helm values (or templated Deployment) feed these directly into the Pod's `env`. Every variable is **required** — the scripts carry no built-in fallbacks, so `keelson-validate` (which `keelson` runs at boot) fails fast when one is missing. Defaults shipped in `src/defaults/Keelson/` populate the Deployment so a vanilla install just works.
+The Deployment env section supplies these values to the container. If not overridden the defaults are supplied. Every variable is **required** — the scripts carry no built-in fallbacks, so `keelson-validate` (which `keelson` runs at boot) fails fast when one is missing.
 
 Each row's left cell shows the env var on top and the matching Kaptain token below. If you're deploying with Kaptain, set the token in your `Keelson/…` env config directory; if you're using Helm the same options are available in `values.yaml`; if you're templating manifests another way, set the env var directly.
 
@@ -52,6 +52,8 @@ Both are reported on the boot line: `Keelson <version> (package <package-version
 | `KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT`<br>`Keelson/PollOverrunWarningBackoffLimit` | `64` | How far the `poll-pass-overrun` warning backs off, in passes. A poll pass that takes longer than the shortest poll schedule among the workloads it polled cannot hold that schedule, so it warns; consecutive overruns are reported on the 1st, 2nd, 4th, 8th and so on, then every this-many-th, and a pass that fits resets the count. Passes, not seconds: a pass is as long as it is, which is the thing being complained about. The count is kept on disk because each pass runs in its own subshell, which is also why `KEELSON_LOG_WARN_REPEAT_INTERVAL` cannot throttle it. Lower for a louder warning, raise for a quieter one; there is no value that silences it altogether, deliberately, because the condition does not clear itself. |
 | `KEELSON_RECONCILE_OVERRUN_WARNING_BACKOFF_LIMIT`<br>`Keelson/ReconcileOverrunWarningBackoffLimit` | `64` | How far the `reconcile-pass-overrun` warning backs off, in scans. A reconcile scan that takes longer than `ReconcileInterval` means the cluster is being listed as fast as it can be rather than on the cadence configured, which is otherwise entirely silent: the next scan simply starts on the following tick, never overlapping, never saying so. Reported on the 1st, 2nd, 4th, 8th consecutive overrun and so on, then every this-many-th, with a scan that fits resetting the count. Same shape as `PollOverrunWarningBackoffLimit` and separate from it, because a slow list and a slow registry are different problems with different fixes. |
 | `KEELSON_ROLLOUT_WORKLOAD_REF_WARNING_BACKOFF_LIMIT`<br>`Keelson/RolloutWorkloadRefWarningBackoffLimit` | `64` | How far the `rollout-workload-ref-no-template` warning backs off, in scans. An Argo Rollout that takes its pod template from `spec.workloadRef` has no image of its own, so annotating it asks for an update that can never happen: Argo reads the template, and the image, from the referenced Deployment, which is what should carry the annotation. The condition does not clear itself, so it is reported on the 1st, 2nd, 4th, 8th consecutive scan that finds one and so on, then every this-many-th, with a scan that finds none resetting the count. Only reachable when `Rollout` is in `WatchedKinds`. |
+| `AWS_ECR_DISABLE_CACHE`<br>`Keelson/AwsEcrDisableCache` | empty | Passed through to `docker-credential-ecr-login`, not read by Keelson. Any non-empty value turns off the helper's own token cache, so every ECR lookup re-authenticates. Empty leaves caching on, which is the helper's own default and what you want: an ECR authorization token is valid for 12 hours, and the cache is what stops Keelson asking AWS for a new one on every pass. Set it only to diagnose a stale-token problem. |
+| `AWS_ECR_CACHE_DIR`<br>`Keelson/AwsEcrCacheDir` | empty | Passed through to `docker-credential-ecr-login`, not read by Keelson. Empty makes the helper use its own default of `~/.ecr`, which resolves to `/home/keelson/.ecr`, on the `emptyDir` the Deployment mounts there. That is writable under `readOnlyRootFilesystem: true` and lasts the life of the Pod. Set an absolute path only if you mount the cache somewhere else. |
 | `KEELSON_FULL_REFRESH_INTERVAL`<br>`Keelson/FullRefreshInterval` | `86400` (24h) | Seconds between full refreshes. A refresh throws the local workload cache away and rebuilds it from the cluster, one kind per tick so no single pass runs long, then reconciles the ledger against what came back: entries for kinds no longer watched are dropped, and ledger keys whose workload no longer exists are removed. Belt and braces rather than the mechanism: watch events and the reconcile scan keep the cache current between refreshes, so this exists to correct drift nothing else can see, such as a hand-edited ConfigMap or a cache file that went bad. Makes no registry calls. |
 | `KEELSON_HEARTBEAT_MAX_AGE`<br>`Keelson/HeartbeatMaxAge` | `5` | Seconds before the kubelet's liveness probe treats the heartbeat as stale. Whole seconds here, but the comparison is made in microseconds at both ends, so the limit is exact rather than plus or minus a second. Keep close to `KEELSON_TICK_INTERVAL` — too generous masks a wedged loop, too tight false-positives on jitter. The lower end of that is enforced: it must be **at least twice `KEELSON_TICK_INTERVAL`**, checked by `keelson-validate` at boot. The loop writes the heartbeat once per tick, so a smaller allowance leaves no room for scheduling jitter and the kubelet kills a healthy controller; two ticks means one whole tick may be missed before liveness is entitled to call the loop wedged. Raising `KEELSON_TICK_INTERVAL` therefore requires raising this with it. Nothing enforces the upper end — that one is on you. |
 
@@ -160,11 +162,11 @@ registries:
   ghcr.io:
     auth-mode: secret
   123.dkr.ecr.us-east-1.amazonaws.com:
-    auth-mode: aws-irsa
+    auth-mode: aws
   europe-docker.pkg.dev:
-    auth-mode: gcp-wi
+    auth-mode: gcp
   myregistry.azurecr.io:
-    auth-mode: azure-wi
+    auth-mode: azure
 ```
 
 If a host has no entry, Keelson treats it as anonymous.
@@ -172,9 +174,21 @@ If a host has no entry, Keelson treats it as anonymous.
 ### Auth modes
 
 - **`secret`** — pull `dockerconfigjson` from a Kubernetes Secret in Keelson's own namespace. The Secret's name **is derived from the registry host** (the map key), and the key looked up inside it **is the map key verbatim**. See below. Override the lookup namespace with an optional `namespace:` field on the entry.
-- **`aws-irsa`** — fetch credentials via `docker-credential-ecr-login`, which uses the Pod's IRSA role (the standard `AWS_*_TOKEN_FILE` env).
-- **`azure-wi`** — federated workload-identity token → AAD token → ACR refresh token. Requires `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` on the Pod.
-- **`gcp-wi`** — workload-identity access token from the GCE metadata server.
+- **`aws`** — fetch credentials via `docker-credential-ecr-login`, so whatever the AWS SDK credential chain provides: EKS Pod Identity, IRSA, or an instance role.
+- **`azure`** — federated workload-identity token → Entra token → ACR refresh token. Requires `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` on the Pod.
+- **`gcp`** — workload-identity access token from the GCE metadata server.
+
+Each cloud mode is named for the cloud rather than for the mechanism, because the mechanisms get superseded and the credential source does not: EKS Pod Identity supersedes IRSA and Artifact Registry supersedes GCR, while `docker-credential-ecr-login` and the metadata server serve old and new alike. Every mechanism spelling is accepted as an alias, so a config written against the older names keeps working.
+
+| Canonical | Also accepted |
+|---|---|
+| `aws` | `aws-irsa`, `aws-pi`, `aws-ecr` |
+| `gcp` | `gcp-wi`, `gcp-gar`, `gcp-gcr` |
+| `azure` | `azure-wi`, `azure-acr` |
+
+The rule is the cloud name, optionally suffixed with whichever mechanism or registry product you think of it as.
+
+An alias is validated as the mode it resolves to, so `aws-ecr` requires `docker-credential-ecr-login` at boot exactly as `aws` does. Anything that is not a mode or an alias of one still fails validation.
 
 ### Secret naming for `auth-mode: secret`
 
@@ -235,6 +249,8 @@ registries:
 
 Annotations live on the workload's `metadata.annotations`. Under the default `KEELSON_CONFIG_MODE=keelson` every key is prefixed `keelson.pro/`; under `keel` use the `keel.sh/` prefix and Keelson translates the value where it can.
 
+**Labels are not read, ever.** Every key below is an annotation and only an annotation. Keel accepts a few of its keys as either, so a workload moving from Keel with settings on `metadata.labels` needs them moved to `metadata.annotations` or they are silently ignored.
+
 **Two spellings are accepted for every multi-word key.** camelCase is canonical and is what this document uses; the hyphenated form is equally valid on either prefix. Keel's own surface mixes the two, so a workload moving between the projects should not have to be rewritten:
 
 | Canonical | Also accepted |
@@ -244,10 +260,12 @@ Annotations live on the workload's `metadata.annotations`. Under the default `KE
 | `pollSchedule` | `poll-schedule` |
 | `triggerJobOnUpdate` | `trigger-job-on-update` |
 | `initContainers` | `true`, `false` | Whether init containers are in scope. **Defaults to `false`** in every config mode, as keel does. Anything but a literal `true` leaves them out, so a rejected or mistyped value fails closed rather than quietly enabling them. Once in scope an init container is updated like any other, and one left a release behind the app container it prepares is the skew this exists to prevent — so turn it on for workloads where that matters. |
-| `monitorContainers` | regular expression | Restrict updates to containers whose **name** matches. Empty means all, which is keel's shape and default. Applies to init containers too, when they are in scope. A pattern that is not a usable regular expression is an error and nothing is monitored until it is fixed — falling back to "monitor everything" would turn a typo into an estate-wide update. Distinct from scoping `policy.<container>`, which addresses one container by name; use whichever reads better. |
+| `imageVolumes` | `true`, `false` | Whether OCI image volumes (`spec.volumes[].image.reference`) are in scope. **Defaults to `false`** in every config mode, as keel does, and fails closed on anything but a literal `true`. A workload that has always had an image volume has never had Keelson touch it, so switching that on is the operator's call rather than an upgrade's. |
+| `monitorVolumes` | regular expression | Restrict updates to image volumes whose **name** matches, the volume counterpart of `monitorContainers`. Empty means all. The two are separate because a pattern written to pick containers has no business deciding which volumes are watched. |
+| `monitorContainers` | regular expression | Restrict updates to containers whose **name** matches. Empty means all, which is keel's shape and default. Applies to init containers too, when they are in scope, but never to image volumes: those have `monitorVolumes`. A pattern that is not a usable regular expression is an error and nothing is monitored until it is fixed — falling back to "monitor everything" would turn a typo into an estate-wide update. Distinct from scoping `policy.containers.<container>`, which addresses one container by name; use whichever reads better. |
 | `fieldManagerStrategy` | `field-manager-strategy` |
 
-Setting **both spellings of the same key to the same value** logs a warning naming the older one, and Keelson carries on. Setting them to **different values** is an error and the workload is not managed — whichever Keelson picked would be somebody's surprise, so it picks neither. Both checks apply per scope, so a `.<container>` pair is caught the same way, and a container-suffixed key still beats a workload-wide one.
+Setting **both spellings of the same key to the same value** logs a warning naming the older one, and Keelson carries on. Setting them to **different values** is an error and the workload is not managed — whichever Keelson picked would be somebody's surprise, so it picks neither. Both checks apply per scope, so a `.containers.<container>` pair is caught the same way, and a container-suffixed key still beats a workload-wide one.
 
 
 | Key (logical) | Values | Purpose |
@@ -257,7 +275,7 @@ Setting **both spellings of the same key to the same value** logs a warning nami
 | `matchMode` | `regex`, `glob` | Selects how `matchTag` is interpreted. |
 | `trigger` | `default`, `poll` | **Deferred: not read.** Keel's switch between webhook-driven and poll-driven updates. Keelson polls, and a registry webhook path is future work, so setting this changes nothing either way today. |
 | `pollSchedule` | duration: `30s`, `5m`, `2h45m`, `1.5h`, `1d`, bare seconds, or Keel's `@every 10m` / `@hourly` / `@daily` / `@weekly` | How often this workload's registry is polled for tags, overriding `KEELSON_REGISTRY_POLL_INTERVAL_DEFAULT`. An unparseable value is ignored with a `poll-schedule-invalid` warning and the global default applies. A value below Keelson's one-second resolution is clamped to `1s` with a `poll-schedule-too-fast` warning, since that is far closer to the intent than the global default would be. A watch event on the workload makes Keelson re-read it, and anything a decision depends on having moved — image, annotations, service account, image pull secrets, `spec.suspend` — brings the next poll forward to immediately, regardless of the schedule. A write that touched none of them, which is most of what a watch delivers, leaves the schedule alone. |
-| `credentials` | `respect-pod` (default), `central`, `ignore-pod` | Which credential path Keelson uses. `respect-pod` walks the workload's `imagePullSecrets` first, then falls through to central. `central` skips the Pod entirely. |
+| `credentials` | `central-then-pod-spec` (default), `central`, `ignore-pod`, `respect-pod-spec` | Which credential sources Keelson tries, and in what order. The default consults the central `registries.yaml` first and falls back to the workload's own `imagePullSecrets`, so a host the operator has configured costs no Secret read per workload. `central` (and its synonym `ignore-pod`) uses central only, with no fallback. `respect-pod-spec` uses the workload's own credentials only and never consults central, for a registry where the team's token is the only one that works. Wherever the pod spec is consulted, the workload's ServiceAccount `imagePullSecrets` are walked after it when `KEELSON_RESPECT_SA_PULL_SECRETS` is true. Sources are tried against the registry in turn, so a credential that resolves but is rejected falls through to the next rather than ending the attempt. The older `respect-pod` spelling is rejected rather than reinterpreted, because it used to mean pod-first-then-central and now would mean something else. Central credentials are resolved once per poll pass, before the pass fans out, so every workload on a given registry shares one Secret read or token fetch rather than paying for its own. That also bounds staleness: a rotated Secret or a changed `registries.yaml` is picked up on the next pass, within one poll interval. |
 | `triggerJobOnUpdate` | `true`, `false` | On a CronJob with `spec.suspend: true`, create a one-off Job whenever Keelson updates the image. It also fires **once** the first time Keelson polls a suspended, annotated CronJob even if there is nothing to update, so one that was already on its newest tag when Keelson took it over still runs rather than waiting for a future release. The state ConfigMap records every container's image at the moment it fired, so the same update cannot repeat and a multi-container CronJob compares against all of them rather than whichever one happened to be written. A change made by anything other than Keelson does not fire a Job: it moves the baseline the next poll compares against, exactly as for any other workload. Only the poll evaluates this: the reconcile scan, the full refresh and the queued re-read all run cache-only, because two of them overlapping would each read "never triggered" and each create a Job. The CronJob must stay suspended; otherwise the scheduler and Keelson would both fire. |
 | `fieldManagerStrategy` | `mimic`, `patch`, `claim` | Override the global `KEELSON_FIELD_MANAGER_STRATEGY_OWNED` / `_UNOWNED` default for this workload. Each value is a (write method, attribution) pair: `mimic` = SSA attributed to the detected Apply owner; `patch` = strategic-merge patch attributed to us (`keelson`); `claim` = SSA attributed to us. `mimic` requires an Apply-op field owner and is rejected (error, workload skipped) when the image field has none. `patch` and `claim` are always valid. Invalid values (typos) are rejected with an error and the workload is skipped this cycle. Keelson-only — no `keel.sh/` equivalent. |
 | `notify` | sink name | **Deferred: not read.** Reserved for notification routing. |
@@ -272,16 +290,16 @@ Pods with multiple containers can scope any of the keys above to a single contai
 metadata:
   annotations:
     keelson.pro/policy: minor              # default for every container
-    keelson.pro/policy.web: major          # the "web" container gets major bumps
-    keelson.pro/matchTag.db: '^pg-15\.'    # restrict tag set for "db" only
-    keelson.pro/matchMode.db: regex        # matchTag is a glob unless you say this
+    keelson.pro/policy.containers.web: major          # the "web" container gets major bumps
+    keelson.pro/matchTag.containers.db: '^pg-15\.'    # restrict tag set for "db" only
+    keelson.pro/matchMode.containers.db: regex        # matchTag is a glob unless you say this
 ```
 
-The container-suffixed key wins when present; otherwise Keelson falls back to the workload-wide key. The same precedence applies under `KEELSON_CONFIG_MODE=keel` with `keel.sh/policy.<container>`.
+The container-suffixed key wins when present; otherwise Keelson falls back to the workload-wide key. The same precedence applies under `KEELSON_CONFIG_MODE=keel` with `keel.sh/policy.containers.<container>`. The target kind is named in the key rather than left to be inferred from the suffix, so a container and an image volume that happen to share a name never address each other: `policy.containers.<name>` addresses a container or init container, `policy.volumes.<name>` addresses an image volume, and every key in the table works both ways.
 
 ### Init containers
 
-Init containers are **out of scope until you opt in** with `initContainers: true`, matching keel's default in every config mode. Once opted in they are updated exactly like any other container and every annotation above applies to them unchanged, including `monitorContainers` and the `.<container>` suffix. Worth knowing what the default costs you: an init container that prepares the app container it runs alongside is precisely the thing that must not drift a release behind it, so a workload with one is usually a workload that wants this on.
+Init containers are **out of scope until you opt in** with `initContainers: true`, matching keel's default in every config mode. Once opted in they are updated exactly like any other container and every annotation above applies to them unchanged, including `monitorContainers` and the `.containers.<container>` suffix. Worth knowing what the default costs you: an init container that prepares the app container it runs alongside is precisely the thing that must not drift a release behind it, so a workload with one is usually a workload that wants this on.
 
 Container names are unique across `containers` and `initContainers` within a pod spec, so a per-container override addresses an init container by name like any other:
 
@@ -289,7 +307,7 @@ Container names are unique across `containers` and `initContainers` within a pod
 metadata:
   annotations:
     keelson.pro/policy: minor
-    keelson.pro/policy.migrate: never   # leave the "migrate" init container alone
+    keelson.pro/policy.containers.migrate: never   # leave the "migrate" init container alone
 ```
 
 The only place the distinction matters is where Keelson writes an update back, since the two lists are separate keys in the pod spec.
@@ -311,17 +329,12 @@ moved elsewhere — usually to the GitOps or CI layer where it belongs.
 - **`keel.sh/approvals`, `keel.sh/approvalDeadline`** — Keel's in-controller
   approval workflow. Drive approvals from your CI/CD or chat platform; Keelson
   applies eligible updates immediately.
-- **`keel.sh/preDeploy`, `keel.sh/postDeploy`** — pre/post-update shell hooks.
-  Run those steps from the workload's own lifecycle (initContainers, Jobs) or
-  from CI.
-- **`keel.sh/imageVolumes`** — track OCI image volume references
-  (`spec.volumes[].image.reference`). Keel defaults this to false and Keelson
-  does not read image volumes at all, so an opted-in workload loses that
-  tracking. `keel.sh/initContainers` and `keel.sh/monitorContainers` **are**
-  honoured, with keel's defaults — see the table above.
-- **`keel.sh/maxAge`** — skip tags older than a duration. Express the
-  constraint through `match-tag` (with `match-mode: regex`) or by tagging
-  discipline upstream.
+- **`keel.sh/matchPreRelease`** — when comparing semver tags, require the new
+  tag's pre-release identifier to match the current one, so `1.2.0-rc1` only
+  moves to another `-rc` build. Keel defaults it to `true` and ignores it under
+  `policy: all`. Keelson compares tags positionally rather than as semver, so
+  there is no pre-release field to match on: express the constraint with
+  `matchTag` instead.
 - **`keel.sh/releaseNotes`** — surface release notes alongside notifications.
   Keelson has no notification sinks yet, so the value has nowhere to go.
 - **`keel.sh/pollSchedule` as a raw cron expression** — Keel accepts robfig
@@ -337,9 +350,6 @@ moved elsewhere — usually to the GitOps or CI layer where it belongs.
   In practice Keel struggles below a minute anyway (keel-hq/keel
   [#663](https://github.com/keel-hq/keel/issues/663)); Keelson polls happily
   at `30s` or faster, bounded by what your registry will tolerate.
-- **`keel.sh/monitor-container`** — restrict monitoring to a named container in
-  a multi-container Pod. Keelson scans every container in the workload's Pod
-  spec.
 
 Anything Keel-specific not listed here is either silently passed over or
 covered by an equivalent `keelson.pro/` key documented above.
