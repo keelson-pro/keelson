@@ -249,6 +249,8 @@ registries:
 
 Annotations live on the workload's `metadata.annotations`. Under the default `KEELSON_CONFIG_MODE=keelson` every key is prefixed `keelson.pro/`; under `keel` use the `keel.sh/` prefix and Keelson translates the value where it can.
 
+**Labels are not read, ever.** Every key below is an annotation and only an annotation. Keel accepts a few of its keys as either, so a workload moving from Keel with settings on `metadata.labels` needs them moved to `metadata.annotations` or they are silently ignored.
+
 **Two spellings are accepted for every multi-word key.** camelCase is canonical and is what this document uses; the hyphenated form is equally valid on either prefix. Keel's own surface mixes the two, so a workload moving between the projects should not have to be rewritten:
 
 | Canonical | Also accepted |
@@ -258,7 +260,7 @@ Annotations live on the workload's `metadata.annotations`. Under the default `KE
 | `pollSchedule` | `poll-schedule` |
 | `triggerJobOnUpdate` | `trigger-job-on-update` |
 | `initContainers` | `true`, `false` | Whether init containers are in scope. **Defaults to `false`** in every config mode, as keel does. Anything but a literal `true` leaves them out, so a rejected or mistyped value fails closed rather than quietly enabling them. Once in scope an init container is updated like any other, and one left a release behind the app container it prepares is the skew this exists to prevent — so turn it on for workloads where that matters. |
-| `imageVolumes` | `true`, `false` | Whether OCI image volumes (`spec.volumes[].image.reference`) are in scope. **Defaults to `false`** in every config mode, as keel does, and fails closed on anything but a literal `true`. A workload that has always had an image volume has never had Keelson touch it, so switching that on is the operator's call rather than an upgrade's. Keel accepts this as a label as well as an annotation; Keelson reads annotations only. |
+| `imageVolumes` | `true`, `false` | Whether OCI image volumes (`spec.volumes[].image.reference`) are in scope. **Defaults to `false`** in every config mode, as keel does, and fails closed on anything but a literal `true`. A workload that has always had an image volume has never had Keelson touch it, so switching that on is the operator's call rather than an upgrade's. |
 | `monitorVolumes` | regular expression | Restrict updates to image volumes whose **name** matches, the volume counterpart of `monitorContainers`. Empty means all. The two are separate because a pattern written to pick containers has no business deciding which volumes are watched. |
 | `monitorContainers` | regular expression | Restrict updates to containers whose **name** matches. Empty means all, which is keel's shape and default. Applies to init containers too, when they are in scope, but never to image volumes: those have `monitorVolumes`. A pattern that is not a usable regular expression is an error and nothing is monitored until it is fixed — falling back to "monitor everything" would turn a typo into an estate-wide update. Distinct from scoping `policy.containers.<container>`, which addresses one container by name; use whichever reads better. |
 | `fieldManagerStrategy` | `field-manager-strategy` |
