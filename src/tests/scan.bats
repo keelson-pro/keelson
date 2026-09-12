@@ -2455,3 +2455,78 @@ YAML
     [[ "$output" == *"would-update"* ]]
     [[ "$output" != *'"error":"1"'* ]]
 }
+
+# --- an empty tag list is a failed listing, not "no newer tags" ---
+#
+# A credential can be accepted and still be scoped to the wrong repo, and some
+# registries answer that with an empty list rather than a 401. We are running
+# an image out of this repo, so zero tags is never a healthy answer. A list
+# missing only the running tag is fine: a deleted tag leaves the others.
+
+# Central is tried first, so it is central that has to answer empty for the
+# fallback to be exercised at all. The pod credential then returns real tags.
+skopeo_empty_for_central() {
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    case "$arg" in
+        --creds=central:good) printf '{"Tags":[]}'; exit 0 ;;
+    esac
+done
+printf '{"Tags":["1.2.0","1.2.4"]}'
+SH
+}
+
+skopeo_empty_always() {
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":[]}'
+SH
+}
+
+@test "empty tags: an empty list falls through to the next source" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  reg.example:
+    auth-mode: secret
+    namespace: keelson-system
+    secret-name-override: central-secret
+YAML
+    kubectl_two_secrets
+    skopeo_empty_for_central
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    # Names the source, so this cannot pass by never having consulted central.
+    [[ "$output" == *'"event":"registry-creds-source-rejected"'* ]]
+    [[ "$output" == *'"source":"central"'* ]]
+    [[ "$output" == *"would-update"* ]]
+    [[ "$output" != *'"error":"1"'* ]]
+}
+
+@test "empty tags: every source empty is an error, not a no-change" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  reg.example:
+    auth-mode: secret
+    namespace: keelson-system
+    secret-name-override: central-secret
+YAML
+    kubectl_two_secrets
+    skopeo_empty_always
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"error":"1"'* ]]
+    [[ "$output" != *'"no-change":"1"'* ]]
+}
+
+@test "empty tags: a list without the running tag is still valid" {
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.4","1.2.5"]}'
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'"error":"1"'* ]]
+    [[ "$output" == *"would-update"* ]]
+}

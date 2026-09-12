@@ -832,18 +832,24 @@ scan_container() {
         creds=$(registry_creds_from_source "$source" "$host" "$ips_json" "$ns" "$sa_name") || continue
         [ -n "$creds" ] || continue
         tried=1
-        if tags_raw=$(registry_list_tags "$cimage" "$creds"); then
+        # An empty list counts as a failure, not as "no newer tags". We are
+        # running an image out of this repo, so it has at least the tag in
+        # front of us: zero tags means the listing was wrong, and a credential
+        # scoped to another repo is answered that way by some registries
+        # rather than with a 401. A list missing only the running tag is fine,
+        # since a deleted tag leaves the others behind.
+        if tags_raw=$(registry_list_tags "$cimage" "$creds") && [ -n "$tags_raw" ]; then
             listed=1
             break
         fi
         log_debug registry-creds-source-rejected \
             kind="$kind" ns="$ns" name="$name" container="$cname" \
             source="$source" detail="$cimage" \
-            msg="Credentials from '$source' were rejected listing tags for '$cimage'; trying the next source."
+            msg="Credentials from '$source' listed no tags for '$cimage'; trying the next source."
     done
     # No source had anything, so the host is either public or unconfigured.
     if [ "$listed" -eq 0 ] && [ "$tried" -eq 0 ]; then
-        tags_raw=$(registry_list_tags "$cimage" "") && listed=1
+        tags_raw=$(registry_list_tags "$cimage" "") && [ -n "$tags_raw" ] && listed=1
     fi
     if [ "$listed" -eq 0 ]; then
         local reason=${REGISTRY_LAST_ERROR:-}
@@ -855,6 +861,7 @@ scan_container() {
         reason=$LOG_HINT
         local reason_clause=""
         [ -n "$reason" ] && reason_clause=": $reason"
+        [ -z "$reason" ] && reason_clause=": the registry returned no tags at all, which usually means the credentials are scoped to a different repository"
         log_error registry-list-tags-failed \
             kind="$kind" ns="$ns" name="$name" container="$cname" \
             detail="$cimage" reason="$reason" \
