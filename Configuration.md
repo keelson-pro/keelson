@@ -258,10 +258,10 @@ Annotations live on the workload's `metadata.annotations`. Under the default `KE
 | `pollSchedule` | `poll-schedule` |
 | `triggerJobOnUpdate` | `trigger-job-on-update` |
 | `initContainers` | `true`, `false` | Whether init containers are in scope. **Defaults to `false`** in every config mode, as keel does. Anything but a literal `true` leaves them out, so a rejected or mistyped value fails closed rather than quietly enabling them. Once in scope an init container is updated like any other, and one left a release behind the app container it prepares is the skew this exists to prevent — so turn it on for workloads where that matters. |
-| `monitorContainers` | regular expression | Restrict updates to containers whose **name** matches. Empty means all, which is keel's shape and default. Applies to init containers too, when they are in scope. A pattern that is not a usable regular expression is an error and nothing is monitored until it is fixed — falling back to "monitor everything" would turn a typo into an estate-wide update. Distinct from scoping `policy.<container>`, which addresses one container by name; use whichever reads better. |
+| `monitorContainers` | regular expression | Restrict updates to containers whose **name** matches. Empty means all, which is keel's shape and default. Applies to init containers too, when they are in scope. A pattern that is not a usable regular expression is an error and nothing is monitored until it is fixed — falling back to "monitor everything" would turn a typo into an estate-wide update. Distinct from scoping `policy.containers.<container>`, which addresses one container by name; use whichever reads better. |
 | `fieldManagerStrategy` | `field-manager-strategy` |
 
-Setting **both spellings of the same key to the same value** logs a warning naming the older one, and Keelson carries on. Setting them to **different values** is an error and the workload is not managed — whichever Keelson picked would be somebody's surprise, so it picks neither. Both checks apply per scope, so a `.<container>` pair is caught the same way, and a container-suffixed key still beats a workload-wide one.
+Setting **both spellings of the same key to the same value** logs a warning naming the older one, and Keelson carries on. Setting them to **different values** is an error and the workload is not managed — whichever Keelson picked would be somebody's surprise, so it picks neither. Both checks apply per scope, so a `.containers.<container>` pair is caught the same way, and a container-suffixed key still beats a workload-wide one.
 
 
 | Key (logical) | Values | Purpose |
@@ -286,16 +286,16 @@ Pods with multiple containers can scope any of the keys above to a single contai
 metadata:
   annotations:
     keelson.pro/policy: minor              # default for every container
-    keelson.pro/policy.web: major          # the "web" container gets major bumps
-    keelson.pro/matchTag.db: '^pg-15\.'    # restrict tag set for "db" only
-    keelson.pro/matchMode.db: regex        # matchTag is a glob unless you say this
+    keelson.pro/policy.containers.web: major          # the "web" container gets major bumps
+    keelson.pro/matchTag.containers.db: '^pg-15\.'    # restrict tag set for "db" only
+    keelson.pro/matchMode.containers.db: regex        # matchTag is a glob unless you say this
 ```
 
-The container-suffixed key wins when present; otherwise Keelson falls back to the workload-wide key. The same precedence applies under `KEELSON_CONFIG_MODE=keel` with `keel.sh/policy.<container>`.
+The container-suffixed key wins when present; otherwise Keelson falls back to the workload-wide key. The same precedence applies under `KEELSON_CONFIG_MODE=keel` with `keel.sh/policy.containers.<container>`. The target kind is named in the key rather than left to be inferred from the suffix, so a container and an image volume that happen to share a name never address each other.
 
 ### Init containers
 
-Init containers are **out of scope until you opt in** with `initContainers: true`, matching keel's default in every config mode. Once opted in they are updated exactly like any other container and every annotation above applies to them unchanged, including `monitorContainers` and the `.<container>` suffix. Worth knowing what the default costs you: an init container that prepares the app container it runs alongside is precisely the thing that must not drift a release behind it, so a workload with one is usually a workload that wants this on.
+Init containers are **out of scope until you opt in** with `initContainers: true`, matching keel's default in every config mode. Once opted in they are updated exactly like any other container and every annotation above applies to them unchanged, including `monitorContainers` and the `.containers.<container>` suffix. Worth knowing what the default costs you: an init container that prepares the app container it runs alongside is precisely the thing that must not drift a release behind it, so a workload with one is usually a workload that wants this on.
 
 Container names are unique across `containers` and `initContainers` within a pod spec, so a per-container override addresses an init container by name like any other:
 
@@ -303,7 +303,7 @@ Container names are unique across `containers` and `initContainers` within a pod
 metadata:
   annotations:
     keelson.pro/policy: minor
-    keelson.pro/policy.migrate: never   # leave the "migrate" init container alone
+    keelson.pro/policy.containers.migrate: never   # leave the "migrate" init container alone
 ```
 
 The only place the distinction matters is where Keelson writes an update back, since the two lists are separate keys in the pod spec.

@@ -26,8 +26,12 @@ ANNOTATION_ALT_KEY=
 #                -> ANNOTATION_VALUE
 # Empty if absent or rejected.
 # When <container-name> is non-empty, the per-container key
-# (e.g. keelson.pro/<key>.<container>) wins over the workload-wide key
-# (keelson.pro/<key>). The same precedence applies on the keel.sh/ side.
+# (e.g. keelson.pro/<key>.containers.<container>) wins over the workload-wide
+# key (keelson.pro/<key>). The same precedence applies on the keel.sh/ side.
+#
+# The target kind is named in the key rather than inferred from the suffix,
+# so image volumes can be addressed the same way without a container and a
+# volume of the same name meaning each other.
 # Special values:
 #   "REJECT:<reason>"  - caller treats as a skip with that reason. Currently:
 #     keel-policy-force-unsupported  - keel value not honoured by keelson
@@ -60,8 +64,8 @@ annotation_get() {
     alt=$ANNOTATION_ALT_KEY
 
     if [ -n "$container" ]; then
-        annotation_pick "$lines" "keelson.pro/$key.$container" \
-            "${alt:+keelson.pro/$alt.$container}"
+        annotation_pick "$lines" "keelson.pro/$key.containers.$container" \
+            "${alt:+keelson.pro/$alt.containers.$container}"
         keelson_val=$ANNOTATION_RAW
     fi
     if [ -z "$keelson_val" ]; then
@@ -76,8 +80,8 @@ annotation_get() {
         annotation_alt_key "$keel_key"
         alt=$ANNOTATION_ALT_KEY
         if [ -n "$container" ]; then
-            annotation_pick "$lines" "keel.sh/$keel_key.$container" \
-                "${alt:+keel.sh/$alt.$container}"
+            annotation_pick "$lines" "keel.sh/$keel_key.containers.$container" \
+                "${alt:+keel.sh/$alt.containers.$container}"
             keel_val=$ANNOTATION_RAW
         fi
         if [ -z "$keel_val" ]; then

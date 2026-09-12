@@ -119,34 +119,34 @@ keelson.pro/policy=ok" policy
 
 @test "container override: container-suffixed key wins over bare" {
     local lines='keelson.pro/policy=minor
-keelson.pro/policy.web=major'
+keelson.pro/policy.containers.web=major'
     annotation_get "$lines" policy web
     [ "$ANNOTATION_VALUE" = "major" ]
 }
 
 @test "container override: falls back to bare when container suffix absent" {
     local lines='keelson.pro/policy=minor
-keelson.pro/policy.web=major'
+keelson.pro/policy.containers.web=major'
     annotation_get "$lines" policy db
     [ "$ANNOTATION_VALUE" = "minor" ]
 }
 
 @test "container override: empty container arg behaves as workload-only" {
     local lines='keelson.pro/policy=minor
-keelson.pro/policy.web=major'
+keelson.pro/policy.containers.web=major'
     annotation_get "$lines" policy ""
     [ "$ANNOTATION_VALUE" = "minor" ]
 }
 
 @test "container override: keel mode honours container suffix" {
     local lines='keel.sh/policy=major
-keel.sh/policy.web=minor'
+keel.sh/policy.containers.web=minor'
     KEELSON_CONFIG_MODE=keel annotation_get "$lines" policy web
     [ "$ANNOTATION_VALUE" = "minor" ]
 }
 
 @test "container override: container key with hyphens in name" {
-    local lines='keelson.pro/policy.web-frontend=major
+    local lines='keelson.pro/policy.containers.web-frontend=major
 keelson.pro/policy=minor'
     annotation_get "$lines" policy web-frontend
     [ "$ANNOTATION_VALUE" = "major" ]
@@ -293,15 +293,15 @@ keelson.pro/match-tag=b' matchTag || rc=$?
 }
 
 @test "spelling: a per-container conflict is caught too" {
-    annotation_get 'keelson.pro/matchTag.web=a
-keelson.pro/match-tag.web=b' matchTag web
+    annotation_get 'keelson.pro/matchTag.containers.web=a
+keelson.pro/match-tag.containers.web=b' matchTag web
     [ "$ANNOTATION_VALUE" = 'REJECT:annotation-spelling-conflict' ]
 }
 
 @test "spelling: a container override beats a workload-wide pair" {
     annotation_get 'keelson.pro/matchTag=^1\.
 keelson.pro/match-tag=^2\.
-keelson.pro/matchTag.web=^3\.' matchTag web
+keelson.pro/matchTag.containers.web=^3\.' matchTag web
     [ "$ANNOTATION_VALUE" = '^3\.' ]
 }
 

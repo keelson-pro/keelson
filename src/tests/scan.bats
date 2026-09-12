@@ -1344,7 +1344,7 @@ SH
         "annotations": {
           "keelson.pro/policy": "minor",
           "keelson.pro/initContainers": "true",
-          "keelson.pro/policy.migrate": "never"
+          "keelson.pro/policy.containers.migrate": "never"
         }
       },
       "spec": {
@@ -1438,7 +1438,7 @@ SH
 }
 
 @test "managed: a per-container policy counts" {
-    run scan_is_keelson_managed 'keelson.pro/policy.web=major'
+    run scan_is_keelson_managed 'keelson.pro/policy.containers.web=major'
     [ "$status" -eq 0 ]
 }
 

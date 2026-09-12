@@ -306,7 +306,7 @@ case "$1" in
 esac
 SH
     printf '%s' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
-    local ann=$'keelson.pro/field-manager-strategy=mimic\nkeelson.pro/field-manager-strategy.main=patch'
+    local ann=$'keelson.pro/field-manager-strategy=mimic\nkeelson.pro/field-manager-strategy.containers.main=patch'
     KEELSON_LOG_FORMAT=json run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3 "" "$ann"
     [ "$status" -eq 0 ]
     [[ "$output" == *'"strategy":"patch"'* ]]
