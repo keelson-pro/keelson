@@ -323,17 +323,17 @@ moved elsewhere — usually to the GitOps or CI layer where it belongs.
 - **`keel.sh/approvals`, `keel.sh/approvalDeadline`** — Keel's in-controller
   approval workflow. Drive approvals from your CI/CD or chat platform; Keelson
   applies eligible updates immediately.
-- **`keel.sh/preDeploy`, `keel.sh/postDeploy`** — pre/post-update shell hooks.
-  Run those steps from the workload's own lifecycle (initContainers, Jobs) or
-  from CI.
 - **`keel.sh/imageVolumes`** — track OCI image volume references
   (`spec.volumes[].image.reference`). Keel defaults this to false and Keelson
   does not read image volumes at all, so an opted-in workload loses that
   tracking. `keel.sh/initContainers` and `keel.sh/monitorContainers` **are**
   honoured, with keel's defaults — see the table above.
-- **`keel.sh/maxAge`** — skip tags older than a duration. Express the
-  constraint through `match-tag` (with `match-mode: regex`) or by tagging
-  discipline upstream.
+- **`keel.sh/matchPreRelease`** — when comparing semver tags, require the new
+  tag's pre-release identifier to match the current one, so `1.2.0-rc1` only
+  moves to another `-rc` build. Keel defaults it to `true` and ignores it under
+  `policy: all`. Keelson compares tags positionally rather than as semver, so
+  there is no pre-release field to match on: express the constraint with
+  `matchTag` instead.
 - **`keel.sh/releaseNotes`** — surface release notes alongside notifications.
   Keelson has no notification sinks yet, so the value has nowhere to go.
 - **`keel.sh/pollSchedule` as a raw cron expression** — Keel accepts robfig
@@ -349,9 +349,6 @@ moved elsewhere — usually to the GitOps or CI layer where it belongs.
   In practice Keel struggles below a minute anyway (keel-hq/keel
   [#663](https://github.com/keel-hq/keel/issues/663)); Keelson polls happily
   at `30s` or faster, bounded by what your registry will tolerate.
-- **`keel.sh/monitor-container`** — restrict monitoring to a named container in
-  a multi-container Pod. Keelson scans every container in the workload's Pod
-  spec.
 
 Anything Keel-specific not listed here is either silently passed over or
 covered by an equivalent `keelson.pro/` key documented above.
