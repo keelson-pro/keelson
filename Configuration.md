@@ -347,12 +347,6 @@ moved elsewhere — usually to the GitOps or CI layer where it belongs.
   over time, and on a healthy cluster are capped at around four months by
   cluster upgrades: a restarted pod polls every workload within
   `KEELSON_FIRST_POLL_DELAY_MAX`, so they run at least as often as configured.
-- **Sub-second poll precision** — Keel's `pollSchedule` is a Go duration, so
-  its syntax accepts `ns`, `us` and `ms`. Keelson schedules in whole seconds
-  and rounds to the nearest, clamping anything below half a second to `1s`.
-  In practice Keel struggles below a minute anyway (keel-hq/keel
-  [#663](https://github.com/keel-hq/keel/issues/663)); Keelson polls happily
-  at `30s` or faster, bounded by what your registry will tolerate.
 
 Anything Keel-specific not listed here is either silently passed over or
 covered by an equivalent `keelson.pro/` key documented above.
