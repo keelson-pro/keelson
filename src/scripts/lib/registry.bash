@@ -27,9 +27,14 @@
 #               own namespace from the SA mount), decode .dockerconfigjson.
 #               The Secret name is the map key by convention; the optional
 #               "namespace" override points to a different ns if needed.
-#   aws-irsa  - docker-credential-ecr-login (relies on AWS_*_TOKEN_FILE / role)
-#   azure-wi  - federated token -> AAD token -> ACR refresh token
-#   gcp-wi    - GCE metadata server access_token
+#   aws       - docker-credential-ecr-login, so whatever the SDK credential
+#               chain provides: EKS Pod Identity, IRSA, or an instance role
+#   azure     - federated token -> Entra token -> ACR refresh token
+#   gcp       - GCE metadata server access_token
+#
+# The cloud modes are named for the cloud rather than the mechanism, because
+# the mechanisms get superseded and the credential source does not. Every
+# mechanism spelling is still accepted as an alias.
 
 # -g so the cache survives across function scopes when this lib is sourced
 # from inside a function (e.g. bats setup, future restart-and-reload paths).
@@ -240,9 +245,9 @@ registry_creds_from_sa() {
 registry_normalise_auth_mode() {
     case "$1" in
         secret)                            printf 'secret' ;;
-        aws|aws-irsa|aws-pi|aws-ecr)       printf 'aws-irsa' ;;
-        gcp|gcp-wi|gcp-gar|gcp-gcr)        printf 'gcp-wi' ;;
-        azure|azure-wi|azure-acr)          printf 'azure-wi' ;;
+        aws|aws-irsa|aws-pi|aws-ecr)       printf 'aws' ;;
+        gcp|gcp-wi|gcp-gar|gcp-gcr)        printf 'gcp' ;;
+        azure|azure-wi|azure-acr)          printf 'azure' ;;
         *)                                 return 1 ;;
     esac
 }
@@ -258,9 +263,9 @@ registry_creds_central() {
     auth_mode=$(registry_normalise_auth_mode "$auth_mode") || auth_mode=''
     case "$auth_mode" in
         secret)   registry_creds_secret "$cfg" "$host" ;;
-        aws-irsa) registry_creds_aws_irsa "$host" ;;
-        azure-wi) registry_creds_azure_wi "$host" ;;
-        gcp-wi)   registry_creds_gcp_wi ;;
+        aws)      registry_creds_aws "$host" ;;
+        azure)    registry_creds_azure "$host" ;;
+        gcp)      registry_creds_gcp ;;
         *)        printf '' ;;
     esac
 }
@@ -343,7 +348,7 @@ registry_creds_from_named_secret() {
     printf '%s' "$auth" | base64 -d
 }
 
-registry_creds_aws_irsa() {
+registry_creds_aws() {
     local host=$1 raw user secret
     raw=$(printf '%s' "$host" | docker-credential-ecr-login get 2>/dev/null) || return 1
     [ -z "$raw" ] && return 1
@@ -355,7 +360,7 @@ registry_creds_aws_irsa() {
     printf '%s:%s' "$user" "$secret"
 }
 
-registry_creds_gcp_wi() {
+registry_creds_gcp() {
     local token
     token=$(curl -fsSL -H 'Metadata-Flavor: Google' \
         'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
@@ -366,11 +371,11 @@ registry_creds_gcp_wi() {
     printf 'oauth2accesstoken:%s' "$token"
 }
 
-registry_creds_azure_wi() {
+registry_creds_azure() {
     local host=$1
-    local fed_file=${AZURE_FEDERATED_TOKEN_FILE:?AZURE_FEDERATED_TOKEN_FILE required for azure-wi}
-    local tenant=${AZURE_TENANT_ID:?AZURE_TENANT_ID required for azure-wi}
-    local client=${AZURE_CLIENT_ID:?AZURE_CLIENT_ID required for azure-wi}
+    local fed_file=${AZURE_FEDERATED_TOKEN_FILE:?AZURE_FEDERATED_TOKEN_FILE required for auth-mode azure}
+    local tenant=${AZURE_TENANT_ID:?AZURE_TENANT_ID required for auth-mode azure}
+    local client=${AZURE_CLIENT_ID:?AZURE_CLIENT_ID required for auth-mode azure}
     local fed_token aad_token refresh
     fed_token=$(cat "$fed_file") || return 1
     aad_token=$(curl -fsSL -X POST \

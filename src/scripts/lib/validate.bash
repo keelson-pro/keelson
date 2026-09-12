@@ -367,10 +367,10 @@ validate_registries_auth_modes() {
         canonical=$(registry_normalise_auth_mode "$mode") || canonical=$mode
         case "$canonical" in
             secret) ;;
-            aws-irsa)
+            aws)
                 validate_binary docker-credential-ecr-login || errors=$((errors+1))
                 ;;
-            azure-wi|gcp-wi)
+            azure|gcp)
                 validate_binary curl || errors=$((errors+1))
                 ;;
             *)

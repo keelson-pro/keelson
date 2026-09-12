@@ -150,7 +150,7 @@ echo -n "cluster-infra" > defaults/Environment
 echo -n "platform-set" > defaults/ProductName
 echo -n "example.com/my-company/my-team" > defaults/Keelson/EnvironmentDockerRegistryAndNamespace # Omit for ghcr public, or replace with your registry and namespace
 echo -n "mynexusinstance.com" > defaults/Keelson/EnvironmentDockerRegistry # The registry the AuthMode below applies to
-echo -n "aws-irsa" > defaults/Keelson/AuthMode # or `gcp-wi` or `azure-wi` or `secret`
+echo -n "aws" > defaults/Keelson/AuthMode # or `gcp` or `azure` or `secret`
 for manifest in keelson-package/*.yaml; do
   content=$(<"$manifest")
   while IFS= read -r file; do

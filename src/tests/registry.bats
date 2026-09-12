@@ -753,3 +753,28 @@ YAML
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
+
+@test "auth-mode: the bare cloud name is the canonical mode" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  123.dkr.ecr.us-east-1.amazonaws.com:
+    auth-mode: aws
+YAML
+    install_shim docker-credential-ecr-login <<'SH'
+#!/usr/bin/env bash
+printf '{"Username":"AWS","Secret":"tok123"}'
+SH
+    registry_init
+    run registry_resolve_creds 123.dkr.ecr.us-east-1.amazonaws.com/x/y:1.0 '[]' default 'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ "$output" = "AWS:tok123" ]
+}
+
+@test "auth-mode: normalise echoes the bare cloud name" {
+    run registry_normalise_auth_mode aws-irsa
+    [ "$output" = "aws" ]
+    run registry_normalise_auth_mode gcp-gar
+    [ "$output" = "gcp" ]
+    run registry_normalise_auth_mode azure-acr
+    [ "$output" = "azure" ]
+}
