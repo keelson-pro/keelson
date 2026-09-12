@@ -423,15 +423,55 @@ registry_creds_from_pull_secrets() {
     return 1
 }
 
+# registry_auths_host <value>
+# The bare host from an auths key or a lookup key: scheme and any path
+# removed, so "https://reg.example:5000/v1/" and "reg.example:5000" are the
+# same registry, which is what they are.
+registry_auths_host() {
+    local v=${1#http://}
+    v=${v#https://}
+    printf '%s' "${v%%/*}"
+}
+
+# registry_creds_from_named_secret <secret> <namespace> <key>
+# Echoes "user:pass" from a dockerconfigjson Secret, or non-zero if it holds
+# nothing for this registry.
+#
+# Exact match first, so a secret-key-override naming a key precisely still
+# means precisely that, and nothing that resolves today can start resolving
+# differently. Only on a miss are the keys compared with scheme and path
+# stripped from both sides, because registries do not agree on how to spell
+# themselves: docker login writes "https://index.docker.io/v1/", and other
+# tooling writes a bare host, a scheme, or a trailing path for the same
+# place. Docker Hub needs more than stripping, since the host itself differs
+# rather than being decorated.
+#
+# Ordering is the whole design: the loose pass can only turn a miss into a
+# hit, never change a hit. Where two keys reduce to one host, the first in
+# document order wins.
 registry_creds_from_named_secret() {
-    local secret=$1 ns=$2 host=$3
-    local b64 dockerconfig auth
+    local secret=$1 ns=$2 key=$3
+    local b64 dockerconfig auth want
     b64=$(kubectl get secret "$secret" -n "$ns" \
             -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null) || return 1
     [ -z "$b64" ] && return 1
     dockerconfig=$(printf '%s' "$b64" | base64 -d 2>/dev/null) || return 1
     auth=$(printf '%s' "$dockerconfig" \
-            | yq -p=json -o=y '.auths."'"$host"'".auth // ""')
+            | yq -p=json -o=y '.auths."'"$key"'".auth // ""')
+    if [ -z "$auth" ] || [ "$auth" = "null" ]; then
+        want=$(registry_auths_host "$key")
+        case "$want" in
+            docker.io|index.docker.io) want='(docker\.io|index\.docker\.io)' ;;
+            *)                         want=$(printf '%s' "$want" | sed 's/[.[\*^$()+?{|]/\\&/g') ;;
+        esac
+        auth=$(printf '%s' "$dockerconfig" | yq -p=json -o=y "
+            .auths | to_entries
+            | map(select(.key
+                | sub(\"^https?://\"; \"\")
+                | sub(\"/.*$\"; \"\")
+                | test(\"^${want}\$\")))
+            | .[0].value.auth // \"\"")
+    fi
     if [ -z "$auth" ] || [ "$auth" = "null" ]; then
         return 1
     fi

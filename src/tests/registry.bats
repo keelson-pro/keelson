@@ -895,3 +895,73 @@ SH
     [ "$status" -eq 0 ]
     [ "$output" = "pod:pw" ]
 }
+
+# --- auths key matching: registries spell themselves inconsistently ---
+#
+# docker login writes "https://index.docker.io/v1/" for Docker Hub, and some
+# tooling writes a scheme or a trailing path for private registries. The host
+# Keelson has is always bare, so an exact match misses all of those.
+
+@test "named_secret: a scheme and path key matches the bare host" {
+    local payload b64
+    payload=$(make_dockerconfig 'https://reg.example:5000/v1/' fred sekret)
+    b64=$(printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64)
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+printf '%s' '$b64'
+SH
+    run registry_creds_from_named_secret pull-secret default reg.example:5000
+    [ "$status" -eq 0 ]
+    [ "$output" = "fred:sekret" ]
+}
+
+@test "named_secret: docker.io matches the index.docker.io key docker login writes" {
+    local payload b64
+    payload=$(make_dockerconfig 'https://index.docker.io/v1/' hub hubpw)
+    b64=$(printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64)
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+printf '%s' '$b64'
+SH
+    run registry_creds_from_named_secret pull-secret default docker.io
+    [ "$status" -eq 0 ]
+    [ "$output" = "hub:hubpw" ]
+}
+
+@test "named_secret: an exact key still matches, and wins" {
+    local payload b64
+    payload=$(make_dockerconfig ghcr.io exact pw)
+    b64=$(printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64)
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+printf '%s' '$b64'
+SH
+    run registry_creds_from_named_secret pull-secret default ghcr.io
+    [ "$status" -eq 0 ]
+    [ "$output" = "exact:pw" ]
+}
+
+@test "named_secret: a different host still misses" {
+    local payload b64
+    payload=$(make_dockerconfig 'https://other.example/v1/' a b)
+    b64=$(printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64)
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+printf '%s' '$b64'
+SH
+    run registry_creds_from_named_secret pull-secret default reg.example
+    [ "$status" -ne 0 ]
+}
+
+@test "pod walk: a workload secret with a scheme key resolves" {
+    local payload b64
+    payload=$(make_dockerconfig 'https://reg.example/v1/' pod podpw)
+    b64=$(printf '%s' "$payload" | base64 -w0 2>/dev/null || printf '%s' "$payload" | base64)
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+printf '%s' '$b64'
+SH
+    run registry_creds_from_pull_secrets '[{"name":"a"}]' default reg.example
+    [ "$status" -eq 0 ]
+    [ "$output" = "pod:podpw" ]
+}
