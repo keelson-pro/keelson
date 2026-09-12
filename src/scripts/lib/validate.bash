@@ -359,9 +359,13 @@ validate_registries_auth_modes() {
             msg="Validation failed: could not parse registries file '$KEELSON_REGISTRIES_FILE'."
         return 1
     fi
+    local canonical
     while IFS= read -r mode; do
         [ -z "$mode" ] && continue
-        case "$mode" in
+        # Switched on the canonical value so an alias is validated as the mode
+        # it resolves to, and the helper it needs is the helper checked for.
+        canonical=$(registry_normalise_auth_mode "$mode") || canonical=$mode
+        case "$canonical" in
             secret) ;;
             aws-irsa)
                 validate_binary docker-credential-ecr-login || errors=$((errors+1))

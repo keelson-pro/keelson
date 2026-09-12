@@ -715,3 +715,42 @@ SH
     [ "$status" -ne 0 ]
     [[ "$output" == *"Two distinct registries would share the same secret name"* ]]
 }
+
+# --- auth-mode aliases ---
+#
+# a_run rather than v_run: these need the real yq to read the file at all,
+# while still preferring the shims for the helper binaries under test.
+a_run() { PATH="$TMP_BIN:$PATH" run "$@"; }
+
+@test "registries: an aliased cloud mode needs the same helper as its canonical" {
+    cat >"$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  123.dkr.ecr.us-east-1.amazonaws.com:
+    auth-mode: aws-ecr
+YAML
+    install_shim docker-credential-ecr-login <<<'#!/usr/bin/env bash'$'\nexit 0'
+    a_run validate_registries_auth_modes
+    [ "$status" -eq 0 ]
+}
+
+@test "registries: an aliased cloud mode fails when its helper is missing" {
+    cat >"$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  123.dkr.ecr.us-east-1.amazonaws.com:
+    auth-mode: aws-ecr
+YAML
+    a_run emit validate_registries_auth_modes
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"docker-credential-ecr-login"* ]]
+}
+
+@test "registries: a mode that is not an alias of anything still fails" {
+    cat >"$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  ghcr.io:
+    auth-mode: not-a-mode
+YAML
+    a_run emit validate_registries_auth_modes
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not supported"* ]]
+}

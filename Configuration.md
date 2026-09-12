@@ -176,6 +176,18 @@ If a host has no entry, Keelson treats it as anonymous.
 - **`azure-wi`** — federated workload-identity token → AAD token → ACR refresh token. Requires `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` on the Pod.
 - **`gcp-wi`** — workload-identity access token from the GCE metadata server.
 
+Each cloud mode accepts aliases, because the canonical names describe a mechanism while operators think in terms of their cloud or their registry product, and because the mechanisms outlive their names. EKS Pod Identity supersedes IRSA and Artifact Registry supersedes GCR, but `docker-credential-ecr-login` and the metadata server serve old and new alike, so the spelling is not worth refusing a config over.
+
+| Canonical | Also accepted |
+|---|---|
+| `aws-irsa` | `aws`, `aws-pi`, `aws-ecr` |
+| `gcp-wi` | `gcp`, `gcp-gar`, `gcp-gcr` |
+| `azure-wi` | `azure`, `azure-acr` |
+
+The rule is the cloud name, optionally suffixed with whichever mechanism or registry product you think of it as.
+
+An alias is validated as the mode it resolves to, so `aws-ecr` requires `docker-credential-ecr-login` at boot exactly as `aws-irsa` does. Anything that is not a mode or an alias of one still fails validation.
+
 ### Secret naming for `auth-mode: secret`
 
 One map key produces two names, and they are not the same when the registry has a port.

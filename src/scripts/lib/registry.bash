@@ -226,6 +226,27 @@ registry_creds_from_sa() {
     registry_creds_from_pull_secrets "$ips" "$ns" "$host"
 }
 
+# registry_normalise_auth_mode <value>
+# Echoes the canonical auth-mode for a configured value, or returns 1 for a
+# value that names no mode at all. One definition, read by the dispatch below
+# and by boot validation, so a mode accepted at boot is a mode that resolves.
+#
+# The rule is the cloud name, optionally suffixed with whichever mechanism or
+# registry product the operator thinks of it as. Aliases exist because the
+# canonical names describe a mechanism while operators think in terms of their
+# cloud, and because the mechanisms outlive their names: EKS Pod Identity
+# supersedes IRSA and Artifact Registry supersedes GCR, but
+# docker-credential-ecr-login and the metadata server serve old and new alike.
+registry_normalise_auth_mode() {
+    case "$1" in
+        secret)                            printf 'secret' ;;
+        aws|aws-irsa|aws-pi|aws-ecr)       printf 'aws-irsa' ;;
+        gcp|gcp-wi|gcp-gar|gcp-gcr)        printf 'gcp-wi' ;;
+        azure|azure-wi|azure-acr)          printf 'azure-wi' ;;
+        *)                                 return 1 ;;
+    esac
+}
+
 registry_creds_central() {
     local host=$1 cfg auth_mode
     cfg=$(registry_config_for_host "$host")
@@ -234,6 +255,7 @@ registry_creds_central() {
         return 0
     fi
     auth_mode=$(printf '%s' "$cfg" | yq -p=json -o=y '."auth-mode"')
+    auth_mode=$(registry_normalise_auth_mode "$auth_mode") || auth_mode=''
     case "$auth_mode" in
         secret)   registry_creds_secret "$cfg" "$host" ;;
         aws-irsa) registry_creds_aws_irsa "$host" ;;

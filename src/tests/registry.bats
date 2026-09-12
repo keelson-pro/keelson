@@ -688,3 +688,68 @@ YAML
     run emit_json registry_init
     [[ "$output" == *registry-config-secret-name-collision* ]]
 }
+
+# --- auth-mode aliases ---
+#
+# The canonical names describe a mechanism; operators think in terms of their
+# cloud or their registry product, and the mechanisms outlive their names.
+
+@test "auth-mode alias: aws-ecr resolves as the AWS mode" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  123.dkr.ecr.us-east-1.amazonaws.com:
+    auth-mode: aws-ecr
+YAML
+    install_shim docker-credential-ecr-login <<'SH'
+#!/usr/bin/env bash
+printf '{"Username":"AWS","Secret":"tok123"}'
+SH
+    registry_init
+    run registry_resolve_creds 123.dkr.ecr.us-east-1.amazonaws.com/x/y:1.0 '[]' default 'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ "$output" = "AWS:tok123" ]
+}
+
+@test "auth-mode alias: aws-pi resolves as the AWS mode" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  123.dkr.ecr.us-east-1.amazonaws.com:
+    auth-mode: aws-pi
+YAML
+    install_shim docker-credential-ecr-login <<'SH'
+#!/usr/bin/env bash
+printf '{"Username":"AWS","Secret":"tok123"}'
+SH
+    registry_init
+    run registry_resolve_creds 123.dkr.ecr.us-east-1.amazonaws.com/x/y:1.0 '[]' default 'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ "$output" = "AWS:tok123" ]
+}
+
+@test "auth-mode alias: gcp-gar resolves as the GCP mode" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  europe-docker.pkg.dev:
+    auth-mode: gcp-gar
+YAML
+    install_shim curl <<'SH'
+#!/usr/bin/env bash
+printf '{"access_token":"gcp-tok-xyz","expires_in":3600}'
+SH
+    registry_init
+    run registry_resolve_creds europe-docker.pkg.dev/x/y:1.0 '[]' default 'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ "$output" = "oauth2accesstoken:gcp-tok-xyz" ]
+}
+
+@test "auth-mode alias: an unknown mode is still anonymous" {
+    cat > "$KEELSON_REGISTRIES_FILE" <<'YAML'
+registries:
+  ghcr.io:
+    auth-mode: not-a-mode
+YAML
+    registry_init
+    run registry_resolve_creds ghcr.io/x/y:1.0 '[]' default 'keelson.pro/credentials=central'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
