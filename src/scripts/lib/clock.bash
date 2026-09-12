@@ -65,6 +65,8 @@ clock_read() {
 #   1.5h  0.25h                fractional
 #   @every 10m  @every5m       robfig/cron's descriptor, Keel's documented form
 #   @hourly  @daily  @weekly   robfig/cron's fixed-length predefines
+#   @monthly @yearly          taken as 30d and 365d, see below
+#   @annually @midnight        robfig's synonyms for @yearly and @daily
 #
 # Units are ns/us/ms/s/m/h as Go has them, plus d, which Go does not; a Keel
 # user will never have written it, and it reads better than 24h.
@@ -78,10 +80,16 @@ clock_read() {
 # different problems with different fixes, so the caller decides what to do
 # about a zero rather than having a floor imposed here.
 #
-# Rejects @monthly, @yearly and raw cron expressions: those are calendar
-# positions rather than durations, and honouring them would mean a cron
-# implementation to serve the form Keel's own docs treat as the alternative
-# to the recommended one.
+# @monthly and @yearly have no fixed length as calendar positions, so they are
+# taken as 30d and 365d. That is a decision rather than a translation: a poll
+# cadence is not a calendar appointment, and nobody asking to be polled monthly
+# means "on the first, whatever that is in seconds". Reading them as the
+# obvious approximation beats refusing a value that sits in the same family as
+# the three above and looks every bit as supported.
+#
+# Raw cron expressions are still rejected: those really do address positions in
+# a calendar, and honouring them would mean a cron implementation to serve the
+# form Keel's own docs treat as the alternative to the recommended one.
 #
 # Fractions are scaled by the fraction's own digit count, which keeps this
 # integer-only and fork-free. It runs once per workload per pass, so a fork
@@ -100,6 +108,8 @@ clock_parse_duration() {
         '@hourly') CLOCK_DURATION=3600;   return 0 ;;
         '@daily'|'@midnight') CLOCK_DURATION=86400; return 0 ;;
         '@weekly') CLOCK_DURATION=604800; return 0 ;;
+        '@monthly') CLOCK_DURATION=2592000;  return 0 ;;
+        '@yearly'|'@annually') CLOCK_DURATION=31536000; return 0 ;;
         '@'*)      return 1 ;;
         *)         rest=$text ;;
     esac

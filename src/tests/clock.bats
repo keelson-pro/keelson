@@ -207,11 +207,6 @@ setup() {
     [ "$CLOCK_DURATION" = "604800" ]
 }
 
-@test "parse_duration: @monthly is rejected as calendar-based" {
-    run clock_parse_duration "@monthly"
-    [ "$status" -eq 1 ]
-}
-
 @test "parse_duration: a raw cron expression is rejected" {
     run clock_parse_duration "0 */6 * * *"
     [ "$status" -eq 1 ]
@@ -259,4 +254,19 @@ setup() {
 @test "parse_duration: an absurd duration is rejected, not wrapped" {
     run clock_parse_duration 9999999999999999999d
     [ "$status" -ne 0 ]
+}
+
+@test "parse_duration: @monthly is 30 days" {
+    clock_parse_duration @monthly
+    [ "$CLOCK_DURATION" = "2592000" ]
+}
+
+@test "parse_duration: @yearly is 365 days" {
+    clock_parse_duration @yearly
+    [ "$CLOCK_DURATION" = "31536000" ]
+}
+
+@test "parse_duration: @annually is a synonym for @yearly" {
+    clock_parse_duration @annually
+    [ "$CLOCK_DURATION" = "31536000" ]
 }
