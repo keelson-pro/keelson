@@ -85,6 +85,8 @@ set_required_env() {
     export KEELSON_POLL_OVERRUN_WARNING_BACKOFF_LIMIT=64
     export KEELSON_RECONCILE_OVERRUN_WARNING_BACKOFF_LIMIT=64
     export KEELSON_ROLLOUT_WORKLOAD_REF_WARNING_BACKOFF_LIMIT=64
+    export AWS_ECR_DISABLE_CACHE=
+    export AWS_ECR_CACHE_DIR=
     export KEELSON_TICK_INTERVAL=1
     export KEELSON_HEARTBEAT_MAX_AGE=5
     export KEELSON_WATCHER_RESPAWN_BACKOFF_MAX=300
@@ -753,4 +755,42 @@ YAML
     a_run emit validate_registries_auth_modes
     [ "$status" -ne 0 ]
     [[ "$output" == *"not supported"* ]]
+}
+
+# --- env vars that must exist but may legitimately be empty ---
+
+@test "env_defined: passes when the var is set but empty" {
+    export FOO=
+    v_run validate_env_defined FOO
+    [ "$status" -eq 0 ]
+}
+
+@test "env_defined: passes when the var has a value" {
+    export FOO=bar
+    v_run validate_env_defined FOO
+    [ "$status" -eq 0 ]
+}
+
+@test "env_defined: fails when the var is not defined at all" {
+    unset FOO
+    v_run emit validate_env_defined FOO
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FOO"* ]]
+}
+
+@test "validate_config: an undefined AWS_ECR_CACHE_DIR fails" {
+    set_required_env
+    install_required_binaries
+    unset AWS_ECR_CACHE_DIR
+    v_run emit validate_config
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"AWS_ECR_CACHE_DIR"* ]]
+}
+
+@test "validate_config: an empty AWS_ECR_CACHE_DIR is fine" {
+    set_required_env
+    install_required_binaries
+    export AWS_ECR_CACHE_DIR=
+    v_run emit validate_config
+    [ "$status" -eq 0 ]
 }

@@ -48,6 +48,22 @@ validate_env_positive_int() {
     esac
 }
 
+# validate_env_defined <name>
+# Passes when the variable exists, even empty; fails only when it is absent.
+#
+# For values that are legitimately empty but still have to be present, so a
+# variable missing from the Deployment is a broken deploy rather than a
+# default nobody chose. validate_env_set cannot express this: it treats empty
+# and absent alike, which is right for everything that needs a value.
+validate_env_defined() {
+    local name=$1
+    if [ -z "${!name+set}" ]; then
+        log_error validate-env-undefined var="$name" \
+            msg="Validation failed: env var '$name' is not defined. It may be empty, but it has to be present."
+        return 1
+    fi
+}
+
 validate_env_non_negative_int() {
     local name=$1 value=${!1:-}
     case "$value" in
@@ -471,6 +487,13 @@ validate_config() {
         validate_binary "$var" || errors=$((errors+1))
     done
     validate_yq_v4 || errors=$((errors+1))
+
+    # Defined rather than set: empty is the right value everywhere but AWS,
+    # and on AWS it is still the right default. Present either way, so the
+    # Deployment says what it chose instead of leaving the helper to guess.
+    for var in AWS_ECR_DISABLE_CACHE AWS_ECR_CACHE_DIR; do
+        validate_env_defined "$var" || errors=$((errors+1))
+    done
 
     validate_registries_keys || errors=$((errors+1))
     validate_registries_auth_modes || errors=$((errors+1))
