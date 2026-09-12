@@ -10,15 +10,25 @@
 #   skopeo, yq, kubectl, base64, curl, docker-credential-ecr-login
 #
 # Credential resolution per workload's keelson.pro/credentials annotation
-# (default "respect-pod"):
-#   respect-pod   - walk the workload's imagePullSecrets first; fall through
-#                   to the central path if none cover the registry.
-#                   When KEELSON_RESPECT_SA_PULL_SECRETS=true, also walks the
-#                   workload's ServiceAccount imagePullSecrets between the
-#                   pod-spec walk and the central fall-through (matches what
-#                   the kubelet sees post-admission).
-#   central       - skip pod creds; go straight to central.
+# (default "central-then-pod-spec"):
+#   central-then-pod-spec - the central config first, falling back to the
+#                   workload's own imagePullSecrets. Central first because a
+#                   host the operator has configured then costs no Secret
+#                   read per workload at all, and because the operator's
+#                   credential is the one they can reason about.
+#   central       - central only, no fallback.
 #   ignore-pod    - synonym for "central".
+#   respect-pod-spec - the workload's own credentials only; central is never
+#                   consulted. For a registry where the team's token is the
+#                   only one that works.
+#
+# Wherever the pod spec is consulted, the workload's ServiceAccount
+# imagePullSecrets are walked after it when KEELSON_RESPECT_SA_PULL_SECRETS
+# is true, matching what the kubelet sees post-admission.
+#
+# A credential that resolves is not a credential that works, so the scan
+# tries each source against the registry in turn rather than committing to
+# the first one that answers.
 #
 # Central path consults the keelson-registries config at
 # /configmap/registries.yaml (mounted from the keelson ConfigMap). The file is
@@ -193,21 +203,30 @@ registry_config_for_host() {
 registry_creds_source_order() {
     local ann=$1 container=${2:-} mode
     annotation_get "$ann" credentials "$container"
-    mode=${ANNOTATION_VALUE:-respect-pod}
+    mode=${ANNOTATION_VALUE:-central-then-pod-spec}
     REGISTRY_CREDS_SOURCES=()
     case "$mode" in
-        respect-pod)
-            REGISTRY_CREDS_SOURCES=(pod)
-            if [ "${KEELSON_RESPECT_SA_PULL_SECRETS:?KEELSON_RESPECT_SA_PULL_SECRETS required}" = "true" ]; then
-                REGISTRY_CREDS_SOURCES+=(sa)
-            fi
-            REGISTRY_CREDS_SOURCES+=(central)
+        central-then-pod-spec)
+            REGISTRY_CREDS_SOURCES=(central pod)
             ;;
         central|ignore-pod)
             REGISTRY_CREDS_SOURCES=(central)
             ;;
+        respect-pod-spec)
+            REGISTRY_CREDS_SOURCES=(pod)
+            ;;
         *)
             return 2
+            ;;
+    esac
+    # The ServiceAccount walk is part of "what the workload has", so it
+    # follows the pod spec wherever the pod spec appears and is absent where
+    # it does not. Gated on the same switch as ever, since it costs a get.
+    case " ${REGISTRY_CREDS_SOURCES[*]} " in
+        *" pod "*)
+            if [ "${KEELSON_RESPECT_SA_PULL_SECRETS:?KEELSON_RESPECT_SA_PULL_SECRETS required}" = "true" ]; then
+                REGISTRY_CREDS_SOURCES+=(sa)
+            fi
             ;;
     esac
 }
