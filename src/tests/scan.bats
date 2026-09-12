@@ -2530,3 +2530,170 @@ SH
     [[ "$output" != *'"error":"1"'* ]]
     [[ "$output" == *"would-update"* ]]
 }
+
+# --- image volumes (spec.volumes[].image.reference) ---
+
+image_volume_json() {
+    local ref=$1 policy=${2:-minor} gate=${3:-true}
+    cat <<JSON
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {"keelson.pro/policy": "$policy", "keelson.pro/imageVolumes": "$gate"}
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [{"name": "main", "image": "ghcr.io/x/y:9.9.9"}],
+            "volumes": [
+              {"name": "conf", "configMap": {"name": "c"}},
+              {"name": "art", "image": {"reference": "$ref"}}
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+}
+
+@test "image volume: a newer reference is a would-update" {
+    kubectl_returns "$(image_volume_json ghcr.io/x/y:1.2.3)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.2.4"]}'
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"container":"art"'* ]]
+    [[ "$output" == *"dry-run-would-update"* ]]
+}
+
+@test "image volume: a non-image volume is ignored" {
+    kubectl_returns "$(image_volume_json ghcr.io/x/y:1.2.3)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.2.4"]}'
+SH
+    run emit scan_run 0
+    [[ "$output" != *'"container":"conf"'* ]]
+}
+
+@test "image volume: policy.volumes wins over the workload-wide policy" {
+    kubectl_returns "$(cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "never",
+          "keelson.pro/imageVolumes": "true",
+          "keelson.pro/policy.volumes.art": "minor"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "volumes": [{"name": "art", "image": {"reference": "ghcr.io/x/y:1.2.3"}}]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.2.4"]}'
+SH
+    run emit scan_run 0
+    [[ "$output" == *"dry-run-would-update"* ]]
+}
+
+@test "image volume: monitorContainers does not filter volumes" {
+    kubectl_returns "$(cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "minor",
+          "keelson.pro/imageVolumes": "true",
+          "keelson.pro/monitorContainers": "^nothing$"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "volumes": [{"name": "art", "image": {"reference": "ghcr.io/x/y:1.2.3"}}]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.2.4"]}'
+SH
+    run emit scan_run 0
+    [[ "$output" == *"dry-run-would-update"* ]]
+}
+
+@test "image volume: monitorVolumes selects which volumes are watched" {
+    kubectl_returns "$(cat <<'JSON'
+{
+  "items": [
+    {
+      "metadata": {
+        "namespace": "default",
+        "name": "app",
+        "annotations": {
+          "keelson.pro/policy": "minor",
+          "keelson.pro/imageVolumes": "true",
+          "keelson.pro/monitorVolumes": "^nothing$"
+        }
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "volumes": [{"name": "art", "image": {"reference": "ghcr.io/x/y:1.2.3"}}]
+          }
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.2.4"]}'
+SH
+    run emit scan_run 0
+    [[ "$output" != *"dry-run-would-update"* ]]
+    [[ "$output" == *"skip-not-monitored"* ]]
+}
+
+@test "image volume: ignored until imageVolumes opts in" {
+    kubectl_returns "$(image_volume_json ghcr.io/x/y:1.2.3 minor false)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.2.4"]}'
+SH
+    run emit scan_run 0
+    [[ "$output" == *'"event":"skip-not-monitored"'* ]]
+    [[ "$output" == *'"list":"imageVolumes"'* ]]
+    [[ "$output" != *"dry-run-would-update"* ]]
+}

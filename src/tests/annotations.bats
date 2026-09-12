@@ -366,3 +366,39 @@ keel.sh/pollSchedule=15m' policy
     KEELSON_CONFIG_MODE=junk annotation_get "$BOTH_LINES" policy || rc=$?
     [ "$rc" -eq 2 ]
 }
+
+# --- target kinds: containers and image volumes share the key vocabulary ---
+
+@test "target kind: defaults to containers when not given" {
+    local lines='keelson.pro/policy=minor
+keelson.pro/policy.containers.web=major'
+    annotation_get "$lines" policy web
+    [ "$ANNOTATION_VALUE" = "major" ]
+}
+
+@test "target kind: volumes addresses the volumes sub-namespace" {
+    local lines='keelson.pro/policy=minor
+keelson.pro/policy.volumes.image-vol=major'
+    annotation_get "$lines" policy image-vol volumes
+    [ "$ANNOTATION_VALUE" = "major" ]
+}
+
+@test "target kind: a volume does not pick up a container of the same name" {
+    local lines='keelson.pro/policy=minor
+keelson.pro/policy.containers.app=patch'
+    annotation_get "$lines" policy app volumes
+    [ "$ANNOTATION_VALUE" = "minor" ]
+}
+
+@test "target kind: a container does not pick up a volume of the same name" {
+    local lines='keelson.pro/policy=minor
+keelson.pro/policy.volumes.app=patch'
+    annotation_get "$lines" policy app containers
+    [ "$ANNOTATION_VALUE" = "minor" ]
+}
+
+@test "target kind: volumes falls back to the workload-wide key" {
+    local lines='keelson.pro/policy=minor'
+    annotation_get "$lines" policy image-vol volumes
+    [ "$ANNOTATION_VALUE" = "minor" ]
+}

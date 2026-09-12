@@ -387,6 +387,8 @@ scan_extract_kind() {
             | \"container=containers \" + .name + \"=\" + .image),
         (\$w${base}.initContainers // [] | .[]
             | \"container=initContainers \" + .name + \"=\" + .image),
+        (\$w${base}.volumes // [] | .[] | select(.image.reference != null)
+            | \"container=imageVolumes \" + .name + \"=\" + .image.reference),
         \"annotations=\",
         (\$w.metadata.annotations // {} | to_entries | .[]
             | select(.key | test(\"^(keelson\\.pro|keel\\.sh)/\"))
@@ -724,7 +726,26 @@ scan_container_monitored() {
         [ "$want" = "true" ] || return 1
     fi
 
-    annotation_get "$ann" monitorContainers
+    # Image volumes are opt-in on the same terms, and for the same reason: a
+    # workload that has always had one has never had Keelson touch it, and
+    # switching that on by upgrading is not a decision Keelson gets to make.
+    if [ "$clist" = "imageVolumes" ]; then
+        annotation_get "$ann" imageVolumes
+        want=$ANNOTATION_VALUE
+        [ "$want" = "true" ] || return 1
+    fi
+
+    # Volumes have their own selector. A regular expression written to pick
+    # containers has no business deciding which image volumes are watched,
+    # and a workload with both would otherwise need one pattern covering two
+    # unrelated sets of names.
+    local key=monitorContainers noun=container
+    if [ "$clist" = "imageVolumes" ]; then
+        key=monitorVolumes
+        noun=volume
+    fi
+
+    annotation_get "$ann" "$key"
     re=$ANNOTATION_VALUE
     [ -n "$re" ] || return 0
     case "$re" in REJECT:*) return 1 ;; esac
@@ -737,7 +758,7 @@ scan_container_monitored() {
     if [ "$rc" -gt 1 ]; then
         log_error annotation-monitor-containers-invalid pattern="$re" \
             container="$cname" \
-            msg="monitorContainers pattern '$re' is not a usable regular expression; no container is monitored until it is fixed."
+            msg="$key pattern '$re' is not a usable regular expression; no $noun is monitored until it is fixed."
     fi
     return 1
 }
@@ -781,6 +802,12 @@ scan_container() {
     local kind=$1 ns=$2 name=$3 clist=$4 cname=$5 cimage=$6 ann=$7 ips_json=$8 \
           mf_json=${9:-} sa_name=${10:-}
 
+    # Which sub-namespace this target's annotations live in. A pod may hold a
+    # container and an image volume of the same name, so the name alone
+    # cannot say which one an annotation is addressing.
+    local atarget=containers
+    [ "$clist" = "imageVolumes" ] && atarget=volumes
+
     if ! scan_container_monitored "$ann" "$clist" "$cname"; then
         log_debug skip-not-monitored \
             kind="$kind" ns="$ns" name="$name" container="$cname" list="$clist" \
@@ -790,7 +817,7 @@ scan_container() {
     fi
 
     local result
-    eligibility_check "$ann" "$cimage" "$cname" || true
+    eligibility_check "$ann" "$cimage" "$cname" "$atarget" || true
     result=$ELIGIBILITY_RESULT
     case "$result" in
         SKIP\ *)
@@ -871,9 +898,9 @@ scan_container() {
     fi
 
     local match_tag match_mode current_tag winner candidate
-    annotation_get "$ann" matchTag "$cname"
+    annotation_get "$ann" matchTag "$cname" "$atarget"
     match_tag=$ANNOTATION_VALUE
-    annotation_get "$ann" matchMode "$cname"
+    annotation_get "$ann" matchMode "$cname" "$atarget"
     match_mode=$ANNOTATION_VALUE
     match_mode=${match_mode:-glob}
     image_tag "$cimage"

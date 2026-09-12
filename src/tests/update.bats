@@ -510,3 +510,25 @@ SH
     [[ "$output" == *'"strategy":"patch"'* ]]
     [[ "$output" == *'"operation":"Apply"'* ]]
 }
+
+# --- image volumes: spec.volumes[].image.reference ---
+
+@test "patch_json: an image volume nests the reference under image" {
+    run update_patch_json Deployment imageVolumes vol ghcr.io/x/y:1.2.4
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"spec":{"template":{"spec":{"volumes":[{"name":"vol","image":{"reference":"ghcr.io/x/y:1.2.4"}}]}}}}' ]
+}
+
+@test "patch_json: a CronJob image volume nests under jobTemplate too" {
+    run update_patch_json CronJob imageVolumes vol ghcr.io/x/y:1.2.4
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"volumes":[{"name":"vol","image":{"reference":"ghcr.io/x/y:1.2.4"}}]}}}}}}' ]
+}
+
+@test "minimal_manifest: an image volume claims volumes, not containers" {
+    run update_minimal_manifest Deployment default app imageVolumes vol ghcr.io/x/y:1.2.4
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"volumes:"* ]]
+    [[ "$output" == *"reference: ghcr.io/x/y:1.2.4"* ]]
+    [[ "$output" != *"containers:"* ]]
+}

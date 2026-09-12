@@ -38,10 +38,10 @@ ELIGIBILITY_RESULT=
 #   tag-has-non-numeric-segment
 #   policy-position-incompatible-with-tag   (e.g. "minor" on a 4-segment tag)
 eligibility_check() {
-    local annotations=$1 image=$2 container=${3:-}
+    local annotations=$1 image=$2 container=${3:-} target_kind=${4:-containers}
 
     local policy
-    annotation_get "$annotations" policy "$container"
+    annotation_get "$annotations" policy "$container" "$target_kind"
     policy=$ANNOTATION_VALUE
     if [ -z "$policy" ]; then
         ELIGIBILITY_RESULT='SKIP no-policy-annotation'

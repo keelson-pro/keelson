@@ -350,3 +350,19 @@ JSON
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
+
+# --- image volumes own a field one level deeper ---
+
+@test "apply_owner: an image volume owner is found under f:volumes" {
+    local mf='[{"manager":"argocd-application-controller","operation":"Apply","time":"2026-04-01T10:00:00Z","fieldsV1":{"f:spec":{"f:template":{"f:spec":{"f:volumes":{"k:{\"name\":\"vol\"}":{"f:image":{"f:reference":{}}}}}}}}}]'
+    run managedfields_apply_owner_of_image "$mf" imageVolumes vol
+    [ "$status" -eq 0 ]
+    [ "$output" = "argocd-application-controller" ]
+}
+
+@test "apply_owner: a container owner is not matched for a volume of that name" {
+    local mf='[{"manager":"argocd-application-controller","operation":"Apply","time":"2026-04-01T10:00:00Z","fieldsV1":{"f:spec":{"f:template":{"f:spec":{"f:containers":{"k:{\"name\":\"vol\"}":{"f:image":{}}}}}}}}]'
+    run managedfields_apply_owner_of_image "$mf" imageVolumes vol
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}

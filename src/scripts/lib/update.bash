@@ -53,6 +53,24 @@
 # unsupported kinds.
 update_patch_json() {
     local kind=$1 clist=$2 container=$3 image=$4
+    # An image volume lives in spec.volumes rather than in a container list,
+    # and holds its reference a level deeper, so it needs its own shape
+    # rather than a different key in the container one.
+    if [ "$clist" = "imageVolumes" ]; then
+        case "$kind" in
+            CronJob)
+                printf '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"volumes":[{"name":"%s","image":{"reference":"%s"}}]}}}}}}' \
+                    "$container" "$image"
+                return 0
+                ;;
+            Deployment|StatefulSet|DaemonSet|Rollout)
+                printf '{"spec":{"template":{"spec":{"volumes":[{"name":"%s","image":{"reference":"%s"}}]}}}}' \
+                    "$container" "$image"
+                return 0
+                ;;
+            *) return 1 ;;
+        esac
+    fi
     case "$kind" in
         CronJob)
             printf '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"%s":[{"name":"%s","image":"%s"}]}}}}}}' \
@@ -87,6 +105,30 @@ update_minimal_manifest() {
     local kind=$1 ns=$2 name=$3 clist=$4 container=$5 image=$6
     local av
     av=$(update_apiversion "$kind") || return 1
+    if [ "$clist" = "imageVolumes" ]; then
+        local indent="  " prefix=""
+        if [ "$kind" = "CronJob" ]; then
+            indent="          "
+            prefix="  jobTemplate:
+    spec:
+      template:"
+        fi
+        cat <<EOF
+apiVersion: $av
+kind: $kind
+metadata:
+  name: $name
+  namespace: $ns
+spec:
+${prefix:+$prefix
+}${indent}spec:
+${indent}  volumes:
+${indent}  - name: $container
+${indent}    image:
+${indent}      reference: $image
+EOF
+        return 0
+    fi
     case "$kind" in
         CronJob)
             cat <<EOF

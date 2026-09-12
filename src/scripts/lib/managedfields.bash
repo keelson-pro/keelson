@@ -41,7 +41,14 @@ managedfields_apply_owner_of_image() {
     local mf_json=$1 clist=${2:-containers} container=$3
     [ -z "$mf_json" ] && return 0
 
-    local key='["k:{\"name\":\"'"$container"'\"}"]["f:image"]'
+    # An image volume is not in a container list and holds its reference a
+    # level deeper, so both the list name and the leaf differ.
+    local field='["f:image"]'
+    if [ "$clist" = "imageVolumes" ]; then
+        clist=volumes
+        field='["f:image"]["f:reference"]'
+    fi
+    local key='["k:{\"name\":\"'"$container"'\"}"]'"$field"
     local p1='.fieldsV1["f:spec"]["f:template"]["f:spec"]["f:'"$clist"'"]'"$key"
     local p2='.fieldsV1["f:spec"]["f:jobTemplate"]["f:spec"]["f:template"]["f:spec"]["f:'"$clist"'"]'"$key"
 

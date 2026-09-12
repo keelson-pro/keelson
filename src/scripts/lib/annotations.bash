@@ -22,8 +22,11 @@ ANNOTATION_RAW=
 ANNOTATION_KEEL_KEY=
 ANNOTATION_ALT_KEY=
 
-# annotation_get <annotation-lines> <logical-key> [<container-name>]
+# annotation_get <annotation-lines> <logical-key> [<name>] [<target-kind>]
 #                -> ANNOTATION_VALUE
+# <target-kind> is "containers" (the default) or "volumes", naming which kind
+# of thing <name> refers to. A pod may hold a container and an image volume
+# of the same name, so the name alone cannot say which is meant.
 # Empty if absent or rejected.
 # When <container-name> is non-empty, the per-container key
 # (e.g. keelson.pro/<key>.containers.<container>) wins over the workload-wide
@@ -41,7 +44,7 @@ ANNOTATION_ALT_KEY=
 #                                      be running, and two controllers writing
 #                                      one image field is worse than neither.
 annotation_get() {
-    local lines=$1 key=$2 container=${3:-}
+    local lines=$1 key=$2 container=${3:-} target_kind=${4:-containers}
     local mode=${KEELSON_CONFIG_MODE:?KEELSON_CONFIG_MODE required}
 
     case "$mode" in
@@ -64,8 +67,8 @@ annotation_get() {
     alt=$ANNOTATION_ALT_KEY
 
     if [ -n "$container" ]; then
-        annotation_pick "$lines" "keelson.pro/$key.containers.$container" \
-            "${alt:+keelson.pro/$alt.containers.$container}"
+        annotation_pick "$lines" "keelson.pro/$key.$target_kind.$container" \
+            "${alt:+keelson.pro/$alt.$target_kind.$container}"
         keelson_val=$ANNOTATION_RAW
     fi
     if [ -z "$keelson_val" ]; then
@@ -80,8 +83,8 @@ annotation_get() {
         annotation_alt_key "$keel_key"
         alt=$ANNOTATION_ALT_KEY
         if [ -n "$container" ]; then
-            annotation_pick "$lines" "keel.sh/$keel_key.containers.$container" \
-                "${alt:+keel.sh/$alt.containers.$container}"
+            annotation_pick "$lines" "keel.sh/$keel_key.$target_kind.$container" \
+                "${alt:+keel.sh/$alt.$target_kind.$container}"
             keel_val=$ANNOTATION_RAW
         fi
         if [ -z "$keel_val" ]; then
@@ -180,7 +183,9 @@ annotation_keel_key() {
         pollSchedule) ANNOTATION_KEEL_KEY='pollSchedule' ;;
         matchTag)     ANNOTATION_KEEL_KEY='matchTag' ;;
         initContainers)    ANNOTATION_KEEL_KEY='initContainers' ;;
+        imageVolumes)      ANNOTATION_KEEL_KEY='imageVolumes' ;;
         monitorContainers) ANNOTATION_KEEL_KEY='monitorContainers' ;;
+        monitorVolumes)    ANNOTATION_KEEL_KEY='monitorVolumes' ;;
         notify)       ANNOTATION_KEEL_KEY='notify' ;;
         *)            ANNOTATION_KEEL_KEY= ;;
     esac

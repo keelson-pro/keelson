@@ -258,7 +258,9 @@ Annotations live on the workload's `metadata.annotations`. Under the default `KE
 | `pollSchedule` | `poll-schedule` |
 | `triggerJobOnUpdate` | `trigger-job-on-update` |
 | `initContainers` | `true`, `false` | Whether init containers are in scope. **Defaults to `false`** in every config mode, as keel does. Anything but a literal `true` leaves them out, so a rejected or mistyped value fails closed rather than quietly enabling them. Once in scope an init container is updated like any other, and one left a release behind the app container it prepares is the skew this exists to prevent — so turn it on for workloads where that matters. |
-| `monitorContainers` | regular expression | Restrict updates to containers whose **name** matches. Empty means all, which is keel's shape and default. Applies to init containers too, when they are in scope. A pattern that is not a usable regular expression is an error and nothing is monitored until it is fixed — falling back to "monitor everything" would turn a typo into an estate-wide update. Distinct from scoping `policy.containers.<container>`, which addresses one container by name; use whichever reads better. |
+| `imageVolumes` | `true`, `false` | Whether OCI image volumes (`spec.volumes[].image.reference`) are in scope. **Defaults to `false`** in every config mode, as keel does, and fails closed on anything but a literal `true`. A workload that has always had an image volume has never had Keelson touch it, so switching that on is the operator's call rather than an upgrade's. Keel accepts this as a label as well as an annotation; Keelson reads annotations only. |
+| `monitorVolumes` | regular expression | Restrict updates to image volumes whose **name** matches, the volume counterpart of `monitorContainers`. Empty means all. The two are separate because a pattern written to pick containers has no business deciding which volumes are watched. |
+| `monitorContainers` | regular expression | Restrict updates to containers whose **name** matches. Empty means all, which is keel's shape and default. Applies to init containers too, when they are in scope, but never to image volumes: those have `monitorVolumes`. A pattern that is not a usable regular expression is an error and nothing is monitored until it is fixed — falling back to "monitor everything" would turn a typo into an estate-wide update. Distinct from scoping `policy.containers.<container>`, which addresses one container by name; use whichever reads better. |
 | `fieldManagerStrategy` | `field-manager-strategy` |
 
 Setting **both spellings of the same key to the same value** logs a warning naming the older one, and Keelson carries on. Setting them to **different values** is an error and the workload is not managed — whichever Keelson picked would be somebody's surprise, so it picks neither. Both checks apply per scope, so a `.containers.<container>` pair is caught the same way, and a container-suffixed key still beats a workload-wide one.
@@ -291,7 +293,7 @@ metadata:
     keelson.pro/matchMode.containers.db: regex        # matchTag is a glob unless you say this
 ```
 
-The container-suffixed key wins when present; otherwise Keelson falls back to the workload-wide key. The same precedence applies under `KEELSON_CONFIG_MODE=keel` with `keel.sh/policy.containers.<container>`. The target kind is named in the key rather than left to be inferred from the suffix, so a container and an image volume that happen to share a name never address each other.
+The container-suffixed key wins when present; otherwise Keelson falls back to the workload-wide key. The same precedence applies under `KEELSON_CONFIG_MODE=keel` with `keel.sh/policy.containers.<container>`. The target kind is named in the key rather than left to be inferred from the suffix, so a container and an image volume that happen to share a name never address each other: `policy.containers.<name>` addresses a container or init container, `policy.volumes.<name>` addresses an image volume, and every key in the table works both ways.
 
 ### Init containers
 
@@ -325,11 +327,6 @@ moved elsewhere — usually to the GitOps or CI layer where it belongs.
 - **`keel.sh/approvals`, `keel.sh/approvalDeadline`** — Keel's in-controller
   approval workflow. Drive approvals from your CI/CD or chat platform; Keelson
   applies eligible updates immediately.
-- **`keel.sh/imageVolumes`** — track OCI image volume references
-  (`spec.volumes[].image.reference`). Keel defaults this to false and Keelson
-  does not read image volumes at all, so an opted-in workload loses that
-  tracking. `keel.sh/initContainers` and `keel.sh/monitorContainers` **are**
-  honoured, with keel's defaults — see the table above.
 - **`keel.sh/matchPreRelease`** — when comparing semver tags, require the new
   tag's pre-release identifier to match the current one, so `1.2.0-rc1` only
   moves to another `-rc` build. Keel defaults it to `true` and ignores it under
