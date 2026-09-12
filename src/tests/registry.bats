@@ -851,3 +851,47 @@ YAML
     run registry_resolve_creds ghcr.io/x/y:1.0 '[]' default 'keelson.pro/credentials=respect-pod'
     [ "$status" -eq 2 ]
 }
+
+# --- central credential cache ---
+#
+# The poll child forks one grandchild per workload, so anything resolved
+# inside a grandchild dies with it. Priming before the fan-out is the only
+# point at which the work is shared.
+
+@test "creds cache: priming resolves the configured registries once" {
+    write_central_ghcr
+    kubectl_named_secrets
+    registry_prime_central_creds
+    [ "${_REGISTRY_CREDS_CACHE[ghcr.io]}" = "central:cw" ]
+}
+
+@test "creds cache: a primed host needs no further kubectl call" {
+    write_central_ghcr
+    kubectl_named_secrets
+    registry_prime_central_creds
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+echo "kubectl should not have been called for a primed host" >&2
+exit 99
+SH
+    run registry_creds_from_source central ghcr.io '[]' default
+    [ "$status" -eq 0 ]
+    [ "$output" = "central:cw" ]
+}
+
+@test "creds cache: an unprimed host still resolves the slow way" {
+    write_central_ghcr
+    kubectl_named_secrets
+    run registry_creds_from_source central ghcr.io '[]' default
+    [ "$status" -eq 0 ]
+    [ "$output" = "central:cw" ]
+}
+
+@test "creds cache: the pod spec is never served from the central cache" {
+    write_central_ghcr
+    kubectl_named_secrets
+    registry_prime_central_creds
+    run registry_creds_from_source pod ghcr.io '[{"name":"pod-secret"}]' default
+    [ "$status" -eq 0 ]
+    [ "$output" = "pod:pw" ]
+}

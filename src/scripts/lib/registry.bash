@@ -57,6 +57,11 @@ declare -g _REGISTRY_OWN_NAMESPACE=""
 declare -g REGISTRY_LAST_ERROR=""
 # Credential sources to try, in order, set by registry_creds_source_order.
 declare -ga REGISTRY_CREDS_SOURCES=()
+# Central credentials by host, filled by registry_prime_central_creds before
+# a poll fans out. Read-only afterwards: every consumer runs inside a command
+# substitution or a forked child, so a write made there is thrown away and
+# would only look like caching without being it.
+declare -gA _REGISTRY_CREDS_CACHE=()
 
 # Default mount location for the keelson ConfigMap, matching validate.bash so
 # an operator's override survives whichever lib is sourced last. A bare
@@ -241,9 +246,40 @@ registry_creds_from_source() {
         pod)     registry_creds_from_pull_secrets "$ips_json" "$ns" "$host" ;;
         sa)      [ -n "$sa" ] || return 1
                  registry_creds_from_sa "$sa" "$ns" "$host" ;;
-        central) registry_creds_central "$host" ;;
+        central)
+            if [ -n "${_REGISTRY_CREDS_CACHE[$host]:-}" ]; then
+                printf '%s' "${_REGISTRY_CREDS_CACHE[$host]}"
+                return 0
+            fi
+            registry_creds_central "$host"
+            ;;
         *)       return 1 ;;
     esac
+}
+
+# registry_prime_central_creds
+# Resolves the central credential for every configured registry, once, so the
+# per-workload path is an array read rather than a Secret read or a token
+# fetch. Every configured host, not just the ones due: the list is small, and
+# working out which hosts this pass needs would cost a read of every due
+# workload to save a handful of lookups.
+#
+# Called before a poll fans out, because the children are forked subshells
+# that inherit this by copy. Populated inside one of them it would die with
+# the child, which is why nothing below the fan-out writes to the cache.
+#
+# Deliberately silent. A host that cannot be resolved is left out and takes
+# the slow path, where the workload that actually needed it reports the
+# failure with the workload named. A line here would be about a registry
+# nobody may be polling.
+registry_prime_central_creds() {
+    local host creds
+    for host in "${!_REGISTRY_CONFIG_CACHE[@]}"; do
+        if creds=$(registry_creds_central "$host" 2>/dev/null) && [ -n "$creds" ]; then
+            _REGISTRY_CREDS_CACHE["$host"]=$creds
+        fi
+    done
+    return 0
 }
 
 # registry_resolve_creds <image-ref> <imagePullSecrets-json> <namespace> <annotation-lines> [<service-account-name>] [<container-name>]

@@ -1177,6 +1177,9 @@ scan_poll_due() {
           _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0 \
           _scan_min_interval=0
     registry_init
+    # Before the fan-out, so every child inherits the resolved credentials
+    # rather than each one paying for its own Secret read or token fetch.
+    registry_prime_central_creds
 
     clock_read
     local start_us=$CLOCK_NOW_US
