@@ -359,7 +359,7 @@ printf '{"Tags":["1.2.3","1.3.0"]}'
 SH
     run emit scan_run 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Deployment 'app' in 'default' updated from 1.2.3 to 1.3.0 for image 'ghcr.io/x/y'"* ]]
+    [[ "$output" == *"Deployment 'app' in 'default' updated from 1.2.3 to 1.3.0 by patch (as configured) for image 'ghcr.io/x/y'"* ]]
     [[ "$output" == *'"updated":"1"'* ]]
     [[ "$output" == *'"would-update":"0"'* ]]
 }
@@ -400,7 +400,7 @@ printf '{"Tags":["1.2.3","1.3.0"]}'
 SH
     KEELSON_WATCHED_KINDS=CronJob run emit scan_run 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"CronJob 'cron' in 'default' updated from 1.2.3 to 1.3.0 for image 'ghcr.io/x/y'"* ]]
+    [[ "$output" == *"CronJob 'cron' in 'default' updated from 1.2.3 to 1.3.0 by patch (as configured) for image 'ghcr.io/x/y'"* ]]
     [[ "$output" =~ Job\ \'cron-[0-9]+\'\ created\ from\ CronJob\ \'cron\'\ in\ \'default\'\ with\ update\ from\ 1.2.3\ to\ 1.3.0\ for\ image\ \'ghcr.io/x/y\' ]]
     grep -q "create job" "$TMP_DIR/kubectl.log"
     grep -q -- "--from=cronjob/cron" "$TMP_DIR/kubectl.log"
@@ -414,7 +414,7 @@ printf '{"Tags":["1.2.3","1.3.0"]}'
 SH
     KEELSON_WATCHED_KINDS=CronJob run emit scan_run 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"CronJob 'cron' in 'default' updated from 1.2.3 to 1.3.0 for image 'ghcr.io/x/y'"* ]]
+    [[ "$output" == *"CronJob 'cron' in 'default' updated from 1.2.3 to 1.3.0 by patch (as configured) for image 'ghcr.io/x/y'"* ]]
     [[ "$output" != *"created from CronJob"* ]]
     ! grep -q "create job" "$TMP_DIR/kubectl.log" 2>/dev/null || false
 }

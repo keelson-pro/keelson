@@ -118,7 +118,7 @@ exit 0
 SH
     run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Deployment 'app' in 'default' updated from 1.2.3 to 1.2.4 for image 'ghcr.io/x/y'"* ]]
+    [[ "$output" == *"Deployment 'app' in 'default' updated from 1.2.3 to 1.2.4 by patch (as configured) for image 'ghcr.io/x/y'."* ]]
 }
 
 @test "update_apply: JSON output includes strategy kv" {
@@ -187,6 +187,7 @@ SH
     [[ "$output" == *'"manager":"argocd-application-controller"'* ]]
     [[ "$output" == *'"operation":"Apply"'* ]]
     [[ "$output" == *'"strategy":"mimic"'* ]]
+    [[ "$output" == *"updated from 1.2.3 to 1.2.4 by mimic (as configured) for image 'ghcr.io/x/y'."* ]]
     grep -q -- "apply --server-side" "$TMP_DIR/kubectl.log"
     grep -q -- "--field-manager=argocd-application-controller" "$TMP_DIR/kubectl.log"
     ! grep -q -- "--force-conflicts" "$TMP_DIR/kubectl.log"
@@ -373,7 +374,7 @@ exit 0
 SH
     run emit update_apply CronJob batch nightly containers worker ghcr.io/acme/n:1.4.3 1.4.2
     [ "$status" -eq 0 ]
-    [[ "$output" == *"CronJob 'nightly' in 'batch' updated from 1.4.2 to 1.4.3 for image 'ghcr.io/acme/n'"* ]]
+    [[ "$output" == *"CronJob 'nightly' in 'batch' updated from 1.4.2 to 1.4.3 by patch (as configured) for image 'ghcr.io/acme/n'"* ]]
 }
 
 @test "update_apply: kubectl failure logs update-failed and returns 1" {
@@ -474,6 +475,7 @@ exit 0
 SH
     run emit update_apply Rollout default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -eq 0 ]
+    [[ "$output" == *"Rollout 'app' in 'default' updated from 1.2.3 to 1.2.4 by claim (fallback from patch) for image 'ghcr.io/x/y'."* ]]
     grep -q -- "--server-side" "$TMP_DIR/kubectl.log"
     ! grep -q -- "--type=strategic" "$TMP_DIR/kubectl.log"
 }

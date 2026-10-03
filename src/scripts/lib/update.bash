@@ -273,7 +273,7 @@ update_apply() {
                 # the write was made is already on the line: operation=Apply
                 # rather than operation=Update.
                 update_apply_ssa "$kind" "$ns" "$name" "$clist" "$container" "$image" \
-                    keelson "$from_tag" patch
+                    keelson "$from_tag" patch "claim (fallback from patch)"
             fi
             ;;
         claim)
@@ -318,7 +318,7 @@ update_apply_patch() {
             kind="$kind" ns="$ns" name="$name" container="$container" \
             image="$image" from="$from_tag" to="$to_tag" repo="$repo" \
             manager="$manager" operation=Update strategy="$strategy" \
-            msg="$kind '$name' in '$ns' updated from $from_tag to $to_tag for image '$repo'."
+            msg="$kind '$name' in '$ns' updated from $from_tag to $to_tag by $strategy (as configured) for image '$repo'."
         return 0
     fi
     if [ -r "$tmperr" ] && [ "$tmperr" != "/dev/null" ]; then
@@ -343,9 +343,12 @@ update_apply_patch() {
     return 1
 }
 
+# update_apply_ssa <kind> <ns> <name> <list> <container> <image> <manager> <from-tag> <strategy> [<method>]
+# <method> is how the success line describes the write, when that is not the
+# configured strategy itself.
 update_apply_ssa() {
     local kind=$1 ns=$2 name=$3 clist=$4 container=$5 image=$6 manager=$7 \
-          from_tag=$8 strategy=$9
+          from_tag=$8 strategy=$9 method=${10:-"$9 (as configured)"}
     local to_tag=${image##*:} repo=${image%:*}
     local manifest tmperr detail="" reason=""
     if ! manifest=$(update_minimal_manifest "$kind" "$ns" "$name" "$clist" "$container" "$image"); then
@@ -361,7 +364,7 @@ update_apply_ssa() {
             kind="$kind" ns="$ns" name="$name" container="$container" \
             image="$image" from="$from_tag" to="$to_tag" repo="$repo" \
             manager="$manager" operation=Apply strategy="$strategy" \
-            msg="$kind '$name' in '$ns' updated from $from_tag to $to_tag for image '$repo'."
+            msg="$kind '$name' in '$ns' updated from $from_tag to $to_tag by $method for image '$repo'."
         return 0
     fi
     if [ -r "$tmperr" ] && [ "$tmperr" != "/dev/null" ]; then
