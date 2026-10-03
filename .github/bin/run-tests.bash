@@ -49,6 +49,9 @@ if ! command -v shellcheck >/dev/null 2>&1; then
 fi
 shellcheck --shell=bash --external-sources --source-path=SCRIPTDIR "${SHELL_SCRIPTS[@]}"
 
+printf '== bats assertions that can never fail ==\n'
+"${REPO_ROOT}/.github/bin/lint-tests.bash"
+
 printf '== bats (src/tests/) ==\n'
 # Each test clears its own directory on the way in, so a rerun is already
 # clean per test. Clearing the root as well drops what a renamed or deleted
