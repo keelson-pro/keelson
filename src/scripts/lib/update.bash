@@ -387,7 +387,7 @@ update_apply_ssa() {
                 kind="$kind" ns="$ns" name="$name" container="$container" \
                 image="$image" manager="$manager" operation=Apply \
                 strategy="$strategy" reason="$reason" \
-                msg="Could not server-side apply $kind '$name'/$container in '$ns' to image '$image' (manager '$manager', operation Apply)."
+                msg="Could not server-side apply $kind '$name'/$container in '$ns' to image '$image' (manager '$manager', operation Apply)${reason:+: $reason}."
             ;;
     esac
     return 1

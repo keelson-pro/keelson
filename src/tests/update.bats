@@ -508,9 +508,9 @@ SH
 echo 'spec.selector: Required value' >&2
 exit 1
 SH
-    KEELSON_LOG_FORMAT=json run emit update_apply Rollout default app containers main ghcr.io/x/y:1.2.4 1.2.3
+    run emit update_apply Rollout default app containers main ghcr.io/x/y:1.2.4 1.2.3
     [ "$status" -ne 0 ]
-    [[ "$output" == *"spec.selector: Required value"* ]]
+    [[ "$output" == *"(manager 'keelson', operation Apply): spec.selector: Required value."* ]]
 }
 
 @test "update_apply: a forced apply still reports the configured strategy" {
