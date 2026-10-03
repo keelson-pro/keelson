@@ -190,7 +190,7 @@ SH
     [[ "$output" == *"updated from 1.2.3 to 1.2.4 by mimic (as configured) for image 'ghcr.io/x/y'."* ]]
     grep -q -- "apply --server-side" "$TMP_DIR/kubectl.log"
     grep -q -- "--field-manager=argocd-application-controller" "$TMP_DIR/kubectl.log"
-    ! grep -q -- "--force-conflicts" "$TMP_DIR/kubectl.log"
+    if grep -q -- "--force-conflicts" "$TMP_DIR/kubectl.log"; then false; fi
     grep -q "image: ghcr.io/x/y:1.2.4" "$TMP_DIR/kubectl.stdin"
     grep -q "kind: Deployment" "$TMP_DIR/kubectl.stdin"
 }

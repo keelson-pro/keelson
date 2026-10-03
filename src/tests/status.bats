@@ -71,7 +71,7 @@ emit() { "$@" 2>&1; }
     status_write_heartbeat 100000000
     status_write_watchers Deployment=11
     grep -q '^heartbeat=100\.000000$' "$HEARTBEAT_FILE"
-    ! grep -q 'Deployment' "$HEARTBEAT_FILE"
+    if grep -q 'Deployment' "$HEARTBEAT_FILE"; then false; fi
     ! grep -q 'heartbeat' "$WATCHERS_FILE"
 }
 

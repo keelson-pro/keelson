@@ -603,7 +603,7 @@ echo "$@" >>"$TMP_DIR/kubectl.args"
 exit 0
 SH
     watch_kubectl_stream Deployment >/dev/null
-    ! grep -q -- "containers" "$TMP_DIR/kubectl.args"
+    if grep -q -- "containers" "$TMP_DIR/kubectl.args"; then false; fi
     ! grep -q -- "annotations" "$TMP_DIR/kubectl.args"
 }
 

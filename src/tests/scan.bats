@@ -1247,7 +1247,7 @@ SH
     queue_enqueue Deployment default c
     scan_refresh_queued 0 2>/dev/null
     [ "$(wc -l <"$TMP_DIR/kubectl.calls")" -eq 1 ]
-    ! grep -q -- "--field-selector" "$TMP_DIR/kubectl.calls"
+    if grep -q -- "--field-selector" "$TMP_DIR/kubectl.calls"; then false; fi
     grep -q -- "--all-namespaces" "$TMP_DIR/kubectl.calls"
 }
 
@@ -2172,7 +2172,7 @@ keelson.pro/initContainers=true' initContainers migrate
 
 @test "monitored: a non-true value leaves them out of scope" {
     KEELSON_CONFIG_MODE=keelson
-    ! scan_container_monitored 'keelson.pro/initContainers=yes' initContainers migrate
+    if scan_container_monitored 'keelson.pro/initContainers=yes' initContainers migrate; then false; fi
     ! scan_container_monitored 'keelson.pro/initContainers=' initContainers migrate
 }
 

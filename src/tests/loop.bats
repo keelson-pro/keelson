@@ -350,7 +350,7 @@ emit() { "$@" 2>&1; }
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     # A whole-second stamp would end in six zeroes; one in a million odds
     # of a false pass, against a certain failure if precision is dropped.
-    ! grep -q '^heartbeat=[0-9]*\.000000$' "$HEARTBEAT_FILE"
+    if grep -q '^heartbeat=[0-9]*\.000000$' "$HEARTBEAT_FILE"; then false; fi
     grep -q '^heartbeat=[0-9]\{10,\}\.[0-9]\{6\}$' "$HEARTBEAT_FILE"
 }
 
@@ -477,7 +477,7 @@ emit() { "$@" 2>&1; }
     LOOP_REFRESH_PENDING=(Deployment CronJob)
     KEELSON_FULL_REFRESH_INTERVAL=999999 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     [ "$LOOP_REFRESH_PID" -gt 0 ] && wait "$LOOP_REFRESH_PID" 2>/dev/null || true
-    ! grep -q reconcile-ledger "$TMP_DIR/refresh.calls"
+    if grep -q reconcile-ledger "$TMP_DIR/refresh.calls"; then false; fi
 
     KEELSON_FULL_REFRESH_INTERVAL=999999 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     [ "$LOOP_REFRESH_PID" -gt 0 ] && wait "$LOOP_REFRESH_PID" 2>/dev/null || true
@@ -641,7 +641,7 @@ overrun_said() {
 @test "scan overrun: consecutive overruns are reported on the 1st, 2nd and 4th" {
     overrun_said 200 60
     overrun_said 200 60
-    ! overrun_said 200 60
+    if overrun_said 200 60; then false; fi
     overrun_said 200 60
     ! overrun_said 200 60
 }

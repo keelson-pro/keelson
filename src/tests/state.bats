@@ -238,7 +238,7 @@ SH
     state_set_trigger_field CronJob default cron triggered-job v
     state_set_trigger_field CronJob default cron triggered-at ""
     state_flush
-    ! grep -q "triggered-at" "$TMP_DIR/cm-applied.json"
+    if grep -q "triggered-at" "$TMP_DIR/cm-applied.json"; then false; fi
     grep -q "triggered-job" "$TMP_DIR/cm-applied.json"
 }
 
