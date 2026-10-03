@@ -166,6 +166,8 @@ spec:
               mountPath: /keelson/work
             - name: home
               mountPath: /home/keelson
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: config
           configMap:
@@ -174,4 +176,6 @@ spec:
         - name: work
           emptyDir: {}
         - name: home
+          emptyDir: {}
+        - name: tmp
           emptyDir: {}
