@@ -333,8 +333,40 @@ SH
     [[ "$output" == *'"event":"update-apply-conflict"'* ]]
     [[ "$output" == *'"manager":"argocd-application-controller"'* ]]
     [[ "$output" == *'"strategy":"mimic"'* ]]
-    [[ "$output" == *'field-ownership conflict'* ]]
+    [[ "$output" == *"field-ownership conflict with 'flux'; refusing to force."* ]]
     [[ "$output" == *'"reason":"Apply failed with 1 conflict'* ]]
+}
+
+@test "update_apply: a conflict with its own name says it is an Update entry" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+    get) cat "$TMP_DIR/mf.json" ;;
+    apply)
+        echo 'Apply failed with 1 conflict: conflict with "argocd-application-controller" using apps/v1: .spec.template.spec.containers[name="main"].image' >&2
+        exit 1
+        ;;
+esac
+SH
+    printf '%s' "$(mf_apply_argocd)" >"$TMP_DIR/mf.json"
+    run emit update_apply Deployment default app containers main ghcr.io/x/y:1.2.4 1.2.3
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"conflict with 'argocd-application-controller' (an Update entry under its own name); refusing to force."* ]]
+}
+
+@test "conflict_managers: each manager named once, in order" {
+    update_conflict_managers 'Apply failed with 3 conflicts: conflicts with "flux" using apps/v1:
+- .spec.replicas
+- .spec.template.spec.containers[name="main"].image
+conflict with "helm": .metadata.labels.app
+conflict with "flux" using apps/v1: .spec.paused'
+    [ "$UPDATE_CONFLICT_MANAGERS" = "'flux', 'helm'" ]
+}
+
+@test "conflict_managers: none found leaves it empty" {
+    UPDATE_CONFLICT_MANAGERS=stale
+    update_conflict_managers 'the server could not find the requested resource'
+    [ -z "$UPDATE_CONFLICT_MANAGERS" ]
 }
 
 @test "update_apply: SSA non-conflict failure logs update-failed and returns 1" {

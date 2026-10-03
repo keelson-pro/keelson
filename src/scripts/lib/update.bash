@@ -376,11 +376,19 @@ update_apply_ssa() {
     # sit past the clip.
     case "$detail" in
         *conflict*|*Conflict*)
+            update_conflict_managers "$detail"
+            # An apply only conflicts with another manager, so its own name
+            # in the list is an Update entry under that name, left by a patch
+            # or edit made as it. Said, because otherwise it reads as nonsense.
+            local held_by=$UPDATE_CONFLICT_MANAGERS
+            case ", $held_by, " in
+                *", '$manager', "*) held_by+=" (an Update entry under its own name)" ;;
+            esac
             log_error update-apply-conflict \
                 kind="$kind" ns="$ns" name="$name" container="$container" \
                 image="$image" manager="$manager" operation=Apply \
                 strategy="$strategy" reason="$reason" \
-                msg="Server-side apply of $kind '$name'/$container in '$ns' as manager '$manager' rejected on field-ownership conflict; refusing to force. Fix the owning manager's source of truth."
+                msg="Server-side apply of $kind '$name'/$container in '$ns' as manager '$manager' rejected on field-ownership conflict${held_by:+ with $held_by}; refusing to force. Fix the owning manager's source of truth."
             ;;
         *)
             log_error update-failed \
@@ -391,6 +399,25 @@ update_apply_ssa() {
             ;;
     esac
     return 1
+}
+
+# update_conflict_managers <apply-output>  -> UPDATE_CONFLICT_MANAGERS
+# The managers a rejected apply names, each once, quoted and comma separated:
+# "'flux', 'helm'". Empty when none can be found. Who holds the field is what
+# the reader needs, and the 40 character hint never reaches it.
+declare -g UPDATE_CONFLICT_MANAGERS=""
+update_conflict_managers() {
+    local rest=$1 found="" m
+    local re='[Cc]onflicts? with "([^"]+)"'
+    while [[ $rest =~ $re ]]; do
+        m=${BASH_REMATCH[1]}
+        rest=${rest#*"${BASH_REMATCH[0]}"}
+        case ", $found, " in
+            *", '$m', "*) ;;
+            *) found+="${found:+, }'$m'" ;;
+        esac
+    done
+    UPDATE_CONFLICT_MANAGERS=$found
 }
 
 # update_trigger_cronjob <namespace> <cronjob-name> [<from-tag> <to-tag> <repo>]
