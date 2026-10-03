@@ -865,7 +865,8 @@ scan_container() {
         # scoped to another repo is answered that way by some registries
         # rather than with a 401. A list missing only the running tag is fine,
         # since a deleted tag leaves the others behind.
-        if tags_raw=$(registry_list_tags "$cimage" "$creds") && [ -n "$tags_raw" ]; then
+        if registry_list_tags "$cimage" "$creds" && [ -n "$REGISTRY_TAGS" ]; then
+            tags_raw=$REGISTRY_TAGS
             listed=1
             break
         fi
@@ -876,7 +877,10 @@ scan_container() {
     done
     # No source had anything, so the host is either public or unconfigured.
     if [ "$listed" -eq 0 ] && [ "$tried" -eq 0 ]; then
-        tags_raw=$(registry_list_tags "$cimage" "") && [ -n "$tags_raw" ] && listed=1
+        if registry_list_tags "$cimage" "" && [ -n "$REGISTRY_TAGS" ]; then
+            tags_raw=$REGISTRY_TAGS
+            listed=1
+        fi
     fi
     if [ "$listed" -eq 0 ]; then
         local reason=${REGISTRY_LAST_ERROR:-}

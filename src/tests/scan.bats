@@ -265,6 +265,19 @@ SH
     [[ "$output" == *'"error":"1"'* ]]
 }
 
+@test "scan_run: skopeo's own error reaches the failure line" {
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+echo "unauthorized" >&2
+exit 1
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"reason":"unauthorized"'* ]]
+    [[ "$output" != *"credentials are scoped to a different repository"* ]]
+}
+
 # --- scan-start emits the configured mode ---
 
 @test "scan_run: scan-start mode is dry-run when apply=0" {

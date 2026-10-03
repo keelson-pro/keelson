@@ -55,6 +55,8 @@ declare -g _REGISTRY_OWN_NAMESPACE=""
 # failure so callers can surface a hint in their error log instead of an
 # opaque "could not list tags". Cleared on success.
 declare -g REGISTRY_LAST_ERROR=""
+# Tags from the last registry_list_tags, one per line.
+declare -g REGISTRY_TAGS=""
 # Credential sources to try, in order, set by registry_creds_source_order.
 declare -ga REGISTRY_CREDS_SOURCES=()
 # Central credentials by host, filled by registry_prime_central_creds before
@@ -532,9 +534,13 @@ registry_creds_azure() {
 }
 
 # registry_list_tags <image-ref> [creds]
-# Echoes one tag per line. Returns non-zero on registry error and sets
-# REGISTRY_LAST_ERROR to the whole of skopeo's stderr, so the caller can log
-# all of it at debug and a log_hint of it on the error line.
+# Sets REGISTRY_TAGS to one tag per line. Returns non-zero on registry error
+# and sets REGISTRY_LAST_ERROR to the whole of skopeo's stderr, so the caller
+# can log all of it at debug and a log_hint of it on the error line.
+#
+# Call it directly, never inside $(...): both results are globals, and a
+# subshell drops them, which is how every registry failure once logged "no
+# error output".
 registry_list_tags() {
     local image=$1 creds=${2:-}
     local repo out tmperr
@@ -542,6 +548,7 @@ registry_list_tags() {
     repo=$IMAGE_REPO
     tmperr=$(mktemp 2>/dev/null) || tmperr=""
     REGISTRY_LAST_ERROR=""
+    REGISTRY_TAGS=""
     if [ -n "$creds" ]; then
         if ! out=$(skopeo list-tags --creds="$creds" "docker://${repo}" 2>"${tmperr:-/dev/null}"); then
             [ -r "$tmperr" ] && REGISTRY_LAST_ERROR=$(<"$tmperr")
@@ -556,5 +563,5 @@ registry_list_tags() {
         fi
     fi
     [ -n "$tmperr" ] && rm -f "$tmperr"
-    printf '%s' "$out" | yq -p=json -o=y '.Tags[]'
+    REGISTRY_TAGS=$(printf '%s' "$out" | yq -p=json -o=y '.Tags[]')
 }

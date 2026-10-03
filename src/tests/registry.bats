@@ -602,10 +602,9 @@ for a in "$@"; do
 done
 printf '{"Tags":["1.0","1.1","1.2"]}'
 SH
-    run registry_list_tags ghcr.io/x/y:1.0
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"1.0"* ]]
-    [[ "$output" == *"1.2"* ]]
+    registry_list_tags ghcr.io/x/y:1.0
+    [[ "$REGISTRY_TAGS" == *"1.0"* ]]
+    [[ "$REGISTRY_TAGS" == *"1.2"* ]]
 }
 
 @test "list_tags: with creds - skopeo called with --creds" {
@@ -620,9 +619,8 @@ done
 [ "$saw" -eq 1 ] || { echo "no creds passed" >&2; exit 1; }
 printf '{"Tags":["2.0"]}'
 SH
-    run registry_list_tags ghcr.io/x/y:1.0 fred:sekret
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"2.0"* ]]
+    registry_list_tags ghcr.io/x/y:1.0 fred:sekret
+    [[ "$REGISTRY_TAGS" == *"2.0"* ]]
 }
 
 @test "list_tags: skopeo failure returns non-zero" {
@@ -632,6 +630,17 @@ exit 1
 SH
     run registry_list_tags ghcr.io/x/y:1.0
     [ "$status" -ne 0 ]
+}
+
+@test "list_tags: skopeo's stderr is kept for the caller" {
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+echo "unauthorized: authentication required" >&2
+exit 1
+SH
+    if registry_list_tags ghcr.io/x/y:1.0; then false; fi
+    [ "$REGISTRY_LAST_ERROR" = "unauthorized: authentication required" ]
+    [ -z "$REGISTRY_TAGS" ]
 }
 
 # --- host case folding ---
