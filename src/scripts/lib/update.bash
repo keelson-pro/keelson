@@ -308,22 +308,18 @@ update_apply_patch() {
             msg="Cannot update $kind '$name' in '$ns': kind not supported."
         return 1
     fi
-    local tmperr detail="" reason=""
-    tmperr=$(mktemp 2>/dev/null) || tmperr=/dev/null
-    if kubectl patch "$kind" "$name" -n "$ns" \
+    local detail reason=""
+    # stderr into the capture, stdout to /dev/null, in that order. No temp
+    # file: one that cannot be created loses the error without a trace.
+    if detail=$(kubectl patch "$kind" "$name" -n "$ns" \
             --type=strategic --field-manager="$manager" \
-            --patch "$patch" >/dev/null 2>"$tmperr"; then
-        [ "$tmperr" != "/dev/null" ] && rm -f "$tmperr"
+            --patch "$patch" 2>&1 >/dev/null); then
         log_info_always update-applied \
             kind="$kind" ns="$ns" name="$name" container="$container" \
             image="$image" from="$from_tag" to="$to_tag" repo="$repo" \
             manager="$manager" operation=Update strategy="$strategy" \
             msg="$kind '$name' in '$ns' updated from $from_tag to $to_tag by $strategy (as configured) for image '$repo'."
         return 0
-    fi
-    if [ -r "$tmperr" ] && [ "$tmperr" != "/dev/null" ]; then
-        detail=$(<"$tmperr")
-        rm -f "$tmperr"
     fi
     # Same shape as the apply path: the whole complaint at debug, a clip of it
     # on the error line. Discarding it entirely left every failure looking
@@ -350,26 +346,22 @@ update_apply_ssa() {
     local kind=$1 ns=$2 name=$3 clist=$4 container=$5 image=$6 manager=$7 \
           from_tag=$8 strategy=$9 method=${10:-"$9 (as configured)"}
     local to_tag=${image##*:} repo=${image%:*}
-    local manifest tmperr detail="" reason=""
+    local manifest detail reason=""
     if ! manifest=$(update_minimal_manifest "$kind" "$ns" "$name" "$clist" "$container" "$image"); then
         log_error update-unsupported-kind kind="$kind" ns="$ns" name="$name" \
             msg="Cannot update $kind '$name' in '$ns': kind not supported."
         return 1
     fi
-    tmperr=$(mktemp 2>/dev/null) || tmperr=/dev/null
-    if printf '%s' "$manifest" | kubectl apply --server-side \
-            --field-manager="$manager" -f - >/dev/null 2>"$tmperr"; then
-        [ "$tmperr" != "/dev/null" ] && rm -f "$tmperr"
+    # Captured the same way as the patch path. The pipeline's status is
+    # kubectl's, the last command in it.
+    if detail=$(printf '%s' "$manifest" | kubectl apply --server-side \
+            --field-manager="$manager" -f - 2>&1 >/dev/null); then
         log_info_always update-applied \
             kind="$kind" ns="$ns" name="$name" container="$container" \
             image="$image" from="$from_tag" to="$to_tag" repo="$repo" \
             manager="$manager" operation=Apply strategy="$strategy" \
             msg="$kind '$name' in '$ns' updated from $from_tag to $to_tag by $method for image '$repo'."
         return 0
-    fi
-    if [ -r "$tmperr" ] && [ "$tmperr" != "/dev/null" ]; then
-        detail=$(<"$tmperr")
-        rm -f "$tmperr"
     fi
     # The whole of kubectl's complaint at debug, a clip of it on the error
     # line. A rejected apply lists every conflicting field path and runs to
