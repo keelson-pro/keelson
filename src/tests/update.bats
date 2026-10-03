@@ -280,7 +280,7 @@ SH
     [ "$status" -eq 1 ]
     [[ "$output" == *'"event":"update-refused-mimic-unowned"'* ]]
     [[ "$output" == *"requires an Apply-op field owner"* ]]
-    ! grep -q -- "patch " "$TMP_DIR/kubectl.log" 2>/dev/null || true
+    ! grep -q -- "patch " "$TMP_DIR/kubectl.log" 2>/dev/null
 }
 
 @test "update_apply: annotation strategy invalid value logs error and returns 1" {
