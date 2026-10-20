@@ -350,3 +350,117 @@ SH
     [[ "$output" == *"is gone since the poll; nothing to write."* ]]
     [ ! -e "$TMP_DIR/patch.body" ]
 }
+
+# A suspended CronJob annotated to trigger, running worker beside a sidecar
+# and an init container. $1 sets spec.suspend, $2 the annotation's value.
+trigger_cron() {
+    printf '{"apiVersion":"batch/v1","kind":"CronJob","metadata":{"name":"cron","namespace":"default","resourceVersion":"8","uid":"u-1","annotations":{"keelson.pro/trigger-job-on-update":"%s"}},"spec":{"suspend":%s,"jobTemplate":{"spec":{"template":{"spec":{"containers":[{"name":"worker","image":"ghcr.io/x/y:1.2.3"},{"name":"side","image":"ghcr.io/x/s:9"}],"initContainers":[{"name":"init","image":"ghcr.io/x/i:4"}]}}}}}}' \
+        "${2:-true}" "${1:-true}" >"$TMP_DIR/obj.json"
+    # The ledger, as this process holds and writes it, stubbed: state_init
+    # loads an empty one, state_flush writes what is set to ledger.out.
+    KEELSON_STATE_CONFIGMAP=keelson-state
+    state_init() { echo init >>"$TMP_DIR/calls"; STATE_LOADED=1; [ ! -e "$TMP_DIR/no-state" ]; }
+    state_flush() {
+        local k
+        for k in "${!STATE_FIELDS[@]}"; do printf '%s=%s\n' "$k" "${STATE_FIELDS[$k]}"; done | sort >"$TMP_DIR/ledger.out"
+        [ ! -e "$TMP_DIR/no-flush" ]
+    }
+}
+
+@test "update_resource: a suspended CronJob annotated to trigger gets a Job, recorded with every image it now runs" {
+    trigger_cron
+    run emit main CronJob default cron worker ghcr.io/x/y:1.2.4
+    [ "$status" -eq 0 ]
+    grep -q -- "^create job cron-[0-9]* --from=cronjob/cron -n default$" "$TMP_DIR/kubectl.log"
+    [[ "$output" == *"created from CronJob 'cron' in 'default' with update from 1.2.3 to 1.2.4 for image 'ghcr.io/x/y'."* ]]
+    # The update is written before the Job is created.
+    [ "$(grep -n '^patch ' "$TMP_DIR/kubectl.log" | cut -d: -f1)" -lt "$(grep -n '^create job ' "$TMP_DIR/kubectl.log" | cut -d: -f1)" ]
+    key=$(state_trigger_key CronJob default cron)
+    grep -qx "$key:containers/worker=ghcr.io/x/y:1.2.4" "$TMP_DIR/ledger.out"
+    grep -qx "$key:containers/side=ghcr.io/x/s:9" "$TMP_DIR/ledger.out"
+    grep -qx "$key:initContainers/init=ghcr.io/x/i:4" "$TMP_DIR/ledger.out"
+    grep -q "^$key:triggered-at=" "$TMP_DIR/ledger.out"
+}
+
+@test "update_resource: a CronJob not annotated to trigger, or a Deployment, gets no Job" {
+    trigger_cron true false
+    run emit main CronJob default cron worker ghcr.io/x/y:1.2.4
+    [ "$status" -eq 0 ]
+    if grep -q '^create ' "$TMP_DIR/kubectl.log"; then false; fi
+    [ ! -e "$TMP_DIR/calls" ]
+    rm -f "$TMP_DIR/kubectl.log"
+    printf '%s' '{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"app","namespace":"default","resourceVersion":"8","uid":"u-1","annotations":{"keelson.pro/trigger-job-on-update":"true"}},"spec":{"template":{"spec":{"containers":[{"name":"main","image":"ghcr.io/x/y:1.2.3"}]}}}}' >"$TMP_DIR/obj.json"
+    run emit main Deployment default app main ghcr.io/x/y:1.2.4
+    [ "$status" -eq 0 ]
+    if grep -q '^create ' "$TMP_DIR/kubectl.log"; then false; fi
+}
+
+@test "update_resource: a CronJob not suspended is written but not triggered, and exits 1" {
+    trigger_cron false
+    run emit main CronJob default cron worker ghcr.io/x/y:1.2.4
+    [ "$status" -eq 1 ]
+    grep -q '^patch ' "$TMP_DIR/kubectl.log"
+    if grep -q '^create ' "$TMP_DIR/kubectl.log"; then false; fi
+    [[ "$output" == *"spec.suspend is not true; refusing to trigger to avoid racing the scheduler. Its image was written."* ]]
+}
+
+@test "update_resource: nothing written, or a failed write, triggers nothing" {
+    trigger_cron
+    run emit main CronJob default cron worker ghcr.io/x/y:1.2.3
+    [ "$status" -eq 3 ]
+    if grep -q '^create ' "$TMP_DIR/kubectl.log"; then false; fi
+    mv "$TMP_BIN/kubectl" "$TMP_BIN/kubectl.real"
+    cat >"$TMP_BIN/kubectl" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = patch ]; then echo "\$@" >>"$TMP_DIR/kubectl.log"; echo 'Error from server (Forbidden): no' >&2; exit 1; fi
+exec "$TMP_BIN/kubectl.real" "\$@"
+SH
+    chmod +x "$TMP_BIN/kubectl"
+    run emit main CronJob default cron worker ghcr.io/x/y:1.2.4
+    [ "$status" -eq 1 ]
+    if grep -q '^create ' "$TMP_DIR/kubectl.log"; then false; fi
+    [ ! -e "$TMP_DIR/calls" ]
+}
+
+@test "update_resource: a Job that cannot be created exits 1 and records no firing" {
+    trigger_cron
+    mv "$TMP_BIN/kubectl" "$TMP_BIN/kubectl.real"
+    cat >"$TMP_BIN/kubectl" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = create ]; then echo 'Error from server (Forbidden): jobs.batch is forbidden' >&2; exit 1; fi
+exec "$TMP_BIN/kubectl.real" "\$@"
+SH
+    chmod +x "$TMP_BIN/kubectl"
+    run emit main CronJob default cron worker ghcr.io/x/y:1.2.4
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"updated from 1.2.3 to 1.2.4"* ]]
+    [[ "$output" == *"Could not create Job 'cron-"*"' from CronJob 'cron' in 'default': Error from server (Forbidden): jobs.batc"* ]]
+    [ ! -e "$TMP_DIR/ledger.out" ]
+}
+
+@test "update_resource: a ledger that cannot be read still triggers, and one that cannot be written exits 1" {
+    trigger_cron
+    touch "$TMP_DIR/no-state"
+    run emit main CronJob default cron worker ghcr.io/x/y:1.2.4
+    [ "$status" -eq 0 ]
+    grep -q '^create job cron-' "$TMP_DIR/kubectl.log"
+    [[ "$output" == *"triggering without recording it, so the controller may trigger CronJob 'cron' in 'default' once more."* ]]
+    [ ! -e "$TMP_DIR/ledger.out" ]
+
+    trigger_cron
+    rm -f "$TMP_DIR/no-state" "$TMP_DIR/kubectl.log"
+    touch "$TMP_DIR/no-flush"
+    run emit main CronJob default cron worker ghcr.io/x/y:1.2.4
+    [ "$status" -eq 1 ]
+    grep -q '^create job cron-' "$TMP_DIR/kubectl.log"
+}
+
+@test "update_resource: no ledger ConfigMap named still triggers, without recording" {
+    trigger_cron
+    unset KEELSON_STATE_CONFIGMAP
+    run emit main CronJob default cron worker ghcr.io/x/y:1.2.4
+    [ "$status" -eq 0 ]
+    grep -q '^create job cron-' "$TMP_DIR/kubectl.log"
+    [ ! -e "$TMP_DIR/calls" ]
+    [ ! -e "$TMP_DIR/ledger.out" ]
+}
