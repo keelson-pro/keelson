@@ -48,6 +48,11 @@ and either log what would be updated (default) or update the workloads.
   --apply   Update updatable workloads to the winning tag, written the way
             the field-manager strategy settings choose.
             Default is dry-run: log-only, no kube writes.
+
+Exits 0 when nothing errored (skips and no-change included), 1 when
+anything did (a kind that could not be listed, credentials or tags that
+could not be got, an update or a CronJob's trigger that failed), 64 on bad
+usage.
 USAGE
 }
 
@@ -85,6 +90,8 @@ main() {
         state_drain_spool || true
         state_flush || true
     fi
+    # The scan returns 0 whatever it met, and says what it met here.
+    [ "$SCAN_ERRORS" -eq 0 ]
 }
 
 # Run when executed, not when sourced, so the tests can drive its functions.

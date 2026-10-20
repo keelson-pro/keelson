@@ -3007,3 +3007,63 @@ SH
     # Every error line, so a second one under another name is caught too.
     [ "$(grep -c '"level":"ERROR"' <<<"$output")" -eq 1 ]
 }
+
+# --- SCAN_ERRORS: what a one-shot caller exits on ---
+# Run in this shell, not under run, so the variable is still there to read.
+
+@test "scan_run: SCAN_ERRORS counts a kind it could not list, and returns 0" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    scan_run 0 >"$TMP_DIR/out" 2>&1
+    [ "$SCAN_ERRORS" -eq 1 ]
+}
+
+@test "scan_run: SCAN_ERRORS counts tags it could not get, and is 0 again on a clean pass" {
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    scan_run 0 >"$TMP_DIR/out" 2>&1
+    [ "$SCAN_ERRORS" -eq 1 ]
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3"]}'
+SH
+    scan_run 0 >"$TMP_DIR/out" 2>&1
+    [ "$SCAN_ERRORS" -eq 0 ]
+}
+
+@test "scan_run: SCAN_ERRORS is 0 with nothing to scan" {
+    kubectl_returns '{"items": []}'
+    SCAN_ERRORS=5
+    scan_run 0 >"$TMP_DIR/out" 2>&1
+    [ "$SCAN_ERRORS" -eq 0 ]
+}
+
+@test "scan_run apply: a CronJob trigger refused for want of suspend counts in SCAN_ERRORS, not per container" {
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true false)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 >"$TMP_DIR/out" 2>&1
+    grep -q '"event":"cronjob-trigger-requires-suspend"' "$TMP_DIR/out"
+    grep -q '"error":"0"' "$TMP_DIR/out"
+    [ "$SCAN_ERRORS" -eq 1 ]
+}
+
+@test "scan_run apply: a CronJob trigger that fails counts in SCAN_ERRORS" {
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true true)"
+    KUBECTL_CREATE_EXIT=1
+    export KUBECTL_CREATE_EXIT
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3"]}'
+SH
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 >"$TMP_DIR/out" 2>&1
+    grep -q '"event":"cronjob-job-trigger-failed"' "$TMP_DIR/out"
+    [ "$SCAN_ERRORS" -eq 1 ]
+}

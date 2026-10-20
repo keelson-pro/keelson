@@ -66,3 +66,24 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" == *validate_config*registry_key_valid* ]]
 }
+
+@test "user_recheck: anything the scan logged as an error exits 1, after writing what it spooled" {
+    validate_config() { echo "validate" >>"$TMP_DIR/calls"; return 0; }
+    scan_run() { echo "scan_run $*" >>"$TMP_DIR/calls"; SCAN_ERRORS=2; }
+    run main --apply
+    [ "$status" -eq 1 ]
+    [ "$(cat "$TMP_DIR/calls")" = $'validate\nstate_init\nscan_run 1 1\ndrain\nflush' ]
+    rm "$TMP_DIR/calls"
+    run main
+    [ "$status" -eq 1 ]
+    [ "$(cat "$TMP_DIR/calls")" = "scan_run 0 1" ]
+}
+
+@test "user_recheck: a pass with no errors exits 0, dry run or not" {
+    validate_config() { return 0; }
+    scan_run() { SCAN_ERRORS=0; }
+    run main
+    [ "$status" -eq 0 ]
+    run main --apply
+    [ "$status" -eq 0 ]
+}

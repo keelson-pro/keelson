@@ -34,6 +34,10 @@ SCAN_KIND_RECORDS=
 SCAN_KIND_COUNT=0
 SCAN_POLL_OVERRUNS=0
 SCAN_ROLLOUT_REF_PASSES=0
+# Set by scan_run: what its pass logged as errors (a kind it could not list,
+# credentials or tags it could not get, an update or a CronJob's trigger that
+# failed), for a one-shot caller to exit on. Its own return stays 0.
+SCAN_ERRORS=0
 # "<ns>/<name>" per annotated Rollout this scan found with no pod template.
 # Filled by scan_cache_workload, drained by scan_report_rollout_no_template.
 declare -a SCAN_ROLLOUT_NO_TEMPLATE=()
@@ -59,7 +63,8 @@ scan_run() {
     registry_init
 
     local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
-          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
+          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0 \
+          _scan_trigger_error=0
     SCAN_ROLLOUT_NO_TEMPLATE=()
 
     # Inventory bookkeeping for this pass. SCAN_SEEN is what the cluster
@@ -89,6 +94,9 @@ scan_run() {
         skip="$_scan_skip" \
         error="$_scan_error" \
         msg="Scan complete: $_scan_total containers examined, $_scan_updated updated, $_scan_would_update would-update, $_scan_no_change no-change, $_scan_skip skipped, $_scan_error errored."
+    # A trigger is the workload's, not a container's, so it stays out of
+    # the per-container count above.
+    SCAN_ERRORS=$(( _scan_error + _scan_trigger_error ))
 }
 
 # scan_reconcile_inventory
@@ -996,6 +1004,7 @@ scan_check_cronjob_trigger() {
         log_error cronjob-trigger-requires-suspend \
             kind=CronJob ns="$ns" name="$name" detail="$name" \
             msg="CronJob '$name' in '$ns' has trigger-job-on-update=true but spec.suspend is not true; refusing to trigger to avoid racing the scheduler."
+        scan_count_trigger_error
         return 0
     fi
 
@@ -1019,7 +1028,17 @@ scan_check_cronjob_trigger() {
     # update_trigger_cronjob itself.
     if update_trigger_cronjob "$ns" "$name" "$from_tag" "$to_tag" "$repo"; then
         scan_record_trigger_success CronJob "$ns" "$name"
+    else
+        scan_count_trigger_error
     fi
+}
+
+# scan_count_trigger_error
+# Counts a trigger refused or failed toward scan_run's SCAN_ERRORS. A poll
+# child has no such counter (its trigger errors are logged, not tallied),
+# so an unset one is started rather than tripping set -u.
+scan_count_trigger_error() {
+    _scan_trigger_error=$(( ${_scan_trigger_error:-0} + 1 ))
 }
 
 # scan_trigger_image_set <ns> <name>  -> SCAN_TRIGGER_IMAGE_SET
