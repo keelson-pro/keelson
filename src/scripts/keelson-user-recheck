@@ -2,14 +2,16 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 #
-# One-shot re-check a user runs by hand. Default dry-run; --apply patches
-# workloads in place.
+# One-shot re-check a user runs by hand. Default dry-run; --apply writes the
+# updates, each the way the field-manager strategy chooses.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/log.bash
 source "${SCRIPT_DIR}/lib/log.bash"
+# shellcheck source=lib/validate.bash
+source "${SCRIPT_DIR}/lib/validate.bash"
 # shellcheck source=lib/clock.bash
 source "${SCRIPT_DIR}/lib/clock.bash"
 # shellcheck source=lib/inventory.bash
@@ -41,9 +43,10 @@ Usage: keelson-user-recheck [--apply] [--help]
 
 Scan the cluster (or namespace, per KEELSON_SCOPE) for Keelson-managed
 workloads. Parse the current tag, query the registry, evaluate policy,
-and either log what would be updated (default) or patch the workloads.
+and either log what would be updated (default) or update the workloads.
 
-  --apply   Strategic-merge patch updatable workloads to the winning tag.
+  --apply   Update updatable workloads to the winning tag, written the way
+            the field-manager strategy settings choose.
             Default is dry-run: log-only, no kube writes.
 USAGE
 }
@@ -61,6 +64,9 @@ main() {
     done
 
     if [ "$apply" -eq 1 ]; then
+        # It writes, so it runs with the settings the controller would,
+        # checked the same way.
+        validate_config || return 1
         if ! state_init; then
             log_warn state-init-failed \
                 configmap="${KEELSON_STATE_CONFIGMAP:-keelson-state}" \
@@ -81,4 +87,7 @@ main() {
     fi
 }
 
-main "$@"
+# Run when executed, not when sourced, so the tests can drive its functions.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

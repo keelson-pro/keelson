@@ -76,6 +76,26 @@ setup() {
     done < <(find "${SCRIPT_DIR}/lib" -type f)
 }
 
+@test "yq: no file under src/scripts/yq/ is executable" {
+    [ -d "${SCRIPT_DIR}/yq" ]
+    while IFS= read -r f; do
+        if [ -x "$f" ]; then
+            printf 'executable yq file: %s\n' "$f" >&2
+            return 1
+        fi
+    done < <(find "${SCRIPT_DIR}/yq" -type f)
+}
+
+@test "yq: every file under src/scripts/yq/ ends in .yq" {
+    [ -d "${SCRIPT_DIR}/yq" ]
+    while IFS= read -r f; do
+        case "$f" in
+            *.yq) ;;
+            *) printf 'non-.yq file under yq/: %s\n' "$f" >&2; return 1 ;;
+        esac
+    done < <(find "${SCRIPT_DIR}/yq" -type f)
+}
+
 # yq's default output format is changing: with -p=json and no -o it currently
 # emits YAML "for backwards compatibility" and warns that it will not forever.
 # Under JSON output every string comes back quoted, so a namespace becomes

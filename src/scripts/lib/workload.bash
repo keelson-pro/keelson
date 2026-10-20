@@ -32,9 +32,9 @@
 # then the same code path, and there is no second opinion about what scope
 # means.
 #
-# Commas are tolerated as separators here as well as at boot: the entrypoints
-# that do not run validate_config (keelson-user-recheck) read this too, and a
-# list that works for the controller has to work for them.
+# Commas are tolerated as separators here as well as at boot: an entrypoint
+# that does not run validate_config (keelson-user-recheck's dry run) reads
+# this too, and a list that works for the controller has to work for it.
 declare -ga WORKLOAD_NAMESPACES=()
 workload_namespaces() {
     local raw

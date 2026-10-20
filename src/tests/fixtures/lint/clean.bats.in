@@ -1,0 +1,155 @@
+# Nothing here may be flagged. Not a real test file: lint_tests.bats runs
+# the lint on it.
+
+@test "heredoc bodies are not test code" {
+    cat >"$BATS_TEST_TMPDIR/a" << SH
+exit 0
+[ 1 -eq 2 ] || true
+SH
+    cat >"$BATS_TEST_TMPDIR/b" <<'SH'
+return 0
+[ 1 -eq 2 ] &
+SH
+    [ 1 -eq 1 ]
+}
+
+@test "a multi-line bash -c body runs in a child" {
+    run bash -c '
+        [ 1 -eq 2 ] || true
+        exit 0
+    '
+    [ "$status" -eq 0 ]
+}
+
+@test "test-local functions are their own bodies" {
+    f() {
+        return 0
+    }
+    g() (
+        exit 0
+    )
+    f
+    g
+    [ 1 -eq 1 ]
+}
+
+@test "cleanup that tolerates failure" {
+    rm -f "$BATS_TEST_TMPDIR/none" || true
+    kill "$P" 2>/dev/null || true
+    wait "$P" 2>/dev/null || true
+    n=$(grep -c x "$BATS_TEST_TMPDIR/none") || true
+    [ -n "$P" ] && kill "$P"
+    command -v podman >/dev/null || skip "no podman"
+    [ -d "$BATS_TEST_TMPDIR/d" ] || mkdir "$BATS_TEST_TMPDIR/d"
+    [ 1 -eq 1 ]
+}
+
+@test "exit 1 and failure paths mid-test, exit 0 last" {
+    [ -n x ] || exit 1
+    false || exit
+    exit 1
+    true && exit "2"
+    exit '3'
+    ( exit 0 )
+    ( cd /; exit 0 )
+    x=$(exit 0)
+    x=$(true; exit 0)
+    echo "a; exit 0"
+    echo 'b; exit'
+    true && exit 0
+}
+
+@test "quotes in a capture in a string close where bash closes them" {
+    x="$(echo "it's")"
+    # don't
+    [ "$x" = "it's" ]
+}
+
+@test "a ( ) inside a capture in a string is its own" {
+    x="$( (echo a) ; echo "it's" )"
+    [ 1 -eq 1 ]
+}
+
+@test "quotes inside backquotes in a string are their own" {
+    y="`echo 'a"b'`"
+    [ 1 -eq 1 ]
+}
+
+@test "a comment ends the line, inside a capture too" {
+    true # don't
+    x="$(
+        echo a # don't
+    )"
+    [ 1 -eq 1 ]
+}
+
+@test "an exit inside a multi-line subshell or capture leaves only it" {
+    (
+        cd /tmp
+        exit 0
+    )
+    x=$(
+        echo "(" ; exit 0
+    )
+    case x in
+        x) true ;;
+    esac
+    [ 1 -eq 1 ]
+}
+
+@test "a case arm inside a multi-line subshell does not close it" {
+    (
+        case x in
+            (y) true ;;
+            x) true ;;
+        esac
+        case x in x) true ;; esac
+        exit 0
+    )
+    [ 1 -eq 1 ]
+}
+
+@test "a ) the case state cannot place never takes the depth below 0" {
+    x) true ;;
+    ( true; exit 0 )
+    [ 1 -eq 1 ]
+}
+
+@test "an exit in a one-line case inside a subshell leaves only it" {
+    ( case $x in a) exit 0 ;; esac )
+    [ 1 -eq 1 ]
+}
+
+@test "the ;& arm terminator starts the next pattern" {
+    (
+        case x in
+            x) true ;&
+            y) true ;;
+        esac
+        exit 0
+    )
+    [ 1 -eq 1 ]
+}
+
+@test "the ;;& arm terminator starts the next pattern" {
+    case x in x) true ;;& (z) true ;; esac
+    ( true; exit 0 )
+    [ 1 -eq 1 ]
+}
+
+@test "an extglob group in a case pattern is part of the pattern" {
+    (
+        case x in
+            @(a|b)) true ;;
+            !(c|+(d))) true ;;
+        esac
+        exit 0
+    )
+    [ 1 -eq 1 ]
+}
+
+# Last in the file: no quote after it can rebalance a misread.
+@test "backquotes in a string are their own" {
+    x="`echo "it's"`"
+    [ 1 -eq 1 ]
+}

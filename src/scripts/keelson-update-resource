@@ -2,13 +2,22 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 #
-# Patch a single workload's container image. Used by the scanner; CLI usable.
+# Update a single workload's container image from the command line, through
+# the same update_apply the scanner uses.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/log.bash
 source "${SCRIPT_DIR}/lib/log.bash"
+# shellcheck source=lib/validate.bash
+source "${SCRIPT_DIR}/lib/validate.bash"
+# shellcheck source=lib/registry.bash
+source "${SCRIPT_DIR}/lib/registry.bash"
+# shellcheck source=lib/image.bash
+source "${SCRIPT_DIR}/lib/image.bash"
+# shellcheck source=lib/annotations.bash
+source "${SCRIPT_DIR}/lib/annotations.bash"
 # shellcheck source=lib/managedfields.bash
 source "${SCRIPT_DIR}/lib/managedfields.bash"
 # shellcheck source=lib/update.bash
@@ -16,30 +25,140 @@ source "${SCRIPT_DIR}/lib/update.bash"
 
 usage() {
     cat <<'USAGE'
-Usage: keelson-update-resource <kind> <namespace> <name> <container> <new-image> [--init]
+Usage: keelson-update-resource <kind> <namespace> <name> <container> <new-image> [--init|--volume]
 
-Strategic-merge patch the named container's image on the named workload.
-Supports Deployment, StatefulSet, DaemonSet, CronJob.
+Update the named container's image on the named workload, written the way
+the field-manager strategy settings (and the workload's own
+keelson.pro/field-manager-strategy annotation) choose for whoever owns it.
+Supports Deployment, StatefulSet, DaemonSet, CronJob, Rollout.
 
-  --init   the container is an initContainer. Names are unique across both
-           lists, but the key to write the image back under is not, so this
-           has to be said rather than guessed.
+The new image must be in the same repository as the running one: only the
+tag changes. The write is checked against the image running now, as a poll's
+would be against the image it saw.
+
+  --init     the container is an initContainer. Names are unique across both
+             lists, but the key to write the image back under is not, so this
+             has to be said rather than guessed.
+  --volume   the name is an image volume, whose reference is the image.
+
+Exits 0 when written, 3 when deliberately not written (already that image,
+it changed while being updated, or the workload was deleted meanwhile), 1 on
+failure, 64 on bad usage.
 USAGE
 }
 
+# cli_read_target <kind> <ns> <name> <list> <target>  -> CLI_IMAGE, CLI_ANNOTATIONS
+# The target's running image and the workload's annotations, as the scan
+# would hand them to update_apply.
+cli_read_target() {
+    local kind=$1 ns=$2 name=$3 clist=$4 target=$5
+    local pod='.spec.template.spec' list=$clist leaf='.image' obj
+    [ "$kind" = "CronJob" ] && pod='.spec.jobTemplate.spec.template.spec'
+    if [ "$clist" = "imageVolumes" ]; then
+        list=volumes
+        leaf='.image.reference'
+    fi
+    CLI_IMAGE="" CLI_ANNOTATIONS=""
+    # Qualified by its API group, as the writes are (update_resource_name).
+    local resource
+    resource=$(update_resource_name "$kind") || return 1
+    obj=$(kubectl get "$resource" "$name" -n "$ns" -o json) || return 1
+    CLI_IMAGE=$(printf '%s' "$obj" | TARGET=$target yq -p=json -o=yaml \
+        "[(${pod}.${list} // [])[] | select(.name == strenv(TARGET)) | ${leaf}] | select(length == 1) | .[0] // \"\"") \
+        || return 1
+    # Only Keelson's and Keel's, one line each, as the scan hands them over:
+    # a value with a line break in it must not read as a second annotation.
+    CLI_ANNOTATIONS=$(printf '%s' "$obj" | yq -p=json -o=yaml \
+        '(.metadata.annotations // {}) | to_entries | .[]
+            | select(.key | test("^(keelson\\.pro|keel\\.sh)/"))
+            | .key + "=" + (.value | sub("\n"; " "))') || return 1
+}
+
 main() {
+    log_file_init
     case "${1:-}" in
         -h|--help) usage; return 0 ;;
     esac
-    if [ $# -lt 5 ]; then
+    if [ $# -lt 5 ] || [ $# -gt 6 ]; then
         usage >&2
         return 64
     fi
+    local kind=$1 ns=$2 name=$3 target=$4 image=$5 clist=containers
+    case "${6:-}" in
+        "") ;;
+        --init) clist=initContainers ;;
+        --volume) clist=imageVolumes ;;
+        *) usage >&2; return 64 ;;
+    esac
 
-    local clist=containers
-    [ "${6:-}" = "--init" ] && clist=initContainers
+    # Before anything else is asked of the cluster.
+    if ! update_apiversion "$kind" >/dev/null; then
+        log_error update-unsupported-kind kind="$kind" ns="$ns" name="$name" \
+            msg="Cannot update $kind '$name' in '$ns': kind not supported (Deployment, StatefulSet, DaemonSet, CronJob or Rollout, spelled so). Nothing was written."
+        return 1
+    fi
+    # Container and volume names are DNS-1123 labels. Anything else is not a
+    # name here, and the lookups compare with yq's ==, which would read a *
+    # or ? in it as a pattern and match another container.
+    if [[ ! $target =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
+        log_error update-failed kind="$kind" ns="$ns" name="$name" container="$target" \
+            msg="Not updating $kind '$name' in '$ns': '$target' is not a container or volume name. Nothing was written."
+        return 1
+    fi
+    # Only a tag can be compared and changed: a digest or a missing tag
+    # cannot say what is being replaced by what.
+    image_tag "$image"
+    image_digest "$image"
+    if [ -z "$IMAGE_TAG" ] || [ -n "$IMAGE_DIGEST" ]; then
+        log_error update-failed kind="$kind" ns="$ns" name="$name" container="$target" \
+            msg="Not updating $kind '$name'/$target in '$ns' to '$image': the new image needs a tag and no digest. Nothing was written."
+        return 1
+    fi
+    # A tag as the image reference grammar has it: anything else is not one,
+    # and a \ or " in it would be read as an escape when it is written.
+    if [[ ! $IMAGE_TAG =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+        log_error update-failed kind="$kind" ns="$ns" name="$name" container="$target" \
+            msg="Not updating $kind '$name'/$target in '$ns' to '$image': '$IMAGE_TAG' is not a valid tag. Nothing was written."
+        return 1
+    fi
 
-    update_apply "$1" "$2" "$3" "$clist" "$4" "$5"
+    # The same settings the controller runs with, checked the same way.
+    validate_config || return 1
+
+    if ! cli_read_target "$kind" "$ns" "$name" "$clist" "$target"; then
+        log_error update-failed kind="$kind" ns="$ns" name="$name" container="$target" \
+            msg="Could not read $kind '$name' in '$ns'. Nothing was written."
+        return 1
+    fi
+    if [ -z "$CLI_IMAGE" ]; then
+        log_error update-failed kind="$kind" ns="$ns" name="$name" container="$target" \
+            msg="$kind '$name' in '$ns' has no single $clist entry named '$target' with an image. Nothing was written."
+        return 1
+    fi
+    image_tag "$CLI_IMAGE"
+    image_digest "$CLI_IMAGE"
+    if [ -z "$IMAGE_TAG" ] || [ -n "$IMAGE_DIGEST" ]; then
+        log_error update-failed kind="$kind" ns="$ns" name="$name" container="$target" \
+            msg="Not updating $kind '$name'/$target in '$ns': it runs '$CLI_IMAGE', which has no tag to compare, or a digest. Nothing was written."
+        return 1
+    fi
+    image_repo "$CLI_IMAGE"
+    local running_repo=$IMAGE_REPO
+    image_repo "$image"
+    if [ "$IMAGE_REPO" != "$running_repo" ]; then
+        log_error update-failed kind="$kind" ns="$ns" name="$name" container="$target" \
+            msg="Not updating $kind '$name'/$target in '$ns' to '$image': it runs '$CLI_IMAGE', and only the tag may change. Nothing was written."
+        return 1
+    fi
+    image_tag "$CLI_IMAGE"
+
+    local rc=0
+    update_apply "$kind" "$ns" "$name" "$clist" "$target" "$image" "$IMAGE_TAG" "" "$CLI_ANNOTATIONS" \
+        || rc=$?
+    return "$rc"
 }
 
-main "$@"
+# Run when executed, not when sourced, so the tests can drive its functions.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

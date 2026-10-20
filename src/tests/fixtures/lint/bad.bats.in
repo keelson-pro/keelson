@@ -1,0 +1,165 @@
+# Each test holds one line the lint must flag, named in the test's title.
+# Not a real test file: lint_tests.bats runs the lint on it.
+
+@test "return 0 mid-test" {
+    return 0
+    [ 1 -eq 1 ]
+}
+
+@test "exit 0 mid-test" {
+    exit 0
+    [ 1 -eq 1 ]
+}
+
+@test "bare exit mid-test" {
+    exit
+    [ 1 -eq 1 ]
+}
+
+@test "time exit mid-test" {
+    time exit 0
+    [ 1 -eq 1 ]
+}
+
+@test "builtin exit mid-test" {
+    builtin exit 0
+    [ 1 -eq 1 ]
+}
+
+@test "exit status mid-test" {
+    exit $?
+    [ 1 -eq 1 ]
+}
+
+@test "exit 256 mid-test" {
+    exit 256
+    [ 1 -eq 1 ]
+}
+
+@test "assertion or true" {
+    [ 1 -eq 2 ] || true
+    [ 1 -eq 1 ]
+}
+
+@test "continued assertion or true" {
+    [ 1 -eq 2 ] \
+        || true
+    [ 1 -eq 1 ]
+}
+
+@test "assertion in the background" {
+    [ 1 -eq 2 ] &
+    [ 1 -eq 1 ]
+}
+
+@test "assertion left of and" {
+    [ 1 -eq 2 ] && [ 2 -eq 2 ]
+    [ 1 -eq 1 ]
+}
+
+@test "quotes in a capture in a string" {
+    x="$(echo "it's")"
+    [ 1 -eq 2 ] || true
+    # don't
+    [ 1 -eq 1 ]
+}
+
+@test "time -p exit mid-test" {
+    time -p exit 0
+    [ 1 -eq 1 ]
+}
+
+@test "exit 512 mid-test" {
+    exit 512
+    [ 1 -eq 1 ]
+}
+
+@test "quoted exit 0 mid-test" {
+    exit "0"
+    [ 1 -eq 1 ]
+}
+
+@test "exit after an apostrophe in a string" {
+    echo "don't" ; exit 0 ; echo 'x'
+    [ 1 -eq 1 ]
+}
+
+@test "exit after then mid-test" {
+    if true; then exit; fi
+    [ 1 -eq 1 ]
+}
+
+@test "ANSI-C quoting closes at its own quote" {
+    x=$'it\'s'
+    [ 1 -eq 2 ] || true
+    [ 1 -eq 1 ]
+}
+
+@test "exit after a local subshell function" {
+    g() (
+        true
+    )
+    exit 0
+    [ 1 -eq 1 ]
+}
+
+@test "prefix assignments before exit mid-test" {
+    X=1 exit
+    [ 1 -eq 1 ]
+}
+
+@test "two prefix assignments, one quoted, before exit 0 mid-test" {
+    true; X=1 Y="a b" exit 0
+    [ 1 -eq 1 ]
+}
+
+@test "exit after a multi-line subshell has closed" {
+    (
+        cd /tmp
+    )
+    exit 0
+    [ 1 -eq 1 ]
+}
+
+@test "exit after a multi-line subshell closes on the same line" {
+    (
+        cd /tmp
+    ); exit 0
+    [ 1 -eq 1 ]
+}
+
+@test "exit after a multi-line subshell holding a case has closed" {
+    (
+        case x in
+            x) true ;;
+        esac
+    )
+    exit 0
+    [ 1 -eq 1 ]
+}
+
+@test "a ( left open at the end of one test" {
+    ( true
+}
+
+@test "does not carry into the next" {
+    exit 0
+    [ 1 -eq 1 ]
+}
+
+@test "an appending prefix before exit 0 mid-test" {
+    X+=1 exit 0
+    [ 1 -eq 1 ]
+}
+
+@test "a ( inside a parameter expansion opens nothing" {
+    t=${s//(/_}
+    exit 0
+    [ 1 -eq 1 ]
+}
+
+@test "exit after a one-line case whose pattern opens with (" {
+    case x in (y) true ;; esac
+    exit 0
+    [ 1 -eq 1 ]
+}

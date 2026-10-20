@@ -10,7 +10,7 @@
 #   lib/eligibility.bash, lib/update.bash, lib/state.bash, lib/inventory.bash
 #
 # scan_run runs one full pass over all watched kinds. apply=0 is dry-run;
-# apply=1 applies patches via update_apply.
+# apply=1 writes updates via update_apply.
 #
 # Log dedupe is handled in-memory by lib/log.bash's per-level rate limiter
 # (KEELSON_LOG_<LEVEL>_REPEAT_INTERVAL). The scan keeps no per-container
@@ -21,7 +21,6 @@
 SCAN_WL_NS=
 SCAN_WL_NAME=
 SCAN_WL_ANNOTATIONS=
-SCAN_WL_MANAGED_FIELDS=
 SCAN_WL_SUSPEND=
 # Both container lists in one block, each line "<list> <name>=<image>", so
 # everything downstream keeps a single loop and still knows which array to
@@ -381,7 +380,6 @@ scan_extract_kind() {
         \"name=\" + \$w.metadata.name,
         \"sa=\" + (\$w${base}.serviceAccountName // \"default\"),
         ${suspend_expr}
-        \"mf=\" + (\$w.metadata.managedFields // [] | @json),
         \"ips=\" + (\$w${base}.imagePullSecrets // [] | @json),
         (\$w${base}.containers // [] | .[]
             | \"container=containers \" + .name + \"=\" + .image),
@@ -406,7 +404,6 @@ scan_extract_workload() {
     SCAN_WL_NS=
     SCAN_WL_NAME=
     SCAN_WL_ANNOTATIONS=
-    SCAN_WL_MANAGED_FIELDS=
     SCAN_WL_SUSPEND=
     SCAN_WL_CONTAINER_PAIRS=
     SCAN_WL_IPS_JSON=
@@ -439,7 +436,6 @@ scan_extract_workload() {
             'name='*)           SCAN_WL_NAME=${line#name=} ;;
             'sa='*)             SCAN_WL_SA_NAME=${line#sa=} ;;
             'suspend='*)        SCAN_WL_SUSPEND=${line#suspend=} ;;
-            'mf='*)             SCAN_WL_MANAGED_FIELDS=${line#mf=} ;;
             'ips='*)            SCAN_WL_IPS_JSON=${line#ips=} ;;
             'container='*)
                 if [ -n "$SCAN_WL_CONTAINER_PAIRS" ]; then
@@ -461,7 +457,11 @@ scan_workload() {
     ns=$SCAN_WL_NS
     name=$SCAN_WL_NAME
     annotations=$SCAN_WL_ANNOTATIONS
-    mf_json=$SCAN_WL_MANAGED_FIELDS
+    # Never from the list: kubectl leaves managedFields out of a list unless
+    # asked, so the list's copy reads as nobody owning anything, and a stale
+    # one would name the wrong owner anyway. Empty makes update_apply read
+    # them fresh, just before it writes.
+    mf_json=""
     suspend=$SCAN_WL_SUSPEND
     container_pairs=$SCAN_WL_CONTAINER_PAIRS
     ips_json=$SCAN_WL_IPS_JSON
@@ -796,8 +796,8 @@ scan_is_keelson_managed() {
 # scan_container <kind> <ns> <name> <list> <container> <image> <annotations>
 #                <ips-json> [managed-fields-json] [service-account]
 #
-# <list> is "containers" or "initContainers": which array the container lives
-# in, carried through to the write so the patch lands in the right place.
+# <list> is "containers", "initContainers" or "imageVolumes": which array the
+# image lives in, carried through to the write so it lands in the right place.
 scan_container() {
     local kind=$1 ns=$2 name=$3 clist=$4 cname=$5 cimage=$6 ann=$7 ips_json=$8 \
           mf_json=${9:-} sa_name=${10:-}
@@ -962,11 +962,14 @@ scan_container() {
         _workload_last_from=$current_tag
         _workload_last_to=$winner
         _workload_last_repo=$repo
+    elif [ $? -eq 3 ]; then
+        # Deliberately not written, nothing wrong: the image or its owner moved
+        # since the poll, it already runs the target, or the workload is gone.
+        # update_apply said which.
+        _scan_skip=$((_scan_skip + 1))
     else
-        log_error update-failed \
-            kind="$kind" ns="$ns" name="$name" container="$cname" \
-            detail="$new_image" \
-            msg="Update failed for $kind '$name'/$cname in '$ns' to image '$new_image'."
+        # Not logged here: update_apply has already said why, once, and a
+        # second line saying only that it failed is noise every poll.
         _scan_error=$((_scan_error + 1))
     fi
 }
@@ -996,8 +999,8 @@ scan_check_cronjob_trigger() {
         return 0
     fi
 
-    # The image set as it stands after this pass: update_apply records what it
-    # applied against the cache record, so reading it back is the one place
+    # The image set as it stands after this pass: scan_container records what
+    # update_apply applied against the cache record, so reading it back is the one place
     # that sees the post-update truth for every container at once.
     scan_trigger_image_set "$ns" "$name"
 
@@ -1012,12 +1015,10 @@ scan_check_cronjob_trigger() {
         scan_trigger_set_changed "$ns" "$name" || return 0
     fi
 
+    # A failure is logged once, with kubectl's reason, by
+    # update_trigger_cronjob itself.
     if update_trigger_cronjob "$ns" "$name" "$from_tag" "$to_tag" "$repo"; then
         scan_record_trigger_success CronJob "$ns" "$name"
-    else
-        log_error cronjob-job-trigger-failed \
-            kind=CronJob ns="$ns" name="$name" detail="$name" \
-            msg="Could not trigger Job from CronJob '$name' in '$ns'."
     fi
 }
 

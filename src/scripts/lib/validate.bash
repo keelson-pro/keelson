@@ -24,8 +24,15 @@ validate_env_set() {
 
 validate_env_enum() {
     local name=$1 allowed=$2 value=${!1:-}
-    case " $allowed " in
-        *" $value "*) return 0 ;;
+    # A value holding whitespace could span adjacent allowed words ("true
+    # false"), so only a single non-empty word is ever looked up.
+    case "$value" in
+        ''|*[[:space:]]*) ;;
+        *)
+            case " $allowed " in
+                *" $value "*) return 0 ;;
+            esac
+            ;;
     esac
     log_error validate-env-invalid var="$name" value="$value" allowed="$allowed" \
         msg="Validation failed: env var '$name' has value '$value' but must be one of: $allowed."
@@ -430,7 +437,10 @@ validate_config() {
                KEELSON_SCOPE KEELSON_CONFIG_MODE KEELSON_LOG_LEVEL KEELSON_LOG_FORMAT \
                KEELSON_LOG_MANAGED_WORKLOADS \
                KEELSON_RESPECT_SA_PULL_SECRETS KEELSON_STATE_CONFIGMAP \
-               KEELSON_FIELD_MANAGER_STRATEGY_OWNED KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED; do
+               KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED \
+               KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED \
+               KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED \
+               KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED; do
         validate_env_set "$var" || errors=$((errors+1))
     done
 
@@ -440,8 +450,13 @@ validate_config() {
     validate_env_enum KEELSON_LOG_FORMAT "plain json" || errors=$((errors+1))
     validate_env_enum KEELSON_LOG_MANAGED_WORKLOADS "true false" || errors=$((errors+1))
     validate_env_enum KEELSON_RESPECT_SA_PULL_SECRETS "true false" || errors=$((errors+1))
-    validate_env_enum KEELSON_FIELD_MANAGER_STRATEGY_OWNED "mimic patch" || errors=$((errors+1))
-    validate_env_enum KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED "patch claim" || errors=$((errors+1))
+    validate_env_enum KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED "mimic claim-patch claim-apply" || errors=$((errors+1))
+    validate_env_enum KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED "mimic claim-patch claim-apply" || errors=$((errors+1))
+    # Nobody to be where there is no owner, so mimic means nothing here. The
+    # annotation can still ask for it, since it does not know the state in
+    # advance: update_apply claims the image for it then.
+    validate_env_enum KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED "claim-patch claim-apply" || errors=$((errors+1))
+    validate_env_enum KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED "true false" || errors=$((errors+1))
 
     # Empty means every namespace, which only KEELSON_SCOPE=cluster is
     # entitled to, so the empty default ships without failing a vanilla

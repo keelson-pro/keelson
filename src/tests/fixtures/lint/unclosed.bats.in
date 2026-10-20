@@ -1,0 +1,13 @@
+# A quoted string that never closes before the next test: reported where it
+# opened, and the next test linted as usual. Not a real test file:
+# lint_tests.bats runs the lint on it.
+
+@test "a string left open" {
+    run bash -c '
+        echo hi
+}
+
+@test "after it" {
+    [ 1 -eq 2 ] || true
+    [ 1 -eq 1 ]
+}

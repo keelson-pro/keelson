@@ -101,8 +101,10 @@ set_required_env() {
     export KEELSON_LOG_ERROR_REPEAT_INTERVAL=600
     export KEELSON_LOG_FILE_MAX_BYTES=10485760
     export KEELSON_LOG_FILE_KEEP=5
-    export KEELSON_FIELD_MANAGER_STRATEGY_OWNED=mimic
-    export KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED=patch
+    export KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED=mimic
+    export KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED=mimic
+    export KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED=claim-patch
+    export KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED=true
 }
 
 install_required_binaries() {
@@ -141,6 +143,20 @@ install_required_binaries() {
     v_run emit validate_env_enum KEELSON_SCOPE "cluster namespace"
     [ "$status" -eq 1 ]
     [[ "$output" == *"env var 'KEELSON_SCOPE' has value 'neither' but must be one of"* ]]
+}
+
+@test "env_enum: fails when value is two adjacent allowed words" {
+    export KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED="claim-patch claim-apply"
+    v_run emit validate_env_enum KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED "claim-patch claim-apply"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"has value 'claim-patch claim-apply' but must be one of"* ]]
+}
+
+@test "env_enum: fails when value is empty" {
+    export KEELSON_SCOPE=""
+    v_run emit validate_env_enum KEELSON_SCOPE "cluster  namespace"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"has value '' but must be one of"* ]]
 }
 
 @test "env_positive_int: passes for positive int" {
@@ -353,6 +369,137 @@ write_registries() {
     v_run emit validate_config
     [ "$status" -eq 1 ]
     [[ "$output" == *"KEELSON_SCOPE"* ]]
+}
+
+@test "validate_config: every strategy value each state allows passes" {
+    set_required_env
+    install_required_binaries
+    local v
+    for v in mimic claim-patch claim-apply; do
+        export KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED=$v
+        export KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED=$v
+        v_run emit validate_config
+        [ "$status" -eq 0 ]
+    done
+    for v in claim-patch claim-apply; do
+        export KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED=$v
+        v_run emit validate_config
+        [ "$status" -eq 0 ]
+    done
+}
+
+@test "validate_config: the owned settings take exactly mimic, claim-patch and claim-apply" {
+    local var v
+    for var in KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED; do
+        for v in force Mimic claim mimic-claim patch; do
+            set_required_env
+            install_required_binaries
+            export "$var=$v"
+            v_run emit validate_config
+            [ "$status" -eq 1 ] || { echo "$var=$v passed"; return 1; }
+            [[ "$output" == *"env var '$var' has value '$v' but must be one of: mimic claim-patch claim-apply."* ]]
+        done
+    done
+}
+
+@test "validate_config: mimic is refused for the unowned setting" {
+    set_required_env
+    install_required_binaries
+    export KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED=mimic
+    v_run emit validate_config
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"env var 'KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED' has value 'mimic' but must be one of: claim-patch claim-apply."* ]]
+}
+
+@test "validate_config: the mimic annotation fallback takes true or false" {
+    set_required_env
+    install_required_binaries
+    export KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED=false
+    v_run emit validate_config
+    [ "$status" -eq 0 ]
+    local v
+    for v in yes 1 0 True; do
+        export KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED=$v
+        v_run emit validate_config
+        [ "$status" -eq 1 ] || { echo "$v passed"; return 1; }
+        [[ "$output" == *"env var 'KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED' has value '$v' but must be one of: true false."* ]]
+    done
+}
+
+@test "validate_config: an empty strategy setting is refused" {
+    local var
+    for var in KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED \
+            KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED; do
+        set_required_env
+        install_required_binaries
+        export "$var="
+        v_run emit validate_config
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"required env var '$var' is not set."* ]]
+    done
+}
+
+@test "validate_config: the shipped strategy defaults, wired as the manifest wires them, pass" {
+    set_required_env
+    install_required_binaries
+    local root="${BATS_TEST_DIRNAME}/../.." var file wires=""
+    # Taken from the manifest alone, so a setting it stops setting is left
+    # unset and fails, rather than keeping set_required_env's value.
+    unset KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED \
+          KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED
+    while read -r var file; do
+        export "$var=$(cat "$root/src/defaults/Keelson/$file")"
+        wires+="$var=$file "
+    done < <(yq '.spec.template.spec.containers[0].env[] | select(.name | test("^KEELSON_FIELD_MANAGER_"))
+                 | .name + " " + (.value | sub("^\\$\\{Keelson/"; "") | sub("}$"; ""))' \
+                 "$root/src/kubernetes/deployment.yaml")
+    # Each setting reads its own default: two equal values would hide a swap.
+    [ "$wires" = "KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED=FieldManagerStrategyApplyOwned KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED=FieldManagerStrategyUpdateOwned KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED=FieldManagerStrategyMimicAnnotationFallbackAllowed KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED=FieldManagerStrategyUnowned " ]
+    [ "$KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED" = mimic ]
+    [ "$KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED" = mimic ]
+    [ "$KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED" = claim-patch ]
+    [ "$KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED" = true ]
+    v_run emit validate_config
+    [ "$status" -eq 0 ]
+}
+
+@test "validate_config: every env var the manifest sets is one boot requires" {
+    local root="${BATS_TEST_DIRNAME}/../.." name missing="" code
+    # Whole words in code, not comments: a shortened name must not pass for
+    # being part of a longer one.
+    code=$(grep -v '^[[:space:]]*#' "$root/src/scripts/lib/validate.bash")
+    while read -r name; do
+        grep -qw -- "$name" <<<"$code" || missing+=" $name"
+    done < <(yq '.spec.template.spec.containers[0].env[].name' "$root/src/kubernetes/deployment.yaml")
+    [ -z "$missing" ] || { echo "set by the manifest, never checked at boot:$missing"; return 1; }
+}
+
+@test "validate_config: the old strategy values are refused" {
+    set_required_env
+    install_required_binaries
+    local var v
+    for var in KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED; do
+        for v in patch claim; do
+            set_required_env
+            export "$var=$v"
+            v_run emit validate_config
+            [ "$status" -eq 1 ]
+            [[ "$output" == *"env var '$var' has value '$v'"* ]]
+        done
+    done
+}
+
+@test "validate_config: each strategy setting is required" {
+    local var
+    for var in KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED \
+            KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED; do
+        set_required_env
+        install_required_binaries
+        unset "$var"
+        v_run emit validate_config
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"required env var '$var' is not set."* ]]
+    done
 }
 
 @test "validate_config: invalid enum fails" {
