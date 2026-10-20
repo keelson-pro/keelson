@@ -439,11 +439,18 @@ put_simple() {
 }
 
 @test "put: a failed write leaves no scratch file behind" {
-    chmod 500 "$KEELSON_INVENTORY_DIR"
-    inventory_put Deployment default web 1700 60 "" default '[]' '' \
-        'containers main=a:1' 2>/dev/null || true
-    chmod 700 "$KEELSON_INVENTORY_DIR"
+    # The scratch file is written and its rename into place fails. A
+    # read-only directory would not do it: the test image runs as root,
+    # which writes there anyway.
+    mv() { return 1; }
+    run emit inventory_put Deployment default web 1700 60 "" default '[]' '' \
+        'containers main=a:1'
+    unset -f mv
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Could not "* ]]
     [ -z "$(find "$KEELSON_INVENTORY_DIR" -name '*.tmp' -print -quit)" ]
+    run inventory_get Deployment default web
+    [ "$status" -eq 1 ]
 }
 
 @test "put: a successful write leaves no scratch file behind" {
