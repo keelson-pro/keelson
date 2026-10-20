@@ -282,10 +282,22 @@ fake_clock() {
 clock_advance() { FAKE_CLOCK_US=$(( FAKE_CLOCK_US + $1 )); }
 
 # The scan runs in a child the loop does not wait for, so what it recorded
-# is only there once that child has finished. Its status is the loop's to
-# ignore (a dry run's ends on the false apply test), so it is not checked.
+# is only there once that child has finished.
 wait_scan() {
-    if [ "$LOOP_SCAN_PID" -gt 0 ]; then wait "$LOOP_SCAN_PID" || true; fi
+    if [ "$LOOP_SCAN_PID" -gt 0 ]; then wait "$LOOP_SCAN_PID"; fi
+}
+
+@test "children: a dry run's scan, queue refresh, poll and refresh exit 0" {
+    # Each ends on its apply test; a false one must not be the child's
+    # status, or every clean dry-run child reads as failed.
+    loop_start_scan 0
+    wait "$LOOP_SCAN_PID"
+    loop_start_queue_refresh 0
+    wait "$LOOP_QUEUE_PID"
+    loop_start_poll 0 1700000000
+    wait "$LOOP_POLL_PID"
+    loop_start_refresh 0 Deployment 0
+    wait "$LOOP_REFRESH_PID"
 }
 
 @test "loop_run: triggers scan on first tick" {

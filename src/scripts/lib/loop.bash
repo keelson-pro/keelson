@@ -130,7 +130,7 @@ loop_start_scan() {
         # poll-all=0: this pass refreshes the cache and evicts. Registry
         # work belongs to the due-poll above, on each workload's own cadence.
         scan_run "$apply" 0
-        [ "$apply" -eq 1 ] && { state_spool_commit || true; }
+        if [ "$apply" -eq 1 ]; then state_spool_commit || true; fi
     ) &
     LOOP_SCAN_PID=$!
 }
@@ -147,7 +147,7 @@ loop_start_queue_refresh() {
     local apply=$1
     (
         scan_refresh_queued "$apply"
-        [ "$apply" -eq 1 ] && { state_spool_commit || true; }
+        if [ "$apply" -eq 1 ]; then state_spool_commit || true; fi
     ) &
     LOOP_QUEUE_PID=$!
 }
@@ -169,7 +169,7 @@ loop_start_poll() {
     local apply=$1 now=$2
     (
         scan_poll_due "$apply" "$now"
-        [ "$apply" -eq 1 ] && { state_spool_commit || true; }
+        if [ "$apply" -eq 1 ]; then state_spool_commit || true; fi
     ) &
     LOOP_POLL_PID=$!
 }
@@ -194,7 +194,7 @@ loop_start_refresh() {
             log_info_always full-refresh-complete kinds="$KEELSON_WATCHED_KINDS" \
                 msg="Full refresh complete: the cache was rebuilt from the cluster and the ledger reconciled against it."
         fi
-        [ "$apply" -eq 1 ] && { state_spool_commit || true; }
+        if [ "$apply" -eq 1 ]; then state_spool_commit || true; fi
     ) &
     LOOP_REFRESH_PID=$!
 }
