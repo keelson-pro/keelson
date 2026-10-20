@@ -344,7 +344,7 @@ update_apply() {
             # called before-first-apply, and an unforced apply that changes
             # the image conflicts with it. A claim takes the field anyway.
             update_apply_ssa "$kind" "$ns" "$name" "$clist" "$container" "$image" \
-                keelson "$from_tag" claim-apply force
+                keelson "$from_tag" claim-apply
             ;;
         *)
             # Boot validation makes this unreachable, and it stays a refusal
@@ -586,7 +586,7 @@ update_json_patch() {
 }
 
 
-# update_apply_ssa <kind> <ns> <name> <list> <container> <image> <manager> <from-tag> <strategy> [force]
+# update_apply_ssa <kind> <ns> <name> <list> <container> <image> <manager> <from-tag> <strategy>
 # The image applied as <manager>, together with everything <manager> already
 # applies on the object. An apply is the manager's whole intent: this image
 # sent alone would take from <manager> every other field it applied, and
@@ -596,8 +596,8 @@ update_json_patch() {
 # for an owner, and this image is set in it, or added to it when it is not
 # there yet. With no existing set the image goes alone.
 #
-# "force" takes the image from whoever holds it: only a claim asks for that.
-# The object is read fresh
+# Always forced, taking the image from whoever holds it: claim-apply is the
+# only caller, and a claim is what this is for. The object is read fresh
 # and its resourceVersion sent as a precondition; when it moved in between,
 # it is read again and the whole thing retried (update_with_retries).
 update_apply_ssa() {
@@ -613,13 +613,13 @@ update_apply_ssa() {
     return 1
 }
 
-# update_ssa_once <kind> <ns> <name> <list> <container> <image> <manager> <from-tag> <strategy> [force]
+# update_ssa_once <kind> <ns> <name> <list> <container> <image> <manager> <from-tag> <strategy>
 # One read and apply. Returns 0 on success, 2 when the object moved since it
 # was read, 3 or 4 from update_check_polled, 3 from update_check_owner, 3
 # when the workload is gone since the poll, 1 on anything else, logged.
 update_ssa_once() {
     local kind=$1 ns=$2 name=$3 clist=$4 container=$5 image=$6 manager=$7 \
-          from_tag=$8 strategy=$9 force=${10:-}
+          from_tag=$8 strategy=$9
     local to_tag=${image##*:} repo=${image%:*}
     local live manifest detail rv uid resource
     resource=$(workload_resource_name "$kind") || resource=$kind
@@ -706,10 +706,8 @@ update_ssa_once() {
     # Captured the same way as the patch path. Under pipefail the status is
     # kubectl's, or printf's SIGPIPE when kubectl quits before reading: a
     # failure either way, with kubectl's complaint captured.
-    local forcing=()
-    [ "$force" = "force" ] && forcing=(--force-conflicts)
     if detail=$(printf '%s' "$manifest" | kubectl apply --server-side \
-            --field-manager="$manager" ${forcing[@]+"${forcing[@]}"} -f - 2>&1 >/dev/null); then
+            --field-manager="$manager" --force-conflicts -f - 2>&1 >/dev/null); then
         log_info_always update-applied \
             kind="$kind" ns="$ns" name="$name" container="$container" \
             image="$image" from="$from_tag" to="$to_tag" repo="$repo" \
@@ -724,7 +722,7 @@ update_ssa_once() {
     fi
     update_log_ssa_failure "$kind" "$ns" "$name" "$container" "$image" \
         "$manager" "$strategy" "$detail" "It may have been written regardless; the next poll will see." \
-        "$force"
+        force
     return 1
 }
 
