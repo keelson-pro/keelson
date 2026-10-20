@@ -18,6 +18,8 @@ source "${SCRIPT_DIR}/lib/registry.bash"
 source "${SCRIPT_DIR}/lib/image.bash"
 # shellcheck source=lib/annotations.bash
 source "${SCRIPT_DIR}/lib/annotations.bash"
+# shellcheck source=lib/workload.bash
+source "${SCRIPT_DIR}/lib/workload.bash"
 # shellcheck source=lib/managedfields.bash
 source "${SCRIPT_DIR}/lib/managedfields.bash"
 # shellcheck source=lib/update.bash
@@ -68,9 +70,9 @@ cli_read_target() {
         leaf='.image.reference'
     fi
     CLI_IMAGE="" CLI_ANNOTATIONS="" CLI_SUSPEND="" CLI_IMAGE_SET=""
-    # Qualified by its API group, as the writes are (update_resource_name).
+    # Qualified by its API group, as the writes are (workload_resource_name).
     local resource
-    resource=$(update_resource_name "$kind") || return 1
+    resource=$(workload_resource_name "$kind") || return 1
     obj=$(kubectl get "$resource" "$name" -n "$ns" -o json) || return 1
     CLI_IMAGE=$(printf '%s' "$obj" | TARGET=$target yq -p=json -o=yaml \
         "[(${pod}.${list} // [])[] | select(.name == strenv(TARGET)) | ${leaf}] | select(length == 1) | .[0] // \"\"") \

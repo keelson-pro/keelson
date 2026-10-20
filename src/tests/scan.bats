@@ -465,7 +465,7 @@ SH
     [[ "$output" == *"CronJob 'cron' in 'default' updated from 1.2.3 to 1.3.0 by claim-patch (as configured) for image 'ghcr.io/x/y'"* ]]
     [[ "$output" =~ Job\ \'cron-[0-9]+\'\ created\ from\ CronJob\ \'cron\'\ in\ \'default\'\ with\ update\ from\ 1.2.3\ to\ 1.3.0\ for\ image\ \'ghcr.io/x/y\' ]]
     grep -q "create job" "$TMP_DIR/kubectl.log"
-    grep -q -- "--from=cronjob/cron" "$TMP_DIR/kubectl.log"
+    grep -q -- "--from=cronjobs.batch/cron" "$TMP_DIR/kubectl.log"
 }
 
 @test "scan_run apply: CronJob without trigger-job-on-update does not create a Job" {
@@ -1492,7 +1492,7 @@ SH
     : > "$TMP_DIR/kubectl.log"
     KEELSON_WATCHED_KINDS=CronJob scan_poll_due 1 "$LATE" 2>/dev/null
     grep -q "create job" "$TMP_DIR/kubectl.log"
-    grep -q -- "--from=cronjob/cron" "$TMP_DIR/kubectl.log"
+    grep -q -- "--from=cronjobs.batch/cron" "$TMP_DIR/kubectl.log"
 }
 
 # --- who counts as Keelson managed ---

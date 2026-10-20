@@ -371,7 +371,7 @@ trigger_cron() {
     trigger_cron
     run emit main CronJob default cron worker ghcr.io/x/y:1.2.4
     [ "$status" -eq 0 ]
-    grep -q -- "^create job cron-[0-9]* --from=cronjob/cron -n default$" "$TMP_DIR/kubectl.log"
+    grep -q -- "^create job cron-[0-9]* --from=cronjobs.batch/cron -n default$" "$TMP_DIR/kubectl.log"
     [[ "$output" == *"created from CronJob 'cron' in 'default' with update from 1.2.3 to 1.2.4 for image 'ghcr.io/x/y'."* ]]
     # The update is written before the Job is created.
     [ "$(grep -n '^patch ' "$TMP_DIR/kubectl.log" | cut -d: -f1)" -lt "$(grep -n '^create job ' "$TMP_DIR/kubectl.log" | cut -d: -f1)" ]

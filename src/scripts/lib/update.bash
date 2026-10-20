@@ -54,7 +54,8 @@
 # exactly as built-in ones are.
 #
 # Depends on (must be sourced first):
-#   lib/log.bash, lib/managedfields.bash, lib/annotations.bash
+#   lib/log.bash, lib/managedfields.bash, lib/annotations.bash,
+#   lib/workload.bash
 
 # update_apiversion <kind>
 # Echoes the apiVersion for SSA manifests of the given kind.
@@ -63,24 +64,6 @@ update_apiversion() {
         CronJob) printf 'batch/v1' ;;
         Deployment|StatefulSet|DaemonSet) printf 'apps/v1' ;;
         Rollout) printf 'argoproj.io/v1alpha1' ;;
-        *) return 1 ;;
-    esac
-}
-
-# update_resource_name <kind>
-# The resource kubectl get and patch are given for <kind>, qualified by its
-# API group. A bare kind is resolved by kubectl itself, and another CRD can
-# share the name (OpenKruise has a Rollout too); the qualified resource can
-# only mean the one Keelson reads and writes. apply needs nothing: the
-# manifest's apiVersion and kind already say which. Kind names stay bare
-# everywhere else (settings, logs, manifests).
-update_resource_name() {
-    case "$1" in
-        Deployment) printf 'deployments.apps' ;;
-        StatefulSet) printf 'statefulsets.apps' ;;
-        DaemonSet) printf 'daemonsets.apps' ;;
-        CronJob) printf 'cronjobs.batch' ;;
-        Rollout) printf 'rollouts.argoproj.io' ;;
         *) return 1 ;;
     esac
 }
@@ -181,7 +164,7 @@ declare -g UPDATE_MANAGED_FIELDS=""
 update_fetch_managed_fields() {
     local kind=$1 ns=$2 name=$3 resource
     UPDATE_MANAGED_FIELDS=""
-    resource=$(update_resource_name "$kind") || return 1
+    resource=$(workload_resource_name "$kind") || return 1
     update_kubectl "" get "$resource" "$name" -n "$ns" \
         -o 'jsonpath-as-json={.metadata.managedFields[*]}' || return 1
     UPDATE_MANAGED_FIELDS=${UPDATE_OUT:-[]}
@@ -503,7 +486,7 @@ update_patch_once() {
           from_tag=$8 strategy=$9 method=${10:-"$9 (as ${UPDATE_STRATEGY_SOURCE:-configured})"}
     local to_tag=${image##*:} repo=${image%:*} rc resource
     UPDATE_PATCH_DETAIL=""
-    resource=$(update_resource_name "$kind") || resource=$kind
+    resource=$(workload_resource_name "$kind") || resource=$kind
     if ! update_kubectl "" get "$resource" "$name" -n "$ns" -o json --show-managed-fields; then
         if update_is_gone "$UPDATE_ERR" "$kind" "$ns" "$name"; then
             update_log_gone "$kind" "$ns" "$name" "$container" "$image"
@@ -639,7 +622,7 @@ update_ssa_once() {
           from_tag=$8 strategy=$9 force=${10:-}
     local to_tag=${image##*:} repo=${image%:*}
     local live manifest detail rv uid resource
-    resource=$(update_resource_name "$kind") || resource=$kind
+    resource=$(workload_resource_name "$kind") || resource=$kind
     if ! update_kubectl "" get "$resource" "$name" -n "$ns" -o json --show-managed-fields; then
         if update_is_gone "$UPDATE_ERR" "$kind" "$ns" "$name"; then
             update_log_gone "$kind" "$ns" "$name" "$container" "$image"
@@ -1148,7 +1131,7 @@ update_mimic_once() {
           from_tag=$8
     local to_tag=${image##*:} repo=${image%:*}
     local live before manifest detail resource
-    resource=$(update_resource_name "$kind") || resource=$kind
+    resource=$(workload_resource_name "$kind") || resource=$kind
 
     if ! update_kubectl "" get "$resource" "$name" -n "$ns" -o json --show-managed-fields; then
         if update_is_gone "$UPDATE_ERR" "$kind" "$ns" "$name"; then
@@ -1354,7 +1337,7 @@ update_mimic_set_image() {
 # update_is_gone <kubectl-stderr> <kind> <ns> <name>
 # True when the workload no longer exists: the API server's NotFound for
 # this very object, '<resource> "<name>" not found' (the resource qualified
-# by its group, as update_resource_name gives it: the server's own spelling,
+# by its group, as workload_resource_name gives it: the server's own spelling,
 # the same from get, patch, apply and its dry run), or for its namespace,
 # 'namespaces "<ns>" not found' (which get and patch also print for an
 # object in a namespace that is gone). kubectl prints the server's message
@@ -1374,7 +1357,7 @@ update_mimic_set_image() {
 # 409, which kubectl prints two ways (update_conflict_line).
 update_is_gone() {
     local ns=$3 name=$4 resource line uid_tail
-    resource=$(update_resource_name "$2") || resource=""
+    resource=$(workload_resource_name "$2") || resource=""
     uid_tail="Operation cannot be fulfilled on $resource \"$name\": uid mismatch: "
     while IFS= read -r line; do
         [ "$line" = "Error from server (NotFound): namespaces \"$ns\" not found" ] && return 0
@@ -1642,7 +1625,7 @@ update_trigger_cronjob() {
     # stderr into the capture, stdout to /dev/null, in that order.
     local detail reason
     if detail=$(kubectl create job "$job_name" \
-            --from="cronjob/$name" -n "$ns" 2>&1 >/dev/null); then
+            --from="cronjobs.batch/$name" -n "$ns" 2>&1 >/dev/null); then
         log_info_always cronjob-job-triggered \
             ns="$ns" name="$name" job="$job_name" \
             from="$from_tag" to="$to_tag" repo="$repo" \

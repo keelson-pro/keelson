@@ -29,6 +29,8 @@ setup() {
     source "$SCRIPT_DIR/lib/annotations.bash"
     # shellcheck source=../scripts/lib/managedfields.bash
     source "$SCRIPT_DIR/lib/managedfields.bash"
+    # shellcheck source=../scripts/lib/workload.bash
+    source "$SCRIPT_DIR/lib/workload.bash"
     # shellcheck source=../scripts/lib/update.bash
     source "$SCRIPT_DIR/lib/update.bash"
 }
@@ -430,15 +432,15 @@ obj_kind() {
     KIND=$1 API=$api yq -i -p=json -o=json -I0 '.kind = strenv(KIND) | .apiVersion = strenv(API)' "$TMP_DIR/obj.json"
 }
 
-# --- update_resource_name ---
+# --- workload_resource_name ---
 
 @test "resource_name: every kind maps to its group-qualified resource" {
     local pair
     for pair in Deployment=deployments.apps StatefulSet=statefulsets.apps DaemonSet=daemonsets.apps \
             CronJob=cronjobs.batch Rollout=rollouts.argoproj.io; do
-        [ "$(update_resource_name "${pair%%=*}")" = "${pair#*=}" ] || { echo "$pair"; return 1; }
+        [ "$(workload_resource_name "${pair%%=*}")" = "${pair#*=}" ] || { echo "$pair"; return 1; }
     done
-    run update_resource_name Pod
+    run workload_resource_name Pod
     [ "$status" -eq 1 ]
     [ -z "$output" ]
 }
@@ -1198,7 +1200,7 @@ SH
     [ "$status" -eq 0 ]
     [[ "$output" =~ Job\ \'nightly-[0-9]+\'\ created\ from\ CronJob\ \'nightly\'\ in\ \'batch\'\ with\ update\ from\ 1.4.2\ to\ 1.4.3\ for\ image\ \'ghcr.io/acme/n\' ]]
     [[ "$(cat "$TMP_DIR/kubectl.log")" == *"create job"* ]]
-    [[ "$(cat "$TMP_DIR/kubectl.log")" == *"--from=cronjob/nightly"* ]]
+    [[ "$(cat "$TMP_DIR/kubectl.log")" == *"--from=cronjobs.batch/nightly"* ]]
     # In the CronJob's namespace, not the pod's own.
     [[ "$(cat "$TMP_DIR/kubectl.log")" == *" -n batch"* ]]
 }
@@ -2271,7 +2273,7 @@ SH
         obj_kind "$kind"
         run emit update_apply "$kind" default app containers main ghcr.io/x/y:1.2.4 1.2.3
         [ "$status" -eq 0 ]
-        grep -q -- "patch $(update_resource_name "$kind") app -n default --type=json --field-manager=keelson" "$TMP_DIR/kubectl.log"
+        grep -q -- "patch $(workload_resource_name "$kind") app -n default --type=json --field-manager=keelson" "$TMP_DIR/kubectl.log"
     done
 }
 
@@ -3671,7 +3673,7 @@ NS_GONE='Error from server (NotFound): namespaces "default" not found'
     # Deployment's would miss every kind but that.
     local kind res site
     for kind in StatefulSet DaemonSet CronJob Rollout; do
-        res=$(update_resource_name "$kind")
+        res=$(workload_resource_name "$kind")
         for site in patch claim-apply mimic-apply; do
             rm -f "$TMP_DIR"/patch.* "$TMP_DIR"/apply.* "$TMP_DIR"/dry.* "$TMP_DIR"/mf.json "$TMP_DIR/obj.json"
             # Unowned for the patch; owned by an applier for the applies, so
