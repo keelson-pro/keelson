@@ -87,3 +87,12 @@ setup() {
     run main --apply
     [ "$status" -eq 0 ]
 }
+
+@test "user_recheck: --apply exits 1 when the firings it recorded cannot be written" {
+    validate_config() { echo "validate" >>"$TMP_DIR/calls"; return 0; }
+    scan_run() { echo "scan_run $*" >>"$TMP_DIR/calls"; SCAN_ERRORS=0; }
+    state_flush() { echo "flush" >>"$TMP_DIR/calls"; return 1; }
+    run main --apply
+    [ "$status" -eq 1 ]
+    [ "$(cat "$TMP_DIR/calls")" = $'validate\nstate_init\nscan_run 1 1\ndrain\nflush' ]
+}

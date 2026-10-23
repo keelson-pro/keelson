@@ -438,11 +438,11 @@ SH
     [ ! -e "$TMP_DIR/ledger.out" ]
 }
 
-@test "update_resource: a ledger that cannot be read still triggers, and one that cannot be written exits 1" {
+@test "update_resource: a ledger that cannot be read still triggers, and it or one that cannot be written exits 1" {
     trigger_cron
     touch "$TMP_DIR/no-state"
     run emit main CronJob default cron worker ghcr.io/x/y:1.2.4
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 1 ]
     grep -q '^create job cron-' "$TMP_DIR/kubectl.log"
     [[ "$output" == *"triggering without recording it, so the controller may trigger CronJob 'cron' in 'default' once more."* ]]
     [ ! -e "$TMP_DIR/ledger.out" ]
@@ -455,11 +455,11 @@ SH
     grep -q '^create job cron-' "$TMP_DIR/kubectl.log"
 }
 
-@test "update_resource: no ledger ConfigMap named still triggers, without recording" {
+@test "update_resource: no ledger ConfigMap named still triggers, without recording, and exits 1" {
     trigger_cron
     unset KEELSON_STATE_CONFIGMAP
     run emit main CronJob default cron worker ghcr.io/x/y:1.2.4
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 1 ]
     grep -q '^create job cron-' "$TMP_DIR/kubectl.log"
     [ ! -e "$TMP_DIR/calls" ]
     [ ! -e "$TMP_DIR/ledger.out" ]

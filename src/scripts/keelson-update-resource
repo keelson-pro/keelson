@@ -51,7 +51,7 @@ from it once the image is written, as the controller's own update would.
 Exits 0 when written, 3 when deliberately not written (already that image,
 it changed while being updated, or the workload was deleted meanwhile), 1 on
 failure (including a CronJob whose image was written but whose Job was not
-created), 64 on bad usage.
+created, or was created but could not be recorded), 64 on bad usage.
 USAGE
 }
 
@@ -98,9 +98,10 @@ cli_read_target() {
 # firing recorded in the trigger ledger with every image it now runs, so the
 # controller's first-observation run does not fire it a second time. As
 # keelson-user-recheck --apply does, this process writes the ledger itself,
-# and carries on without it when it cannot be read. Returns 1 when a Job
-# was due and not created, or the firing could not be recorded: the image
-# was written either way, as the update's own line has already said.
+# and creates the Job without recording it when it cannot be read. Returns 1
+# when a Job was due and not created, or the firing could not be recorded
+# (the ledger could not be read, or not written): the image was written
+# either way, as the update's own line has already said.
 cli_trigger() {
     local ns=$1 name=$2 clist=$3 target=$4 image=$5 from_tag=$6 to_tag=$7 repo=$8
     annotation_get "$CLI_ANNOTATIONS" triggerJobOnUpdate
@@ -126,7 +127,9 @@ cli_trigger() {
     # update_trigger_cronjob itself; the update's own line said the image
     # was written.
     update_trigger_cronjob "$ns" "$name" "$from_tag" "$to_tag" "$repo" || return 1
-    [ "$loaded" -eq 1 ] || return 0
+    # Fired but unrecorded, as when the write below fails: the controller
+    # may fire it again, so this is an error too.
+    [ "$loaded" -eq 1 ] || return 1
     state_set_trigger_field CronJob "$ns" "$name" triggered-at "$(state_now)"
     # The images as they stand now: read before the write, so the target's
     # is the one just written.
