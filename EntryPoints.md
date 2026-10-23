@@ -1,262 +1,206 @@
 # Entry Points
 
-`src/scripts/` ships five executable entry points. Everything else under
+`src/scripts/` ships five executable entry points. Everything under
 `src/scripts/lib/` is library code, sourced and never run directly.
 
-| Script | Role | Lifetime |
-|---|---|---|
-| `keelson` | Long-running controller. The Deployment's `command`. | Forever (until SIGTERM). |
-| `keelson-probe` | Kubernetes probe — `startup`, `readiness`, `liveness`. | Exits after one decision. |
-| `keelson-validate` | Boot-time config and dependency check. | Exits after one run. |
-| `keelson-user-recheck` | One-shot re-check a user runs by hand, default dry-run. | Exits after one pass. |
-| `keelson-update-resource` | Patch one container's image on one workload. | Exits after one patch. |
+| Script                    | Role                                                     | Lifetime       |
+| ------------------------- | -------------------------------------------------------- | -------------- |
+| `keelson`                 | The controller. The Deployment's `command`.              | Until SIGTERM. |
+| `keelson-probe`           | The `startup`, `readiness` and `liveness` probes.        | One decision.  |
+| `keelson-validate`        | Boot-time config and dependency check.                   | One run.       |
+| `keelson-user-recheck`    | A one-shot pass over every workload, dry run by default. | One pass.      |
+| `keelson-update-resource` | Update one image on one workload, by hand.               | One update.    |
 
 
-## `keelson` — the controller
+## `keelson`: the controller
 
-**Invoked by:** the Deployment, as `command: ["keelson"]`. Nothing else calls it.
+**Invoked by** the Deployment, as `command: ["keelson"]`.
 
-**Args:** `--help` only; no runtime flags. All behaviour comes from env.
+**Args:** `--help` only. All behaviour comes from env.
 
-**Env required:** every `KEELSON_*` variable validated by `keelson-validate`.
-The full list lives in [Configuration.md](Configuration.md). The Pod also
-needs the keelson ConfigMap mounted at `/configmap` (for `registries.yaml`)
-and an emptyDir at `/keelson/work` (for the watch queue, the workload
-inventory, and the status files).
+**Env:** every `KEELSON_*` variable in [Configuration.md](Configuration.md). The
+Pod also needs the keelson ConfigMap at `/configmap` (for `registries.yaml`) and
+an `emptyDir` at `/keelson/work` (queue, workload cache, status files, log).
 
 **Flow:**
 
-1. Call `validate_config` — every required variable, enum, positive integer,
-   and external binary is checked up front so the boot log carries every
-   failure at once. A bad config fails the container, not the scan.
-2. Log a `boot` event and install `TERM`/`INT` traps that kill watcher PIDs
-   and any in-flight scan.
-3. Initialise the work queue under `/keelson/work` and load the state
-   ConfigMap into memory (a record per workload saying Keelson has seen it and
-   whether it is acting on it, plus the per-CronJob always-once ledger). No
-   schedule is stored: next-due is derived from a hash of the workload's
-   identity, so it is the same on every cold start. Log dedupe is held
-   in-memory by `lib/log.bash` and does not touch the ConfigMap.
-4. Enter the tick loop (`KEELSON_TICK_INTERVAL=1s`). Each tick:
-   - **Publish the heartbeat.** The clock is read and written in the same
-     breath, first thing, to `/keelson/work/status/heartbeat`. Written
-     atomically (tempfile + rename). Publishing before the work is what makes
-     the stamp honest: the file holds the moment it was published, so nothing
-     later in the tick can age a value a probe is about to read, and the file
-     can never report a time the loop was not at. The stamp is decimal
-     seconds at microsecond precision (`heartbeat=1786867629.967696`) and
-     `keelson-probe` compares in microseconds too, so the answer is never
-     rounded across the limit by where a second boundary happened to fall.
-   - **Supervise watchers.** Each *watch target* gets one
-     `kubectl get --watch --output-watch-events` child. A target is a kind
-     from `KEELSON_WATCHED_KINDS` in cluster scope, and that kind in one
-     namespace (`<Kind>.<namespace>`) when `KEELSON_SCOPE=namespace`, since
-     `--watch` takes a single namespace or all of them and there is no third
-     option. Four kinds across three namespaces is twelve children, each
-     failing, backing off and recovering on its own. The stream carries the
-     event type and the workload's identity and nothing else: an event cannot
-     say *what* changed, so the watcher draws no conclusions from it. A delete
-     evicts the cache entry, since there is nothing left to read; anything else
-     is written to the queue for the tick to re-read. The queue is keyed by
-     identity, so a workload writing its status fifty times in a second costs
-     fifty file writes and one re-read.
-     A dead watcher's PID becomes 0 and its
-     failure count increments; the next respawn waits `1, 2, 4, 8...`
-     seconds, capped at `KEELSON_WATCHER_RESPAWN_BACKOFF_MAX` (CrashLoopBackOff
-     style). A watcher that stays alive past `KEELSON_WATCHER_RESPAWN_HEALTHY_RESET`
-     clears its failure count.
+1. `validate_config`, the same checks `keelson-validate` runs, logs every
+   failure at once. A bad config fails the container.
+2. Log `boot` and the effective settings, and trap `TERM`/`INT` to stop the
+   watchers and any running child.
+3. Set up the work queue and load the state ConfigMap.
+4. Run the tick loop, one tick every `KEELSON_TICK_INTERVAL`:
+   - **Publish the heartbeat** to `/keelson/work/status/heartbeat`
+     (`heartbeat=<seconds>.<microseconds>`), first, atomically. Publishing
+     before the work keeps the stamp honest: nothing later in the tick can age
+     it.
+   - **Supervise the watchers.** One `kubectl get --watch --output-watch-events`
+     per watch target: each watched kind in cluster scope, or each kind in each
+     namespace (`<Kind>.<namespace>`) in namespace scope. A watcher evicts
+     deleted workloads from the cache and queues every other event for
+     re-reading; it draws no other conclusion, since an event cannot say what
+     changed. A dead watcher is respawned after `1, 2, 4, 8...` seconds, capped
+     at `KEELSON_WATCHER_RESPAWN_BACKOFF_MAX`, and one that stays up past
+     `KEELSON_WATCHER_RESPAWN_HEALTHY_RESET` clears its failure count. A watch
+     that fails without the watcher dying (RBAC, an unknown kind) is retried
+     inside the watcher, and reported in its health file.
+   - **Re-read what the watchers queued**, in a background child. Each queued
+     workload is read back and extracted the same way the scan does. If a
+     decision input moved (image, annotations, service account, pull secrets,
+     `suspend`), it is due now; if only its status moved, its schedule stands. A
+     large queue, as after a reconnect replays the cluster, lists the kinds
+     instead.
+   - **Poll what is due**, in a background child: registry lookups, then
+     `update_apply` for anything with a newer tag the policy allows, and the
+     CronJob trigger where annotated. Up to `KEELSON_REGISTRY_POLL_CONCURRENCY`
+     workloads at once.
+   - **Start a reconcile scan** every `KEELSON_RECONCILE_INTERVAL`, in a
+     background child that never overlaps the last. It lists each watched kind,
+     refreshes the cache and forgets workloads it no longer finds, for kinds it
+     listed successfully only. It makes no registry calls.
+   - **Take one kind of a full refresh**, when one is due: list it, rebuild its
+     cache, and after the last kind, reconcile the state ledger.
+   - **Rotate the log file** if oversize, checked once a minute. The loop is the
+     only rotator.
+   - **Sleep** the rest of the tick, or log `tick-overrun` and start the next
+     one at once.
 
-     This layer handles the watcher *process* dying. A watch that fails
-     without the process dying (denied RBAC, an unknown kind, a refused
-     connection) is handled inside the watcher instead: see below.
-   - **Re-read what the watchers queued.** Spawned in a background subshell
-     and gated so one never overlaps itself, for the same reason as the scan:
-     it talks to the API server and the tick must not wait on it. Each queued
-     identity is read back from the cluster and run through the same
-     extraction the reconcile scan uses, so there is one definition of what a
-     workload looks like rather than two that can drift. If the workload's
-     decision inputs moved — image, annotations, service account, pull
-     secrets, suspend — it becomes due now and the next tick polls it;
-     if only its status moved it fingerprints identically and keeps its
-     schedule. Past a couple of dozen queued identities the kinds are listed
-     once each instead, which is the routine case after a reconnect, since
-     kubectl replays the entire cluster as `ADDED`.
-   - **Kick a scan if due.** `now - last_scan_start >= KEELSON_RECONCILE_INTERVAL`
-     and no prior scan still running → spawn the scan in a background
-     subshell. The child owns the full trigger-state lifecycle: load the
-     ConfigMap, run `scan_run`, flush deltas
-     back. The parent's state stays clean; the next child rereads the
-     ConfigMap. Long scans overlap ticks but never each other.
-   - **Take one kind of a full refresh, if one is due.** Every
-     `KEELSON_FULL_REFRESH_INTERVAL` the watched kinds are queued, and one is
-     taken per tick: the cluster is listed, and only once that list is in
-     hand is that kind's cache thrown away and rebuilt, so a failed list
-     leaves the cache untouched and the window where those workloads are
-     invisible stays inside a single child. next-due is re-derived from the
-     workload's identity rather than restored, so a refresh moves each
-     workload's phase but keeps the estate spread across the interval and
-     never makes everything due at once. The last kind of the cycle
-     also drops entries for kinds no longer watched and forgets ledger keys
-     with no workload behind them.
+   Children never write the state ConfigMap: they spool their changes, and the
+   loop writes them once per tick, before starting anything. Every kubectl call
+   names the group-qualified resource (`deployments.apps`, `cronjobs.batch`,
+   `rollouts.argoproj.io`, ...), so another CRD sharing a kind name is never
+   read or written.
 
-     The controller's scan makes no registry calls of its own; that is the
-     tick's job, above. `keelson-user-recheck` is the exception, being a
-     one-shot with no tick behind it, so it polls everything in the same
-     pass. Otherwise the scan is the reconciler for the workload inventory under
-     `/keelson/work/inventory`: it records every workload it saw, eligible or
-     not, and forgets any it no longer finds. Eviction is confined to kinds
-     the pass listed successfully, because from here "kubectl errored" and
-     "all of them were deleted" look identical and only one of those should
-     empty the cache.
+   The supervisor publishes the watcher PID map to
+   `/keelson/work/status/watchers`, one `<target>=<pid>` line each, when it
+   changes, and each watcher its own health (`failures=`, `error=`) to
+   `/keelson/work/status/watcher-<target>`.
 
-     The inventory is what decouples the two costs. Listing is one call per
-     kind however many workloads exist; a registry tag lookup is one call per
-     eligible container and is the rate-limited one. So the scan asks the
-     registry about a workload only when its `next-due` has arrived, or when
-     its fingerprint shows the image or a decision annotation changed. A
-     workload nobody has touched, on a long `poll-schedule`, costs nothing
-     between polls.
-   - **Rotate the log file if it is oversize.** The controller loop is the
-     only rotator. Watchers and scan children append to the same file, and
-     concurrent appends are safe, but two processes running the rename
-     shuffle at once lose or duplicate rotated files. Checking here also
-     takes a `wc -c` off every single log call.
-   - **Sleep the remainder of the cycle.** `KEELSON_TICK_INTERVAL` is the
-     cycle time, not the idle time: the loop sleeps the tick minus the work
-     it just did, so ticks start on a fixed cadence rather than drifting by
-     however long each one took. Work that outruns the tick gets no sleep and
-     a `tick-overrun` warning, so the next tick starts immediately and the
-     broken cadence is reported rather than silently absorbed. The cycle is
-     timed in microseconds via bash 5's `EPOCHREALTIME`; whole seconds would
-     misread half the sub-second ticks as overruns.
-
-   The watcher PID map lives beside it in `/keelson/work/status/watchers`,
-   one `<target>=<pid>` line per watch target, and is written by the supervisor
-   step above rather than here. The supervisor owns the map, so it publishes
-   it the moment it changes it: a death or a respawn, not once per tick. That
-   keeps the map on disk current for `keelson-probe readiness` instead of
-   lagging until the end of the tick, and stops a value that moves twice a
-   week from being rewritten 86,400 times a day.
-
-   Each watcher publishes its own health to
-   `/keelson/work/status/watcher-<target>`, carrying `failures=<consecutive>`
-   and `error=<last kubectl stderr line>`. One writer per file, so watchers
-   never contend. Readiness needs this as well as the PID map, because a live
-   PID only proves the watcher process exists: the process outlives a watch
-   that is failing, so without it a watcher reconnecting into a permission
-   error for a week would report Ready.
-5. On `KEELSON_DRY_RUN=1` the scan still runs but no `kubectl patch` is
-   issued — handy for debugging in-cluster without write RBAC.
+5. With `KEELSON_DRY_RUN=1`, everything runs but no workload is written: the
+   poll logs `dry-run-would-update` instead. It needs no write RBAC on
+   workloads, though the state ConfigMap is still created if missing.
 
 
-## `keelson-probe` — Kubernetes probe entry
+## `keelson-probe`: the probes
 
-**Invoked by:** the kubelet, via the three `exec` probes on the Deployment.
-Not called by anything else.
+**Invoked by** the kubelet, through the Deployment's three `exec` probes.
 
-**Args:** `startup`, `readiness`, or `liveness`. Anything else exits 64.
+**Args:** `startup`, `readiness` or `liveness`; anything else exits 64.
 
-**Env required:** `KEELSON_HEARTBEAT_MAX_AGE`. Other env defaults to the same
-directory the controller writes (`/keelson/work/status`). Each check reads
-only the files it needs, so a missing watcher map never affects liveness and a
-stale heartbeat never affects readiness.
+**Env:** `KEELSON_HEARTBEAT_MAX_AGE`. Reads only the status files each check
+needs.
 
-**Decisions:**
+| Subcommand  | Passes when                                                                  |
+| ----------- | ---------------------------------------------------------------------------- |
+| `startup`   | `readiness` passes and the heartbeat is fresh.                               |
+| `readiness` | Every watch target's PID is alive and its watch is streaming (`failures=0`). |
+| `liveness`  | The heartbeat is younger than `KEELSON_HEARTBEAT_MAX_AGE`.                   |
 
-| Subcommand | Pass when |
-|---|---|
-| `startup` | Everything `readiness` needs, **and** the heartbeat fresh. |
-| `readiness` | Every watch-target PID alive **and** every watcher streaming (`failures=0`). |
-| `liveness` | Heartbeat younger than `KEELSON_HEARTBEAT_MAX_AGE`. |
+A live PID only proves the watcher exists; the health file proves its watch
+works, so a watcher retrying a permission error never reports Ready. Startup
+demands the same, so a kind Keelson cannot watch keeps the Pod from coming up.
 
-Readiness needs both halves because they answer different questions. The PID
-says the watcher process exists; the health file says its watch is actually
-working. A watcher whose `kubectl` is being refused stays alive and keeps
-retrying, so the PID alone would report a broken target as Ready.
-
-Startup deliberately demands the same as readiness: a kind Keelson was
-configured to watch but cannot is a misconfiguration, and the Pod should
-refuse to come up rather than run half working.
-
-Exit 0 on pass, 1 on fail. One log line is emitted on failure; success is
-silent so the kubelet's probe logs stay readable.
-
-That line goes to stderr only. The probe switches the file channel off before
-sourcing `lib/log.bash`, so it never writes `/keelson/work/log/keelson.log`.
-It reads the controller's state rather than authoring the controller's trail,
-the kubelet already surfaces the line in the Pod event, and a liveness kill
-restarts the container and takes the `emptyDir` with it, so the file would not
-have survived to be read. It also keeps the failure path from doing file I/O
-on the one path already closest to its `timeoutSeconds`.
+Exits 0 on pass, 1 on fail, with one line on stderr on failure and nothing on
+success. It writes no log file: the kubelet records the line in the Pod's
+events, and a liveness kill takes the `emptyDir` with it anyway.
 
 
-## `keelson-validate` — boot-time check
+## `keelson-validate`: the boot check
 
-**Invoked by:** `keelson` itself at start. Operators can also run it from a
-pod shell to debug a misconfigured Deployment.
+**Invoked by** operators, from a Pod shell, to debug a Deployment. `keelson`
+runs the same checks in-process at boot.
 
 **Args:** `--help` only.
 
 **Checks:**
 
-- Every required `KEELSON_*` variable is set, with the right enum or
-  positive-int shape.
-- `KEELSON_WATCHED_KINDS` contains only kinds Keelson supports.
-- `bash` is version 5 or newer (the tick loop times its cycle with
-  `EPOCHREALTIME`); `kubectl`, `skopeo`, `yq` (v4), `awk`, `sed`,
-  `head`, `tail`, `date` are all on `PATH`.
-- If `registries.yaml` is present, every declared `auth-mode` has its
-  helper binary available (`docker-credential-ecr-login` for `aws`,
-  `curl` for `azure`/`gcp`; `secret` needs no helper). Aliases are checked as
-  the mode they resolve to, so `aws-irsa` needs the same helper as `aws`.
-- The work directory is writable.
+- every required variable is defined, with its enum or integer shape, and the
+  two `AWS_ECR_*` variables defined even if empty;
+- `KEELSON_WATCHED_KINDS` holds only supported kinds, and the namespaces in
+  `KEELSON_NAMESPACES` exist;
+- `KEELSON_HEARTBEAT_MAX_AGE` is at least twice `KEELSON_TICK_INTERVAL`;
+- the clock is UTC and the locale's decimal point is `.`;
+- bash 5 or newer, and `kubectl`, `skopeo`, `yq` v4, `awk`, `sed`, `head`,
+  `tail` and `date` on `PATH`;
+- `registries.yaml`, if present: every key, Secret name and `auth-mode` (see
+  [Configuration.md](Configuration.md#what-is-checked-and-when)), and each
+  mode's helper (`docker-credential-ecr-login` for `aws`, `curl` for `azure` and
+  `gcp`);
+- the work directory is writable.
 
-Errors accumulate across every check so a misconfigured Pod logs the full
-list once, not one failure at a time across restarts.
-
-
-## `keelson-user-recheck` — one-shot re-check
-
-**Invoked by:** humans, debugging from a pod shell or a Job. Not wired into
-the Deployment.
-
-**Args:** `[--apply]` — without it, the script logs what *would* update but
-makes no kube writes. With it, the script patches workloads in place.
-
-**Env required:** same as `keelson` for anything that affects scanning
-(scope, config mode, registry credentials). The tick-loop and watcher
-variables are ignored.
-
-**Flow:** initialise state (only in `--apply` mode), call `scan_run`, flush
-state, exit. This is the same `scan_run` the controller's loop calls — one
-iteration, no watchers, no sleep. Use it to verify policy and credentials
-before flipping a workload to controller management.
+Every failure is logged in one run.
 
 
-## `keelson-update-resource` — single-workload patch
+## `keelson-user-recheck`: a one-shot pass
 
-**Invoked by:** the scan path inside `keelson` and `keelson-user-recheck` once
-a workload is found eligible. Also CLI-usable for manual overrides.
+**Invoked by** a person, from a Pod shell or a Job.
 
-**Args:** `<kind> <namespace> <name> <container> <new-image> [--init]` — the
-five positionals are required. `<kind>` must be one of Deployment,
-StatefulSet, DaemonSet, CronJob. ReplicaSet is not supported: patch the owning
-Deployment instead. `--init` says the container is an initContainer: names are
-unique across both lists, but the key to write the image back under is not, so
-it has to be stated rather than guessed.
+**Args:** `[--apply]`. Without it, a dry run: it logs what would be updated and
+writes nothing. With it, it updates what it finds, the way the field-manager
+strategy settings choose, and fires CronJob triggers.
 
-**Env required:** none beyond a working `kubectl` context. The script reads
-no Keelson env vars; the caller is responsible for policy decisions before
-invoking it.
+**Env:** the same as `keelson` for scanning (scope, kinds, config mode,
+registries). A dry run validates nothing; `--apply` runs the controller's full
+validation first. `KEELSON_DRY_RUN` is not read: `--apply` is the switch.
 
-**Flow:** build the patch document for the named container, inspect the
-workload's `managedFields` to pick the right field manager and apply mode
-(SSA vs strategic-merge), and call `kubectl`.
+Use it to check a workload's policy and credentials before annotating it for the
+controller. Run `--apply` from its own Pod or Job, not with `kubectl exec` in
+the controller's Pod: it writes the state ConfigMap from the spool directory the
+controller's children use, taking changes the controller has not yet written.
+The running controller's next write of the ConfigMap also replaces the CronJob
+firings `--apply` recorded, so the controller may fire one of those CronJobs
+once more.
 
-It writes the image and stops there. The CronJob Job trigger is not part of
-this path: it belongs to the poll, which is the only thing holding the
-always-once ledger that stops a Job being created twice. Patching a suspended
-CronJob from here changes its image and creates no Job.
+**Flow:** with `--apply`, validate and load the state ConfigMap (carrying on
+without it, with a warning, if that fails). Then one `scan_run` with registry
+polling, the same code the controller's poll runs, with no watchers and no loop.
+With `--apply`, write the trigger state it recorded.
+
+**Exits** 0 when nothing errored (skips and no-change are success), 1 when
+anything did (a kind that could not be listed, credentials or tags that could
+not be got, an update or CronJob trigger that failed, or with `--apply` the
+CronJob firings it made could not be recorded), 64 on bad usage.
+
+
+## `keelson-update-resource`: one update by hand
+
+**Invoked by** a person, from a Pod shell, to move one workload to a chosen
+image. Not used by the controller.
+
+**Args:** `<kind> <namespace> <name> <container> <new-image> [--init|--volume]`.
+`<kind>` is `Deployment`, `StatefulSet`, `DaemonSet`, `CronJob` or `Rollout`.
+`--init` names an init container, `--volume` an image volume: names are unique
+across the lists, but the field to write is not.
+
+**Env:** the same settings as the controller, validated the same way before
+anything is read. `KEELSON_DRY_RUN` is not read: running it is the decision to
+write.
+
+**Flow:**
+
+1. Before reading anything, refuse an unsupported kind, a target that is not a
+   container or volume name, and a new image without a tag, with a digest, or
+   with a tag outside the image reference grammar.
+2. Validate the settings, then read the workload: the target's running image and
+   the workload's `keelson.pro/` and `keel.sh/` annotations.
+3. Refuse a running image with no tag or with a digest, and a new image in
+   another repository: only the tag may change.
+4. Call `update_apply`, the controller's own update path, with the running tag
+   as the one polled: owner detection, the strategy settings and the workload's
+   `fieldManagerStrategy` annotation all apply.
+5. On a CronJob it updated itself, fire the trigger as the poll would: with
+   `triggerJobOnUpdate=true` and `spec.suspend: true`, create a Job, then record
+   the firing in the state ConfigMap with every image the CronJob now runs. Not
+   suspended: the trigger is refused with `cronjob-trigger-requires-suspend`. If
+   the ConfigMap cannot be read, the Job is still created and nothing recorded.
+   Either way the record protects little while the controller runs: it holds the
+   ledger in memory from boot, and its next write of the ConfigMap replaces this
+   one, so it may fire the CronJob once more.
+
+**Exits** 0 when written; 3 when deliberately not written (already that image,
+the image or its owner changed while it ran, or the workload was deleted); 1 on
+failure, including an image written but its CronJob's Job not created, or
+created but its firing not recorded; 64 on bad usage.
 
 
 ## How they fit together
@@ -264,27 +208,25 @@ CronJob from here changes its image and creates no Job.
 ```
 Deployment
    ├── command:          keelson
-   │       │
-   │       ├── validate_config (sources lib/validate.bash)
+   │       ├── validate_config
    │       └── loop_run
-   │             ├── write status/heartbeat        (clock read + write)
+   │             ├── write status/heartbeat
+   │             ├── write state ConfigMap (what the children spooled)
    │             ├── supervise watchers ──► kubectl get --watch &
    │             │      ├── on change ──► write status/watchers
-   │             │      └── per watcher ──► write status/watcher-<Kind>
-   │             ├── re-read queued ──► scan_refresh_queued ──► kubectl &
-   │             ├── poll what is due ──► scan_poll_due ──► skopeo &
-   │             ├── kick scan ──► scan_run ──► keelson-update-resource ──► kubectl
-   │             ├── rotate log if oversize        (sole rotator)
-   │             └── sleep (tick - elapsed), or warn if already over
+   │             │      └── per watcher ──► write status/watcher-<target>
+   │             ├── re-read queued ──► scan_refresh_queued ──► kubectl get &
+   │             ├── poll what is due ──► scan_poll_due ──► skopeo, update_apply ──► kubectl &
+   │             ├── reconcile scan ──► scan_run (cache only) ──► kubectl get &
+   │             ├── full refresh, one kind ──► scan_refresh_kind ──► kubectl get &
+   │             ├── rotate log if oversize
+   │             └── sleep (tick - elapsed), or warn if over
    │
-   ├── startupProbe:    keelson-probe startup     (heartbeat + PIDs + streaming)
-   ├── readinessProbe:  keelson-probe readiness   (PIDs + streaming)
-   └── livenessProbe:   keelson-probe liveness    (heartbeat)
+   ├── startupProbe:    keelson-probe startup
+   ├── readinessProbe:  keelson-probe readiness
+   └── livenessProbe:   keelson-probe liveness
 
-humans ──► keelson-user-recheck     (same scan_run code path, no watchers)
-humans ──► keelson-validate         (same checks the controller runs at boot)
+people ──► keelson-user-recheck      scan_run with polling, one pass
+people ──► keelson-update-resource   update_apply for one image
+people ──► keelson-validate          the boot checks
 ```
-
-The shared library code in `src/scripts/lib/` is the substance; the entry
-points are thin orchestrators that wire the right pieces together for the
-mode they implement.
