@@ -197,6 +197,19 @@ state_own_namespace() {
     read -r STATE_NAMESPACE < "$STATE_NAMESPACE_FILE" || [ -n "$STATE_NAMESPACE" ]
 }
 
+# state_is_not_found <kubectl-stderr>
+# True when kubectl's own line says the state ConfigMap does not exist, and
+# nothing else: a webhook or proxy can answer NotFound for other reasons.
+state_is_not_found() {
+    local line rest=$1
+    while [ -n "$rest" ]; do
+        line=${rest%%$'\n'*}
+        if [ "$line" = "$rest" ]; then rest=; else rest=${rest#*$'\n'}; fi
+        [ "$line" = "Error from server (NotFound): configmaps \"$STATE_CONFIGMAP_NAME\" not found" ] && return 0
+    done
+    return 1
+}
+
 # state_init
 # Discover own namespace, ensure ConfigMap exists, load it into the cache.
 state_init() {
@@ -216,9 +229,28 @@ state_init() {
 # Fetches the ConfigMap (creating an empty one if absent) and rebuilds the
 # in-memory cache from its data map.
 state_load() {
-    local cm_json
+    local cm_json reason
+    # Unloaded until this read is known to be complete: state_flush applies
+    # the whole cache, and a write from one that is not erases the ledger.
+    STATE_LOADED=0
     if ! cm_json=$(kubectl get configmap "$STATE_CONFIGMAP_NAME" \
             -n "$STATE_NAMESPACE" -o json 2>/dev/null); then
+        # Only a ConfigMap the server says is not there is an empty ledger.
+        # Anything else (Forbidden, a timeout, a server error) is a ledger
+        # that exists but could not be read, and writing an empty one over
+        # it would erase every trigger record in it. Asked again for the
+        # reason, so the read itself keeps stdout clean of kubectl's
+        # warnings; a second answer that differs is still not NotFound.
+        reason=$(kubectl get configmap "$STATE_CONFIGMAP_NAME" \
+            -n "$STATE_NAMESPACE" -o name 2>&1 >/dev/null) || true
+        if ! state_is_not_found "$reason"; then
+            log_flatten "$reason"
+            log_error state-load-failed \
+                configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
+                reason="${LOG_FLAT:-no error output}" \
+                msg="Could not read state ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE' (${LOG_FLAT:-no error output}); carrying on without the ledger, and writing nothing to it."
+            return 1
+        fi
         # The ledger does not exist yet, so an empty cache is a complete
         # picture of it and writing that is safe. Marked before the apply
         # because state_apply writes the whole cache and refuses without it.
@@ -256,7 +288,7 @@ state_load() {
     # them `as $k` scopes to the first comma element only and every field line
     # silently disappears.
     local lines rest line rec k field val
-    lines=$(printf '%s' "$cm_json" | yq -p=json -o=y -r '
+    if ! lines=$(printf '%s' "$cm_json" | yq -p=json -o=y -r '
         .metadata.annotations as $a | (
           ( "C|At|"      + ($a["keelson.pro/createdAt"]        // "") ),
           ( "C|Version|" + ($a["keelson.pro/createdByVersion"] // "") ),
@@ -266,7 +298,16 @@ state_load() {
               ( .value | select(. != "null" and . != "") | from_json | to_entries | .[]
                   | "F|" + $k + "|" + .key + "|" + .value )
           ) )
-        )' 2>/dev/null)
+        )' 2>/dev/null); then
+        # One value that is not a JSON object (a hand edit, say) fails the
+        # whole read. Carrying on as if it were empty would erase the rest
+        # on the next write, so the ledger stays unloaded and unwritten.
+        log_error state-load-failed \
+            configmap="$STATE_CONFIGMAP_NAME" ns="$STATE_NAMESPACE" \
+            reason="unreadable data" \
+            msg="Could not read state ConfigMap '$STATE_CONFIGMAP_NAME' in '$STATE_NAMESPACE': a value in its data is not a JSON object. Carrying on without the ledger, and writing nothing to it, until it is fixed."
+        return 1
+    fi
 
     STATE_LOADED=1
 

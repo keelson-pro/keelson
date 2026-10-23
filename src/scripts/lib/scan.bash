@@ -10,7 +10,7 @@
 #   lib/eligibility.bash, lib/update.bash, lib/state.bash, lib/inventory.bash
 #
 # scan_run runs one full pass over all watched kinds. apply=0 is dry-run;
-# apply=1 applies patches via update_apply.
+# apply=1 writes updates via update_apply.
 #
 # Log dedupe is handled in-memory by lib/log.bash's per-level rate limiter
 # (KEELSON_LOG_<LEVEL>_REPEAT_INTERVAL). The scan keeps no per-container
@@ -21,7 +21,6 @@
 SCAN_WL_NS=
 SCAN_WL_NAME=
 SCAN_WL_ANNOTATIONS=
-SCAN_WL_MANAGED_FIELDS=
 SCAN_WL_SUSPEND=
 # Both container lists in one block, each line "<list> <name>=<image>", so
 # everything downstream keeps a single loop and still knows which array to
@@ -35,6 +34,10 @@ SCAN_KIND_RECORDS=
 SCAN_KIND_COUNT=0
 SCAN_POLL_OVERRUNS=0
 SCAN_ROLLOUT_REF_PASSES=0
+# Set by scan_run: what its pass logged as errors (a kind it could not list,
+# credentials or tags it could not get, an update or a CronJob's trigger that
+# failed), for a one-shot caller to exit on. Its own return stays 0.
+SCAN_ERRORS=0
 # "<ns>/<name>" per annotated Rollout this scan found with no pod template.
 # Filled by scan_cache_workload, drained by scan_report_rollout_no_template.
 declare -a SCAN_ROLLOUT_NO_TEMPLATE=()
@@ -60,7 +63,8 @@ scan_run() {
     registry_init
 
     local _scan_total=0 _scan_would_update=0 _scan_updated=0 \
-          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0
+          _scan_no_change=0 _scan_skip=0 _scan_error=0 _scan_managed=0 \
+          _scan_trigger_error=0
     SCAN_ROLLOUT_NO_TEMPLATE=()
 
     # Inventory bookkeeping for this pass. SCAN_SEEN is what the cluster
@@ -90,6 +94,9 @@ scan_run() {
         skip="$_scan_skip" \
         error="$_scan_error" \
         msg="Scan complete: $_scan_total containers examined, $_scan_updated updated, $_scan_would_update would-update, $_scan_no_change no-change, $_scan_skip skipped, $_scan_error errored."
+    # A trigger is the workload's, not a container's, so it stays out of
+    # the per-container count above.
+    SCAN_ERRORS=$(( _scan_error + _scan_trigger_error ))
 }
 
 # scan_reconcile_inventory
@@ -381,7 +388,6 @@ scan_extract_kind() {
         \"name=\" + \$w.metadata.name,
         \"sa=\" + (\$w${base}.serviceAccountName // \"default\"),
         ${suspend_expr}
-        \"mf=\" + (\$w.metadata.managedFields // [] | @json),
         \"ips=\" + (\$w${base}.imagePullSecrets // [] | @json),
         (\$w${base}.containers // [] | .[]
             | \"container=containers \" + .name + \"=\" + .image),
@@ -406,7 +412,6 @@ scan_extract_workload() {
     SCAN_WL_NS=
     SCAN_WL_NAME=
     SCAN_WL_ANNOTATIONS=
-    SCAN_WL_MANAGED_FIELDS=
     SCAN_WL_SUSPEND=
     SCAN_WL_CONTAINER_PAIRS=
     SCAN_WL_IPS_JSON=
@@ -439,7 +444,6 @@ scan_extract_workload() {
             'name='*)           SCAN_WL_NAME=${line#name=} ;;
             'sa='*)             SCAN_WL_SA_NAME=${line#sa=} ;;
             'suspend='*)        SCAN_WL_SUSPEND=${line#suspend=} ;;
-            'mf='*)             SCAN_WL_MANAGED_FIELDS=${line#mf=} ;;
             'ips='*)            SCAN_WL_IPS_JSON=${line#ips=} ;;
             'container='*)
                 if [ -n "$SCAN_WL_CONTAINER_PAIRS" ]; then
@@ -461,7 +465,11 @@ scan_workload() {
     ns=$SCAN_WL_NS
     name=$SCAN_WL_NAME
     annotations=$SCAN_WL_ANNOTATIONS
-    mf_json=$SCAN_WL_MANAGED_FIELDS
+    # Never from the list: kubectl leaves managedFields out of a list unless
+    # asked, so the list's copy reads as nobody owning anything, and a stale
+    # one would name the wrong owner anyway. Empty makes update_apply read
+    # them fresh, just before it writes.
+    mf_json=""
     suspend=$SCAN_WL_SUSPEND
     container_pairs=$SCAN_WL_CONTAINER_PAIRS
     ips_json=$SCAN_WL_IPS_JSON
@@ -796,8 +804,8 @@ scan_is_keelson_managed() {
 # scan_container <kind> <ns> <name> <list> <container> <image> <annotations>
 #                <ips-json> [managed-fields-json] [service-account]
 #
-# <list> is "containers" or "initContainers": which array the container lives
-# in, carried through to the write so the patch lands in the right place.
+# <list> is "containers", "initContainers" or "imageVolumes": which array the
+# image lives in, carried through to the write so it lands in the right place.
 scan_container() {
     local kind=$1 ns=$2 name=$3 clist=$4 cname=$5 cimage=$6 ann=$7 ips_json=$8 \
           mf_json=${9:-} sa_name=${10:-}
@@ -865,7 +873,8 @@ scan_container() {
         # scoped to another repo is answered that way by some registries
         # rather than with a 401. A list missing only the running tag is fine,
         # since a deleted tag leaves the others behind.
-        if tags_raw=$(registry_list_tags "$cimage" "$creds") && [ -n "$tags_raw" ]; then
+        if registry_list_tags "$cimage" "$creds" && [ -n "$REGISTRY_TAGS" ]; then
+            tags_raw=$REGISTRY_TAGS
             listed=1
             break
         fi
@@ -876,7 +885,10 @@ scan_container() {
     done
     # No source had anything, so the host is either public or unconfigured.
     if [ "$listed" -eq 0 ] && [ "$tried" -eq 0 ]; then
-        tags_raw=$(registry_list_tags "$cimage" "") && [ -n "$tags_raw" ] && listed=1
+        if registry_list_tags "$cimage" "" && [ -n "$REGISTRY_TAGS" ]; then
+            tags_raw=$REGISTRY_TAGS
+            listed=1
+        fi
     fi
     if [ "$listed" -eq 0 ]; then
         local reason=${REGISTRY_LAST_ERROR:-}
@@ -958,11 +970,14 @@ scan_container() {
         _workload_last_from=$current_tag
         _workload_last_to=$winner
         _workload_last_repo=$repo
+    elif [ $? -eq 3 ]; then
+        # Deliberately not written, nothing wrong: the image or its owner moved
+        # since the poll, it already runs the target, or the workload is gone.
+        # update_apply said which.
+        _scan_skip=$((_scan_skip + 1))
     else
-        log_error update-failed \
-            kind="$kind" ns="$ns" name="$name" container="$cname" \
-            detail="$new_image" \
-            msg="Update failed for $kind '$name'/$cname in '$ns' to image '$new_image'."
+        # Not logged here: update_apply has already said why, once, and a
+        # second line saying only that it failed is noise every poll.
         _scan_error=$((_scan_error + 1))
     fi
 }
@@ -989,11 +1004,12 @@ scan_check_cronjob_trigger() {
         log_error cronjob-trigger-requires-suspend \
             kind=CronJob ns="$ns" name="$name" detail="$name" \
             msg="CronJob '$name' in '$ns' has trigger-job-on-update=true but spec.suspend is not true; refusing to trigger to avoid racing the scheduler."
+        scan_count_trigger_error
         return 0
     fi
 
-    # The image set as it stands after this pass: update_apply records what it
-    # applied against the cache record, so reading it back is the one place
+    # The image set as it stands after this pass: scan_container records what
+    # update_apply applied against the cache record, so reading it back is the one place
     # that sees the post-update truth for every container at once.
     scan_trigger_image_set "$ns" "$name"
 
@@ -1008,13 +1024,21 @@ scan_check_cronjob_trigger() {
         scan_trigger_set_changed "$ns" "$name" || return 0
     fi
 
+    # A failure is logged once, with kubectl's reason, by
+    # update_trigger_cronjob itself.
     if update_trigger_cronjob "$ns" "$name" "$from_tag" "$to_tag" "$repo"; then
         scan_record_trigger_success CronJob "$ns" "$name"
     else
-        log_error cronjob-job-trigger-failed \
-            kind=CronJob ns="$ns" name="$name" detail="$name" \
-            msg="Could not trigger Job from CronJob '$name' in '$ns'."
+        scan_count_trigger_error
     fi
+}
+
+# scan_count_trigger_error
+# Counts a trigger refused or failed toward scan_run's SCAN_ERRORS. A poll
+# child has no such counter (its trigger errors are logged, not tallied),
+# so an unset one is started rather than tripping set -u.
+scan_count_trigger_error() {
+    _scan_trigger_error=$(( ${_scan_trigger_error:-0} + 1 ))
 }
 
 # scan_trigger_image_set <ns> <name>  -> SCAN_TRIGGER_IMAGE_SET

@@ -19,11 +19,18 @@
 
 ANNOTATION_VALUE=
 ANNOTATION_RAW=
+ANNOTATION_KEY=
+# Optional, set by a caller that knows which workload the lines belong to,
+# so a conflict line can name it: kind, namespace, name.
+ANNOTATION_CTX_KIND= ANNOTATION_CTX_NS= ANNOTATION_CTX_NAME=
 ANNOTATION_KEEL_KEY=
 ANNOTATION_ALT_KEY=
 
 # annotation_get <annotation-lines> <logical-key> [<name>] [<target-kind>]
-#                -> ANNOTATION_VALUE
+#                -> ANNOTATION_VALUE, ANNOTATION_KEY
+# ANNOTATION_KEY is the full key the value was read from (its spelling and
+# scope, either prefix), so a message about the value can name the
+# annotation actually set; empty when nothing was read.
 # <target-kind> is "containers" (the default) or "volumes", naming which kind
 # of thing <name> refers to. A pod may hold a container and an image volume
 # of the same name, so the name alone cannot say which is meant.
@@ -46,6 +53,7 @@ ANNOTATION_ALT_KEY=
 annotation_get() {
     local lines=$1 key=$2 container=${3:-} target_kind=${4:-containers}
     local mode=${KEELSON_CONFIG_MODE:?KEELSON_CONFIG_MODE required}
+    ANNOTATION_KEY=
 
     case "$mode" in
         keelson|keel|both) ;;
@@ -62,20 +70,22 @@ annotation_get() {
         return 0
     fi
 
-    local keelson_val="" keel_val="" keel_key alt
+    local keelson_val="" keel_val="" keel_key alt keelson_from="" keel_from=""
     annotation_alt_key "$key"
     alt=$ANNOTATION_ALT_KEY
 
     if [ -n "$container" ]; then
         annotation_pick "$lines" "keelson.pro/$key.$target_kind.$container" \
             "${alt:+keelson.pro/$alt.$target_kind.$container}"
-        keelson_val=$ANNOTATION_RAW
+        keelson_val=$ANNOTATION_RAW keelson_from=$ANNOTATION_KEY
     fi
     if [ -z "$keelson_val" ]; then
         annotation_pick "$lines" "keelson.pro/$key" "${alt:+keelson.pro/$alt}"
-        keelson_val=$ANNOTATION_RAW
+        keelson_val=$ANNOTATION_RAW keelson_from=$ANNOTATION_KEY
     fi
-    case "$keelson_val" in REJECT:*) ANNOTATION_VALUE=$keelson_val; return 0 ;; esac
+    case "$keelson_val" in
+        REJECT:*) ANNOTATION_VALUE=$keelson_val ANNOTATION_KEY=$keelson_from; return 0 ;;
+    esac
 
     annotation_keel_key "$key"
     keel_key=$ANNOTATION_KEEL_KEY
@@ -85,31 +95,36 @@ annotation_get() {
         if [ -n "$container" ]; then
             annotation_pick "$lines" "keel.sh/$keel_key.$target_kind.$container" \
                 "${alt:+keel.sh/$alt.$target_kind.$container}"
-            keel_val=$ANNOTATION_RAW
+            keel_val=$ANNOTATION_RAW keel_from=$ANNOTATION_KEY
         fi
         if [ -z "$keel_val" ]; then
             annotation_pick "$lines" "keel.sh/$keel_key" "${alt:+keel.sh/$alt}"
-            keel_val=$ANNOTATION_RAW
+            keel_val=$ANNOTATION_RAW keel_from=$ANNOTATION_KEY
         fi
-        case "$keel_val" in REJECT:*) ANNOTATION_VALUE=$keel_val; return 0 ;; esac
+        case "$keel_val" in
+            REJECT:*) ANNOTATION_VALUE=$keel_val ANNOTATION_KEY=$keel_from; return 0 ;;
+        esac
     fi
 
-    ANNOTATION_VALUE=
+    ANNOTATION_VALUE= ANNOTATION_KEY=
     case "$mode" in
         keelson)
-            ANNOTATION_VALUE=$keelson_val
+            ANNOTATION_VALUE=$keelson_val ANNOTATION_KEY=$keelson_from
             ;;
         keel)
             annotation_translate_keel_value "$key" "$keel_val"
+            ANNOTATION_KEY=$keel_from
             ;;
         both)
             if [ -n "$keelson_val" ]; then
-                ANNOTATION_VALUE=$keelson_val
+                ANNOTATION_VALUE=$keelson_val ANNOTATION_KEY=$keelson_from
             else
                 annotation_translate_keel_value "$key" "$keel_val"
+                ANNOTATION_KEY=$keel_from
             fi
             ;;
     esac
+    [ -n "$ANNOTATION_VALUE" ] || ANNOTATION_KEY=
 }
 
 # annotation_has_prefix <annotation-lines> <prefix>
@@ -142,8 +157,10 @@ annotation_alt_key() {
     esac
 }
 
-# annotation_pick <lines> <key> <alt-key>  -> ANNOTATION_RAW
+# annotation_pick <lines> <key> <alt-key>  -> ANNOTATION_RAW, ANNOTATION_KEY
 # One scope, both spellings. Empty <alt-key> means the key has only one.
+# ANNOTATION_KEY is the spelling the value came from (<key> when both were
+# set), empty when neither was.
 #
 # Both spellings on the same workload with different values is a rejection,
 # not a precedence puzzle: whichever we picked would be someone's surprise.
@@ -152,17 +169,25 @@ annotation_pick() {
     local lines=$1 key=$2 alt=$3 primary secondary
     annotation_lookup_raw "$lines" "$key"
     primary=$ANNOTATION_RAW
+    ANNOTATION_KEY=${primary:+$key}
     if [ -z "$alt" ]; then
         ANNOTATION_RAW=$primary
         return 0
     fi
     annotation_lookup_raw "$lines" "$alt"
     secondary=$ANNOTATION_RAW
+    [ -z "$primary" ] && ANNOTATION_KEY=${secondary:+$alt}
     if [ -n "$primary" ] && [ -n "$secondary" ]; then
         if [ "$primary" != "$secondary" ]; then
+            local on="" ctx=()
+            if [ -n "$ANNOTATION_CTX_NAME" ]; then
+                on=" on $ANNOTATION_CTX_KIND '$ANNOTATION_CTX_NAME' in '$ANNOTATION_CTX_NS'"
+                ctx=(kind="$ANNOTATION_CTX_KIND" ns="$ANNOTATION_CTX_NS" name="$ANNOTATION_CTX_NAME")
+            fi
             log_error annotation-spelling-conflict key="$key" alt="$alt" \
+                ${ctx[@]+"${ctx[@]}"} \
                 value="$primary" alt-value="$secondary" \
-                msg="Both '$key' and '$alt' are set with different values ('$primary' and '$secondary'); pick one spelling."
+                msg="Both '$key' and '$alt' are set$on with different values ('$primary' and '$secondary'); pick one spelling."
             ANNOTATION_RAW='REJECT:annotation-spelling-conflict'
             return 0
         fi

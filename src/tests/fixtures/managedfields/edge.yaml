@@ -1,0 +1,59 @@
+# Segment kinds run-stage does not use: a v: set member, a k: with two
+# merge keys next to an element sharing one of them, an owned element after
+# an unowned one, and an atomic list owned whole.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge
+  namespace: ns
+  resourceVersion: "9"
+  uid: "u-1"
+  finalizers: ["a.example/x", "b.example/y"]
+  managedFields:
+  - manager: owner
+    operation: Apply
+    fieldsV1:
+      f:metadata:
+        f:finalizers:
+          v:"b.example/y": {}
+      f:spec:
+        f:template:
+          f:spec:
+            f:containers:
+              k:{"name":"second"}:
+                .: {}
+                f:name: {}
+                f:image: {}
+                f:ports:
+                  k:{"containerPort":8080,"protocol":"TCP"}:
+                    .: {}
+                    f:containerPort: {}
+                    f:protocol: {}
+            f:tolerations: {}
+  - manager: other
+    operation: Update
+    fieldsV1:
+      f:spec:
+        f:template:
+          f:spec:
+            f:containers:
+              k:{"name":"first"}:
+                f:image: {}
+spec:
+  template:
+    spec:
+      tolerations:
+      - key: k
+        operator: Exists
+      containers:
+      - name: first
+        image: first:1
+      - name: second
+        image: second:1
+        ports:
+        - containerPort: 8080
+          protocol: UDP
+          name: udp
+        - containerPort: 8080
+          protocol: TCP
+          name: tcp

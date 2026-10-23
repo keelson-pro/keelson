@@ -218,13 +218,14 @@ watch_error_hint() {
 # way to tell a delete from an update: without it a deleted object arrives
 # looking exactly like a live one, and the cache would never evict.
 watch_kubectl_stream() {
-    local jp="{.type} {.object.metadata.namespace} {.object.metadata.name}{\"\n\"}"
+    local jp="{.type} {.object.metadata.namespace} {.object.metadata.name}{\"\n\"}" resource
     watch_target_split "$1"
+    resource=$(workload_resource_name "$WATCH_TARGET_KIND") || return 1
     if [ -n "$WATCH_TARGET_NS" ]; then
-        kubectl get "$WATCH_TARGET_KIND" -n "$WATCH_TARGET_NS" \
+        kubectl get "$resource" -n "$WATCH_TARGET_NS" \
             --watch --output-watch-events=true -o jsonpath="$jp"
     else
-        kubectl get "$WATCH_TARGET_KIND" --all-namespaces \
+        kubectl get "$resource" --all-namespaces \
             --watch --output-watch-events=true -o jsonpath="$jp"
     fi
 }

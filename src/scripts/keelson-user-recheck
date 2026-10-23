@@ -2,14 +2,16 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025-2026 Keelson contributors (Fred Cooke)
 #
-# One-shot re-check a user runs by hand. Default dry-run; --apply patches
-# workloads in place.
+# One-shot re-check a user runs by hand. Default dry-run; --apply writes the
+# updates, each the way the field-manager strategy chooses.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/log.bash
 source "${SCRIPT_DIR}/lib/log.bash"
+# shellcheck source=lib/validate.bash
+source "${SCRIPT_DIR}/lib/validate.bash"
 # shellcheck source=lib/clock.bash
 source "${SCRIPT_DIR}/lib/clock.bash"
 # shellcheck source=lib/inventory.bash
@@ -41,10 +43,16 @@ Usage: keelson-user-recheck [--apply] [--help]
 
 Scan the cluster (or namespace, per KEELSON_SCOPE) for Keelson-managed
 workloads. Parse the current tag, query the registry, evaluate policy,
-and either log what would be updated (default) or patch the workloads.
+and either log what would be updated (default) or update the workloads.
 
-  --apply   Strategic-merge patch updatable workloads to the winning tag.
+  --apply   Update updatable workloads to the winning tag, written the way
+            the field-manager strategy settings choose.
             Default is dry-run: log-only, no kube writes.
+
+Exits 0 when nothing errored (skips and no-change included), 1 when
+anything did (a kind that could not be listed, credentials or tags that
+could not be got, an update or a CronJob's trigger that failed, or with
+--apply the CronJob firings it made could not be recorded), 64 on bad usage.
 USAGE
 }
 
@@ -61,6 +69,9 @@ main() {
     done
 
     if [ "$apply" -eq 1 ]; then
+        # It writes, so it runs with the settings the controller would,
+        # checked the same way.
+        validate_config || return 1
         if ! state_init; then
             log_warn state-init-failed \
                 configmap="${KEELSON_STATE_CONFIGMAP:-keelson-state}" \
@@ -73,12 +84,21 @@ main() {
     # poll-all: a one-shot has no tick to drive next-due polling.
     scan_run "$apply" 1
 
+    local unrecorded=0
     if [ "$apply" -eq 1 ]; then
         # No tick loop here, so this process is its own writer: drain whatever
-        # the scan spooled and write it once.
+        # the scan spooled and write it once. A write that fails, or is
+        # refused because the ledger could not be read, leaves the CronJob
+        # firings of this pass unrecorded, so the controller may fire them
+        # again: an error, as the CLI's is. With nothing to write it succeeds.
         state_drain_spool || true
-        state_flush || true
+        state_flush || unrecorded=1
     fi
+    # The scan returns 0 whatever it met, and says what it met here.
+    [ "$SCAN_ERRORS" -eq 0 ] && [ "$unrecorded" -eq 0 ]
 }
 
-main "$@"
+# Run when executed, not when sourced, so the tests can drive its functions.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

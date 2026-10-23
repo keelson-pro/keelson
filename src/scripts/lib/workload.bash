@@ -32,9 +32,9 @@
 # then the same code path, and there is no second opinion about what scope
 # means.
 #
-# Commas are tolerated as separators here as well as at boot: the entrypoints
-# that do not run validate_config (keelson-user-recheck) read this too, and a
-# list that works for the controller has to work for them.
+# Commas are tolerated as separators here as well as at boot: an entrypoint
+# that does not run validate_config (keelson-user-recheck's dry run) reads
+# this too, and a list that works for the controller has to work for it.
 declare -ga WORKLOAD_NAMESPACES=()
 workload_namespaces() {
     local raw
@@ -50,15 +50,35 @@ workload_namespaces() {
     esac
 }
 
+# workload_resource_name <kind>
+# The resource every kubectl get, watch, patch and create job --from is
+# given for <kind>, qualified by its API group. A bare kind is resolved by
+# kubectl itself, and another CRD can share the name (OpenKruise has a
+# Rollout too); the qualified resource can only mean the one Keelson reads
+# and writes. apply needs nothing: the manifest's apiVersion and kind
+# already say which. Kind names stay bare everywhere else (settings, logs,
+# manifests).
+workload_resource_name() {
+    case "$1" in
+        Deployment) printf 'deployments.apps' ;;
+        StatefulSet) printf 'statefulsets.apps' ;;
+        DaemonSet) printf 'daemonsets.apps' ;;
+        CronJob) printf 'cronjobs.batch' ;;
+        Rollout) printf 'rollouts.argoproj.io' ;;
+        *) return 1 ;;
+    esac
+}
+
 # workload_list_kind <kind> [ns]
 # Echoes the kubectl JSON list for <kind>. An empty or absent <ns> lists every
 # namespace; anything else lists that one.
 workload_list_kind() {
-    local kind=$1 ns=${2:-}
+    local kind=$1 ns=${2:-} resource
+    resource=$(workload_resource_name "$kind") || return 1
     if [ -n "$ns" ]; then
-        kubectl get "$kind" -n "$ns" -o json
+        kubectl get "$resource" -n "$ns" -o json
     else
-        kubectl get "$kind" --all-namespaces -o json
+        kubectl get "$resource" --all-namespaces -o json
     fi
 }
 
@@ -71,8 +91,9 @@ workload_list_kind() {
 # returns a list with one item or none. A workload deleted between the event
 # and this read is then an empty list rather than a failure to explain.
 workload_get_one() {
-    local kind=$1 ns=$2 name=$3
-    kubectl get "$kind" -n "$ns" --field-selector "metadata.name=$name" -o json
+    local kind=$1 ns=$2 name=$3 resource
+    resource=$(workload_resource_name "$kind") || return 1
+    kubectl get "$resource" -n "$ns" --field-selector "metadata.name=$name" -o json
 }
 
 # workload_pod_spec_path <kind>

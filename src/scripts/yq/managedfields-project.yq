@@ -1,0 +1,333 @@
+# Rebuilds what one manager applied: the live values of exactly the fields in
+# its Apply entry's fieldsV1, and nothing else. Input is the live object as
+# JSON with managedFields; env MANAGER names the manager. Output is
+# {"body": <the rebuilt object>, "omitted": [<fieldsV1 path>, ...]}. Fails,
+# with a message, whenever the set and the live object do not line up.
+#
+# An owned field the live object lacks, or an owned element or set member
+# that is no longer there, is left out of the body and its fieldsV1 path
+# listed under "omitted". The server drops zero values (readOnly: false,
+# env: [], nodeSelector: {}), so such a field is absent and stays absent:
+# leaving it out changes nothing in the object, and the owner only stops
+# being recorded as owning a field that does not exist, which its next
+# deploy re-owns. One exception, seen on a cluster (2026-10-18): a parent
+# left empty by the drop (dnsConfig: {} once searches: [] went) is removed
+# too when nobody else holds it. An empty struct means the same as an
+# absent one for core types, and one that validation needs fails the dry
+# run instead. The caller checks that loss is all that happens.
+#
+# An apply is the manager's whole intent, so a field it owns and leaves out
+# is taken from it, and deleted when nobody else holds it, while a field it
+# does not own and sends becomes its own. Exactly its set, at the values
+# already live, is the only body that changes nothing but what we then edit.
+#
+# yq has no def, if or getpath, so the walk is flat: list the owned leaves,
+# translate each fieldsV1 path to a live path by walking the object
+# alongside it, then copy those values into an empty document.
+#
+# Output is meaningless when the manager has no such entry: yq does not stop
+# at an empty binding, it carries on and builds a document out of nulls, and
+# once passed the whole input straight through. Refusing that case is the
+# caller's job, before this runs (managedfields_owner_set).
+# The entry for the object itself: a subresource entry (status, scale) is a
+# separate set that an apply to the object neither sends nor touches.
+# yq's == treats a string on its right as a glob pattern, so names and
+# values are compared as base64 of their JSON, which holds no * or ?.
+[.metadata.managedFields[] | select((.manager | @base64) == (strenv(MANAGER) | @base64)
+    and .operation == "Apply" and (.subresource // "") == "")] as $entries
+| . as $live
+# Some data yq cannot carry exactly, so an object holding any of it is
+# refused outright rather than sent changed:
+#   a map key with * or ?   a pattern wherever a map passes through an
+#                           object yq builds, collapsing other keys
+#   a map key "<<"          a merge, dropped on output
+#   a map key "[]"          special to setpath, which nulls the parent
+#   U+0085 (NEL) anywhere   from_json parses JSON as YAML, which folds it
+#                           as a line break
+# The keys only occur in free-form maps (CSI volume attributes, CRD fields).
+| [$live | .. | select(tag == "!!map") | keys | .[]
+    | select(test("[*?\x{0085}]") or . == "<<" or . == "[]")] as $unsafe
+| ((select(($unsafe | length) == 0))
+    // error("the object holds a key that cannot be handled exactly: " + ($unsafe[0] // "")))
+| (([$live | .. | select(tag == "!!str") | select(test("\x{0085}"))] | length) as $nel
+    | (select($nel == 0)) // error("the object holds a value with U+0085 (NEL), which cannot be handled exactly"))
+| $entries[0].fieldsV1 as $fs
+# A set that is empty or not a map gives no leaves but the root, and the
+# root would copy the whole object: refused, like an entry recorded at an
+# apiVersion other than the one read, whose paths need not mean the same.
+| ((select(($fs | tag) == "!!map" and ($fs | length) > 0))
+    // error("the manager's entry holds no field set"))
+# Every node of a set is a map; anything else is a set the server would not
+# have written, and dropping it would drop an owned field.
+| ((select(([$fs | .. | select(tag != "!!map")] | length) == 0))
+    // error("the manager's field set holds something other than maps"))
+# The write's precondition: an object read without one cannot be written
+# safely from this read.
+| ((select(($live.metadata.resourceVersion | tag) == "!!str" and $live.metadata.resourceVersion != ""))
+    // error("the object carries no resourceVersion to write against"))
+# And its uid: an apply is an upsert, so to an object deleted since the read
+# it would create a new one; with the uid the server refuses instead.
+| ((select(($live.metadata.uid | tag) == "!!str" and $live.metadata.uid != ""))
+    // error("the object carries no uid to write against"))
+# As base64, like the manager name: == reads its right side as a glob.
+| ((select((($entries[0].apiVersion // $live.apiVersion) | @base64) == ($live.apiVersion | @base64)))
+    // error("the manager's entry is for " + $entries[0].apiVersion + ", the object was read as " + $live.apiVersion))
+# Paths come back from wherever $fs was taken, so that prefix goes.
+| ($fs | path | length) as $prefix
+| [$fs | .. | select(tag == "!!map" and length == 0) | path | .[$prefix:]] as $leaves
+# Nothing is recorded beneath a marker or a set member, so either must end
+# its leaf. Checked by position, before the walk: a check made while walking
+# sees only the leaf's last segment, and a leaf with a marker in the middle
+# that also ends in one would pass it and send a path nobody owns.
+| ([$leaves[] | select(.[:-1] | any_c(. == "."))] as $mid
+    | (select(($mid | length) == 0))
+        // error("owned marker has fields beneath it: " + (($mid[0] // []) | join(" "))))
+| ([$leaves[] | select(.[:-1] | any_c(test("^v:")))] as $mid
+    | (select(($mid | length) == 0))
+        // error("owned set member has fields beneath it: " + (($mid[0] // []) | join(" "))))
+# Segment kinds: f:<field>, k:<json merge keys> for a keyed list element,
+# v:<json value> for a set of scalars, i:<n> by index, and "." meaning the
+# node itself exists. Each branch is a select and the first to match wins.
+#
+# Every step checks the live object has what the set names. yq does not
+# fail on a missing key, it keeps the parent: .v = .v[$k] on an absent $k
+# leaves .v as it was, and a field would be sent holding its own parent's
+# contents. So an owned field the live object lacks, or an owned element or
+# set member matched by nothing, ends the walk: the leaf is "gone", the
+# fieldsV1 path down to the missing node is kept in "miss", and the rest of
+# the leaf is skipped, since nothing below a missing node exists either.
+# "f" is the fieldsV1 path walked so far.
+| [$leaves[] as $leaf
+    | ($leaf[] as $seg ireduce ({"l": [], "v": $live, "node": false, "kind": "", "keys": [], "lists": [], "f": [], "gone": false, "miss": []};
+        (select(.gone))
+        # A marker says the node exists, so it must be a map or a list:
+        # sending {} for a live scalar or null would change it.
+        // (select($seg == ".")
+            # Last in its leaf: nothing is ever recorded beneath a marker.
+            | ((select(($leaf | .[-1]) == "."))
+                // error("owned marker has fields beneath it: " + ($leaf | join(" "))))
+            | ((select((.v | tag) == "!!map" or (.v | tag) == "!!seq"))
+                // error("owned node is not a map or a list in the live object: " + ($leaf | join(" "))))
+            | .node = true | .kind = (.v | tag) | .f += [$seg])
+        # yq reads and writes a key holding * or ? as a pattern, matching
+        # other keys, and "<<" as a merge: none can be addressed exactly, so
+        # a field so named is refused rather than sent with another's value.
+        # Unreachable today: the object-wide key check above scans the
+        # managedFields too, so such a name is refused before the walk. Kept
+        # as a backstop should that check ever narrow to the live object.
+        // (select($seg | test("^f:"))
+            | ($seg | sub("^f:"; "")) as $k
+            | ((select(($k | test("[*?]") | not) and $k != "<<"))
+                // error("owned field name cannot be addressed exactly: " + ($leaf | join(" "))))
+            | ((select((.v | tag) == "!!map"))
+                // error("owned field's parent is not a map in the live object: " + ($leaf | join(" "))))
+            | (select(.v | has($k)) | .l += [$k] | .v = .v[$k] | .f += [$seg])
+              // (.gone = true | .miss = .f + [$seg]))
+        # An element is found by matching, compared as base64 of its JSON so
+        # types count ("8080" is not 8080) and no value is read as a pattern.
+        # None means it has gone, so it is left out like a missing field; two
+        # (a duplicated env name, say) means there is no telling which value
+        # the owner meant, and taking the first would quietly send the wrong
+        # one.
+        // (select($seg | test("^k:"))
+            # Built from $seg alone, with a stand-in for any other segment:
+            # yq evaluates this branch's bindings even for a segment the
+            # select turned away, with nothing as the input, and a v: member
+            # such as "x: " is not valid YAML.
+            | ($seg | select(test("^k:")) // "k:null" | sub("^k:"; "")) as $raw
+            | ($raw | from_json) as $key
+            # The server writes these as compact JSON, with Go's escaping of
+            # < > & as \u003c \u003e \u0026; anything else (YAML that
+            # from_json also accepts, other escapes) is not a key it wrote,
+            # and could be read as another one.
+            | ($key | to_json(0)) as $plain
+            | ($plain | sub("<"; "\\u003c") | sub(">"; "\\u003e") | sub("&"; "\\u0026")) as $html
+            # Newer Go writes backspace and form feed as \b and \f. A
+            # backslash in a yq regex is \x5c: yq folds doubled ones.
+            | ([$plain, $html] | map(., (sub("\\x5cu0008"; "\\b") | sub("\\x5cu000c"; "\\f")))
+                | map(@base64)) as $forms
+            | ((select([$forms[] | select(. == ($raw | @base64))] | length > 0))
+                // error("owned element key is not canonical JSON: " + ($leaf | join(" "))))
+            # A backstop like the field-name one: unreachable behind the
+            # object-wide key check, kept should that check ever narrow.
+            | ((select(([$key | keys | .[] | select(test("[*?]") or . == "<<")] | length) == 0))
+                // error("owned element key name cannot be addressed exactly: " + ($leaf | join(" "))))
+            | ((select((.v | tag) == "!!seq"))
+                // error("owned element is not in a list in the live object: " + ($leaf | join(" "))))
+            # Only a map is an element a key can name: a list element would
+            # be indexed by position, "1" taken for its second member.
+            | [.v // [] | to_entries | .[] | select(.value | tag == "!!map") | select(.value as $e | $key | to_entries
+                | all_c((.value | to_json(0) | @base64) == ($e[.key] | to_json(0) | @base64)))] as $m
+            | ((select(($m | length) <= 1))
+                // error("owned element " + (($m | length) | tostring) + " times in the live object, not once: " + ($leaf | join(" "))))
+            | (select(($m | length) == 1)
+                | $m[0].key as $i
+                | .lists += [.l] | .l += [$i] | .v = .v[$i] | .f += [$seg]
+                # The merge keys the element's own set lists go with it, so
+                # the server can place it. A key the set does not list was
+                # defaulted by the server, not sent: an owner that applied a
+                # port with no protocol has k:{"containerPort":80,
+                # "protocol":"TCP"} holding only f:containerPort (checked on
+                # a cluster, 2026-10-18). Sending it would give the owner
+                # f:protocol and the guard would refuse; left out, the
+                # server defaults it on our body as it did on theirs, and
+                # the element still matches. A key neither sent nor
+                # defaultable cannot be in the k: payload at all, so leaving
+                # out the unlisted ones never leaves an element unplaceable.
+                | .l as $at
+                | (.f as $fp | ($fp[] as $s ireduce ($fs; .[$s]))) as $mine
+                # Built whole, then filtered: yq still builds an object
+                # behind a select that matched nothing. Today this adds
+                # nothing a leaf does not: a listed key is an owned leaf of
+                # the element too. Kept so the element is placed even if a
+                # leaf of it were ever left out.
+                | .keys += ([$key | to_entries | .[] | {"k": .key, "l": ($at + [.key]), "v": .value, "node": false}]
+                    | map(select(.k as $kn | $mine | has("f:" + $kn))) | map(del(.k))))
+              // (.gone = true | .miss = .f + [$seg]))
+        // (select($seg | test("^v:"))
+            # A set member is a whole value: nothing is recorded beneath one,
+            # and walking into it would send part of it.
+            | ((select(($leaf | .[-1]) == $seg))
+                // error("owned set member has fields beneath it: " + ($leaf | join(" "))))
+            | ($seg | select(test("^v:")) // "v:null" | sub("^v:"; "")) as $raw
+            | ($raw | from_json) as $val
+            | ($val | to_json(0)) as $plain
+            | ($plain | sub("<"; "\\u003c") | sub(">"; "\\u003e") | sub("&"; "\\u0026")) as $html
+            | ([$plain, $html] | map(., (sub("\\x5cu0008"; "\\b") | sub("\\x5cu000c"; "\\f")))
+                | map(@base64)) as $forms
+            | ((select([$forms[] | select(. == ($raw | @base64))] | length > 0))
+                // error("owned set member is not canonical JSON: " + ($leaf | join(" "))))
+            # A null member cannot be told apart from padding, which is
+            # dropped later.
+            # By tag: yq's != takes the string "null" for null.
+            | ((select(($val | tag) != "!!null")) // error("a null set member cannot be sent: " + ($leaf | join(" "))))
+            | ((select((.v | tag) == "!!seq"))
+                // error("owned set member is not in a list in the live object: " + ($leaf | join(" "))))
+            # The server writes v: with its keys sorted; a live member may
+            # hold them in any order, so both sides are compared sorted.
+            | ($val | sort_keys(..) | to_json(0) | @base64) as $want
+            | [.v // [] | to_entries | .[] | select((.value | sort_keys(..) | to_json(0) | @base64) == $want)] as $m
+            | ((select(($m | length) <= 1))
+                // error("owned set member " + (($m | length) | tostring) + " times in the live object, not once: " + ($leaf | join(" "))))
+            | (select(($m | length) == 1)
+                | $m[0].key as $i
+                | .lists += [.l] | .l += [$i] | .v = .v[$i] | .f += [$seg])
+              // (.gone = true | .miss = .f + [$seg]))
+        # A position is not an identity: once the elements the manager does
+        # not own are left out, its element would be sent at another index.
+        # One error, its message picked by indexing rather than by select:
+        # yq evaluates error() even behind a select that matched nothing,
+        # and inside error() an empty select still yields what follows it.
+        // error({"true": "positional list elements are not supported: " + ($leaf | join(" ")),
+                  "false": "unknown fieldsV1 segment: " + $seg}[$seg | test("^i:") | tostring])))
+    # ObjectMeta's annotations and labels merge key by key on every kind,
+    # CRDs included (the server fixes a CRD's top-level metadata, and Argo
+    # Rollouts' template metadata maps are plain granular string maps). An
+    # owned bare {} there is what the owner applied: sent as {}, it leaves
+    # other managers' keys (kubectl's restartedAt) in place and the owner's
+    # set comes back unchanged, where a copy of the live map would take
+    # those keys too. Present or not, it is never left out: the server
+    # keeps the owner's {} either way. Only at real ObjectMeta positions,
+    # the object's own metadata and that of the pod and job templates: a
+    # map named metadata.labels elsewhere, inside a list element or a CRD
+    # field, may be atomic, where {} would replace it unseen by the guard.
+    | ((($leaf | length) >= 2 and ($leaf | .[-2]) == "f:metadata"
+        and (($leaf | .[-1]) == "f:annotations" or ($leaf | .[-1]) == "f:labels")
+        and ((($leaf | length) == 2 and ($leaf | .[0]) == "f:metadata") or (($leaf | length) == 4 and ($leaf | .[0]) == "f:spec" and (($leaf | .[1]) == "f:template" or ($leaf | .[1]) == "f:jobTemplate")) or (($leaf | length) == 6 and ($leaf | .[0]) == "f:spec" and ($leaf | .[1]) == "f:jobTemplate" and ($leaf | .[2]) == "f:spec" and ($leaf | .[3]) == "f:template"))) as $meta
+    # Likewise a Deployment's spec.strategy and a StatefulSet's or
+    # DaemonSet's spec.updateStrategy, the rollingUpdate inside each, and a
+    # StatefulSet's spec.persistentVolumeClaimRetentionPolicy: fixed-shape
+    # structs that merge key by key. An owner that applied strategy: {} or
+    # rollingUpdate: {} owns only the {}, while the server filled in type,
+    # maxSurge, maxUnavailable, partition or whenDeleted and whenScaled,
+    # which a copy would hand the owner and the guard would refuse. Sent as
+    # {}, the server's defaults stay and the set comes back unchanged. Only
+    # those exact paths on apps/v1 kinds: a Rollout's strategy is a CRD
+    # field the server does not default, so a copy is already what the
+    # owner sent. A rollingUpdate absent live is left out like any other
+    # owned field: the type beside it (Recreate, OnDelete) then has none,
+    # and {} is refused by validation on a Deployment or StatefulSet, or on
+    # a DaemonSet adds one filled with zeros (seen on k3s v1.34.1,
+    # 2026-10-20). The structs themselves are still sent as {} when absent.
+    | ({"Deployment": [["f:spec", "f:strategy"], ["f:spec", "f:strategy", "f:rollingUpdate"]],
+        "StatefulSet": [["f:spec", "f:updateStrategy"], ["f:spec", "f:updateStrategy", "f:rollingUpdate"], ["f:spec", "f:persistentVolumeClaimRetentionPolicy"]],
+        "DaemonSet": [["f:spec", "f:updateStrategy"], ["f:spec", "f:updateStrategy", "f:rollingUpdate"]]}) as $structs
+    | ($live.apiVersion == "apps/v1"
+        and ([$structs[$live.kind | tostring] // [] | .[] | select(to_json(0) == ($leaf | to_json(0)))] | length) > 0) as $struct
+    # And, in the pod template of the built-in kinds, a container's or init
+    # container's resources and securityContext and the pod's
+    # securityContext: Helm charts render these as {}, and a mutating
+    # webhook (Kyverno, say) fills them in later. All merge key by key, so
+    # {} leaves the webhook's values live and the owner's set unchanged,
+    # where a copy would hand the owner fields it never set and the guard
+    # would refuse every poll (seen on k3s v1.34.1, 2026-10-20). A Rollout
+    # is left out, as for the structs: its pod template is a CRD field
+    # whose merging is the CRD's to declare. Absent live, these are left
+    # out: the server defaults resources and the pod's securityContext
+    # back to {}, and a container's securityContext removed takes the
+    # owner's leaf with it, so only an odd read gets here, and {} would
+    # add a securityContext the object lacks.
+    | ({"apps/v1": {"Deployment": ["f:spec", "f:template", "f:spec"], "StatefulSet": ["f:spec", "f:template", "f:spec"], "DaemonSet": ["f:spec", "f:template", "f:spec"]},
+        "batch/v1": {"CronJob": ["f:spec", "f:jobTemplate", "f:spec", "f:template", "f:spec"]}}[$live.apiVersion | tostring][$live.kind | tostring]
+        // ["-"]) as $podspec
+    | ($podspec | length) as $n
+    | (($leaf | .[:$n] | to_json(0)) == ($podspec | to_json(0))
+        and ((($leaf | length) == $n + 1 and ($leaf | .[$n]) == "f:securityContext")
+            or (($leaf | length) == $n + 3
+                and (($leaf | .[$n]) == "f:containers" or ($leaf | .[$n]) == "f:initContainers")
+                and (($leaf | .[$n + 1] // "") | test("^k:"))
+                and (($leaf | .[$n + 2]) == "f:resources" or ($leaf | .[$n + 2]) == "f:securityContext")))) as $pod
+    | ($meta or $struct or $pod) as $bare
+    | ($meta or ($struct and ($leaf | .[-1]) != "f:rollingUpdate")) as $bareabsent
+    # A map or struct gone only through missing fields (no element on the
+    # way) is created where it belongs; one under a gone element is not.
+    | (.miss | length) as $ml
+    | ($leaf | .[([$ml - 1, 0] | max):]) as $rest
+    | ((select($bare and (.gone | not)) | [{"l": .l, "v": {}, "node": false, "kind": "", "lists": .lists}] + .keys)
+       // (select($bareabsent and .gone and ([$rest[] | select(test("^f:") | not)] | length) == 0)
+           | [{"l": (.l + [$rest[] | sub("^f:"; "")]), "v": {}, "node": false, "kind": "", "lists": .lists}] + .keys)
+    # A gone leaf still sends the merge keys of the elements it passed
+    # through: those elements are there, and their keys are owned.
+    # A gone leaf reached only through missing fields lists its own full
+    # path, not the top missing node: a metadata {} sent above may live in
+    # that node, and listing the node would drop it from the expected set.
+    # Emptied maps are pruned by managedfields_set_without. One under a gone
+    # element lists the element, which is gone whole.
+       // (select(.gone)
+           | [{"omit": ({"true": $leaf, "false": .miss}[(([$rest[] | select(test("^f:") | not)] | length) == 0) | tostring])}] + .keys)
+       // ([{"l": .l, "v": .v, "node": .node, "kind": .kind, "lists": .lists}] + .keys))[])
+  ] as $walked
+| ([$walked[] | select(has("omit")) | .omit] | unique) as $omitted
+| [$walked[] | select(has("omit") | not)] as $owned
+# Existence markers first, shallowest first, so none can wipe a value or a
+# marker set beneath it. A marker on a list makes a list, not a map.
+| ([$owned[] | select(.node)] | sort_by(.l | length)) as $markers
+| ($markers + [$owned[] | select(.node | not)]) as $ordered
+| ($ordered[] as $o ireduce ({};
+    (select($o.node and $o.kind == "!!seq") | setpath($o.l; []))
+    // (select($o.node) | setpath($o.l; {}))
+    // setpath($o.l; $o.v)))
+# setpath at a live index pads the gap with nulls, standing for elements the
+# manager does not own, which are not ours to send. Only those lists are
+# compacted, deepest first so an outer list's indices still hold while an
+# inner one is done: a null inside a value copied whole is the owner's and
+# stays. A list setpath creates carries no tag, so a JSON round trip first
+# gives its elements one to select on.
+| to_json(0) | from_json
+| ([$owned[] | (.lists // [])[]] | unique | sort_by(length) | reverse) as $padded
+| ($padded[] as $p ireduce (.;
+    setpath($p; ($p[] as $s ireduce (.; .[$s])) | map(select(tag != "!!null")))))
+| .apiVersion = $live.apiVersion
+| .kind = $live.kind
+| .metadata.name = $live.metadata.name
+| .metadata.namespace = $live.metadata.namespace
+# Present or not, never compared: yq's == calls the string "null" null, and
+# null is a valid namespace name.
+| with(select($live.metadata | has("namespace") | not); del(.metadata.namespace))
+# A precondition, not a field anyone owns: the write is refused rather than
+# made from stale values when the object moved since it was read.
+| .metadata.resourceVersion = $live.metadata.resourceVersion
+# Likewise not owned (no uid is recorded in fieldsV1): the write is refused
+# rather than creating the object anew when it was deleted since.
+| .metadata.uid = $live.metadata.uid
+| {"body": ., "omitted": $omitted}

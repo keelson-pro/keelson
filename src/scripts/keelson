@@ -50,7 +50,7 @@ usage() {
 Usage: keelson [--help]
 
 Run the Keelson controller. Streams watch events for managed workloads,
-runs a periodic full scan, and patches workloads when a newer tag meets
+runs a periodic full scan, and updates workloads when a newer tag meets
 the configured policy.
 
 Configuration is via env (see KEELSON_* in Configuration.md).
@@ -59,14 +59,29 @@ USAGE
 
 declare -a CONFIG_NAMES=()
 declare -a CONFIG_VALUES=()
+declare -a CONFIG_NOTES=()
 
-# config_line <name> <value>
+# config_line <name> <value> [<note>]
 # Collected rather than emitted, so config_flush can pad to the longest name
 # it was actually given. A fixed width stops aligning the moment a setting
 # longer than it is added, and says nothing when it does.
+#
+# <note> is said once, here, about a consequence the operator chose: this is
+# the place for it, rather than a warning on every write that follows.
 config_line() {
     CONFIG_NAMES+=("$1")
     CONFIG_VALUES+=("$2")
+    CONFIG_NOTES+=("${3:-}")
+}
+
+# config_claim_note <strategy>
+# A claim against an Apply owner takes the image from it, so the owner's
+# next apply of a different tag conflicts. Chosen, so said once, at boot. An
+# Update owner never conflicts, so its setting carries no note.
+config_claim_note() {
+    case "$1" in
+        claim-*) printf '%s' "owner's next deploy will conflict" ;;
+    esac
 }
 
 # config_flush
@@ -81,10 +96,12 @@ config_flush() {
     for (( i = 0; i < ${#CONFIG_NAMES[@]}; i++ )); do
         printf -v pad "%-${width}s" "${CONFIG_NAMES[$i]}"
         log_info_always config setting="${CONFIG_NAMES[$i]}" \
-            value="${CONFIG_VALUES[$i]}" msg="  $pad = ${CONFIG_VALUES[$i]}"
+            value="${CONFIG_VALUES[$i]}" \
+            msg="  $pad = ${CONFIG_VALUES[$i]}${CONFIG_NOTES[$i]:+  (${CONFIG_NOTES[$i]})}"
     done
     CONFIG_NAMES=()
     CONFIG_VALUES=()
+    CONFIG_NOTES=()
 }
 
 # Every setting Keelson read, once, at boot. A pod behaving differently from
@@ -100,8 +117,12 @@ log_boot_config() {
     config_line watched-kinds "$KEELSON_WATCHED_KINDS"
     config_line dry-run "${KEELSON_DRY_RUN:-0}"
     config_line respect-sa-pull-secrets "$KEELSON_RESPECT_SA_PULL_SECRETS"
-    config_line field-manager-strategy-owned "$KEELSON_FIELD_MANAGER_STRATEGY_OWNED"
+    config_line field-manager-strategy-apply-owned "$KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED" \
+        "$(config_claim_note "$KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED")"
+    config_line field-manager-strategy-update-owned "$KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED"
     config_line field-manager-strategy-unowned "$KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED"
+    config_line field-manager-strategy-mimic-annotation-fallback-allowed \
+        "$KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED"
     config_line state-configmap "$KEELSON_STATE_CONFIGMAP"
     config_line registries-file "${KEELSON_REGISTRIES_FILE:-}"
     config_line tick-interval "$KEELSON_TICK_INTERVAL"
@@ -171,4 +192,7 @@ main() {
     loop_run
 }
 
-main "$@"
+# Run when executed, not when sourced, so the tests can drive its functions.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

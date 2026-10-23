@@ -53,6 +53,7 @@ case "$1 ${2:-}" in
             cat "$TMP_DIR/cm.json"
             exit 0
         fi
+        echo "Error from server (NotFound): configmaps \"$3\" not found" >&2
         exit 1
         ;;
     "apply "*)
@@ -238,7 +239,7 @@ SH
     state_set_trigger_field CronJob default cron triggered-job v
     state_set_trigger_field CronJob default cron triggered-at ""
     state_flush
-    ! grep -q "triggered-at" "$TMP_DIR/cm-applied.json"
+    if grep -q "triggered-at" "$TMP_DIR/cm-applied.json"; then false; fi
     grep -q "triggered-job" "$TMP_DIR/cm-applied.json"
 }
 
@@ -624,7 +625,7 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$TMP_DIR/kubectl.args"
 case "$1" in
-    get)   exit 1 ;;
+    get)   echo 'Error from server (NotFound): configmaps "keelson-state" not found' >&2; exit 1 ;;
     apply) cat >/dev/null; exit 0 ;;
 esac
 exit 0
@@ -642,7 +643,7 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$TMP_DIR/kubectl.args"
 case "$1" in
-    get)   exit 1 ;;
+    get)   echo 'Error from server (NotFound): configmaps "keelson-state" not found' >&2; exit 1 ;;
     apply) cat >/dev/null; exit 0 ;;
 esac
 exit 0
@@ -655,6 +656,7 @@ SH
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 case "$1" in
+    get) echo 'Error from server (NotFound): configmaps "keelson-state" not found' >&2 ;;
     apply) cat >/dev/null ;;
 esac
 exit 1
@@ -838,4 +840,67 @@ SH
     run state_drain_spool
     [ "$status" -ne 0 ]
     [ -z "$(state_get_trigger_field CronJob ops x triggered-at)" ]
+}
+
+# --- an unreadable ledger is never written over ---
+#
+# A write applies the whole cache, so one made after a read that was not
+# complete erases every key it left out, trigger records included.
+
+# A kubectl that fails the read with the given stderr line and records
+# whether anything was ever applied.
+failing_read_kubectl() {
+    printf '%s\n' "$1" >"$TMP_DIR/get.err"
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+    get) cat "$TMP_DIR/get.err" >&2; exit 1 ;;
+    apply) cat >/dev/null; echo applied >>"$TMP_DIR/applied"; exit 0 ;;
+esac
+exit 0
+SH
+}
+
+@test "state_load: a read refused other than NotFound is an error, not an empty ledger" {
+    failing_read_kubectl 'Error from server (Forbidden): configmaps "keelson-state" is forbidden: User "u" cannot get resource "configmaps"'
+    run emit state_init
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Could not read state ConfigMap 'keelson-state' in 'keelson-system' (Error from server (Forbidden): configmaps \"keelson-state\" is forbidden"* ]]
+    [[ "$output" != *"created"* ]]
+    [ ! -e "$TMP_DIR/applied" ]
+}
+
+@test "state_load: a read that fails with no reason is not an empty ledger" {
+    failing_read_kubectl ''
+    run emit state_init
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"(no error output)"* ]]
+    [ ! -e "$TMP_DIR/applied" ]
+}
+
+@test "state_load: NotFound naming another ConfigMap is not this ledger missing" {
+    failing_read_kubectl 'Error from server (NotFound): configmaps "something-else" not found'
+    run emit state_init
+    [ "$status" -eq 1 ]
+    [ ! -e "$TMP_DIR/applied" ]
+}
+
+@test "state_load: a value that is not JSON leaves the ledger unloaded and unwritten" {
+    run load_cm '{"data":{"w--Deployment--a--b":"oops","j--CronJob--ops--backup":"{\"triggered-at\":\"2026-01-01T00:00:00Z\"}"}}'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"a value in its data is not a JSON object"* ]]
+    load_cm '{"data":{"w--Deployment--a--b":"oops"}}' 2>/dev/null || true
+    [ "$STATE_LOADED" -eq 0 ]
+    state_set_trigger_field CronJob default cron triggered-at now
+    run state_flush
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"the ledger was never loaded"* ]]
+}
+
+@test "state_load: an unreadable ledger after a good one is unloaded again" {
+    load_cm '{"data":{"k1":"{\"f\":\"v\"}"}}'
+    [ "$STATE_LOADED" -eq 1 ]
+    failing_read_kubectl 'Error from server (InternalError): an error on the server'
+    state_load 2>/dev/null || true
+    [ "$STATE_LOADED" -eq 0 ]
 }

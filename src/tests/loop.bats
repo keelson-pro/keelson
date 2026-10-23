@@ -272,8 +272,37 @@ emit() { "$@" 2>&1; }
 
 # --- loop_run scheduling ---
 
+# A clock that moves only when told to, plus a microsecond a reading, so a
+# tick's timing is what the test says it is and not what a loaded machine
+# made it. The loop reads time through clock_read alone.
+fake_clock() {
+    FAKE_CLOCK_US=1700000000000000
+    clock_read() { FAKE_CLOCK_US=$(( FAKE_CLOCK_US + 1 )); CLOCK_NOW_US=$FAKE_CLOCK_US; }
+}
+clock_advance() { FAKE_CLOCK_US=$(( FAKE_CLOCK_US + $1 )); }
+
+# The scan runs in a child the loop does not wait for, so what it recorded
+# is only there once that child has finished.
+wait_scan() {
+    if [ "$LOOP_SCAN_PID" -gt 0 ]; then wait "$LOOP_SCAN_PID"; fi
+}
+
+@test "children: a dry run's scan, queue refresh, poll and refresh exit 0" {
+    # Each ends on its apply test; a false one must not be the child's
+    # status, or every clean dry-run child reads as failed.
+    loop_start_scan 0
+    wait "$LOOP_SCAN_PID"
+    loop_start_queue_refresh 0
+    wait "$LOOP_QUEUE_PID"
+    loop_start_poll 0 1700000000
+    wait "$LOOP_POLL_PID"
+    loop_start_refresh 0 Deployment 0
+    wait "$LOOP_REFRESH_PID"
+}
+
 @test "loop_run: triggers scan on first tick" {
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    wait_scan
     # last_scan_start starts at 0, now-0 >= 60 → scan fires
     [ -f "$TMP_DIR/scan.calls" ]
     [ "$(cat "$TMP_DIR/scan.calls")" = "1" ]
@@ -281,6 +310,7 @@ emit() { "$@" 2>&1; }
 
 @test "loop_run: dry-run passes apply=0 to scan" {
     KEELSON_DRY_RUN=1 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
+    wait_scan
     [ "$(cat "$TMP_DIR/scan.calls")" = "0" ]
 }
 
@@ -350,7 +380,7 @@ emit() { "$@" 2>&1; }
     KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     # A whole-second stamp would end in six zeroes; one in a million odds
     # of a false pass, against a certain failure if precision is dropped.
-    ! grep -q '^heartbeat=[0-9]*\.000000$' "$HEARTBEAT_FILE"
+    if grep -q '^heartbeat=[0-9]*\.000000$' "$HEARTBEAT_FILE"; then false; fi
     grep -q '^heartbeat=[0-9]\{10,\}\.[0-9]\{6\}$' "$HEARTBEAT_FILE"
 }
 
@@ -360,16 +390,18 @@ emit() { "$@" 2>&1; }
     # watch_run_target's stub sleeps too; keep it off the real sleep stub.
     watch_run_target() { command sleep 10; }
     sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
-    loop_supervise_watchers() { command sleep 0.4; return 0; }
+    fake_clock
+    loop_supervise_watchers() { clock_advance 400000; return 0; }
     KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     # ~0.6s left of the 1s cycle: definitely less than a full tick.
-    awk '{ exit ($1 < 0.9 && $1 > 0.2) ? 0 : 1 }' "$TMP_DIR/sleeps"
+    awk '{ exit ($1 < 0.61 && $1 > 0.55) ? 0 : 1 }' "$TMP_DIR/sleeps"
 }
 
 @test "loop_run: a fast tick still sleeps nearly the whole tick" {
     # watch_run_target's stub sleeps too; keep it off the real sleep stub.
     watch_run_target() { command sleep 10; }
     sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
+    fake_clock
     KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     awk '{ exit ($1 > 0.9 && $1 <= 1) ? 0 : 1 }' "$TMP_DIR/sleeps"
 }
@@ -380,7 +412,8 @@ emit() { "$@" 2>&1; }
     # watch_run_target's stub sleeps too; keep it off the real sleep stub.
     watch_run_target() { command sleep 10; }
     sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
-    loop_supervise_watchers() { command sleep 0.3; return 0; }
+    fake_clock
+    loop_supervise_watchers() { clock_advance 300000; return 0; }
     KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=3 run emit loop_run
     [ "$status" -eq 0 ]
     [[ "$output" != *"longer than the"* ]]
@@ -391,7 +424,8 @@ emit() { "$@" 2>&1; }
     # watch_run_target's stub sleeps too; keep it off the real sleep stub.
     watch_run_target() { command sleep 10; }
     sleep() { printf '%s\n' "$1" >>"$TMP_DIR/sleeps"; }
-    loop_supervise_watchers() { command sleep 1.3; return 0; }
+    fake_clock
+    loop_supervise_watchers() { clock_advance 1300000; return 0; }
     KEELSON_TICK_INTERVAL=1 KEELSON_LOOP_MAX_ITERATIONS=1 run emit loop_run
     [ "$status" -eq 0 ]
     [ ! -f "$TMP_DIR/sleeps" ]
@@ -477,7 +511,7 @@ emit() { "$@" 2>&1; }
     LOOP_REFRESH_PENDING=(Deployment CronJob)
     KEELSON_FULL_REFRESH_INTERVAL=999999 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     [ "$LOOP_REFRESH_PID" -gt 0 ] && wait "$LOOP_REFRESH_PID" 2>/dev/null || true
-    ! grep -q reconcile-ledger "$TMP_DIR/refresh.calls"
+    if grep -q reconcile-ledger "$TMP_DIR/refresh.calls"; then false; fi
 
     KEELSON_FULL_REFRESH_INTERVAL=999999 KEELSON_LOOP_MAX_ITERATIONS=1 loop_run
     [ "$LOOP_REFRESH_PID" -gt 0 ] && wait "$LOOP_REFRESH_PID" 2>/dev/null || true
@@ -641,7 +675,7 @@ overrun_said() {
 @test "scan overrun: consecutive overruns are reported on the 1st, 2nd and 4th" {
     overrun_said 200 60
     overrun_said 200 60
-    ! overrun_said 200 60
+    if overrun_said 200 60; then false; fi
     overrun_said 200 60
     ! overrun_said 200 60
 }

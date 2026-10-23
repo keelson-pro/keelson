@@ -96,8 +96,7 @@ echo "$@" >>"$TMP_DIR/kubectl.args"
 exit 0
 SH
     KEELSON_SCOPE=cluster watch_kubectl_stream Deployment >/dev/null
-    grep -q -- "--all-namespaces" "$TMP_DIR/kubectl.args"
-    grep -q -- "--watch" "$TMP_DIR/kubectl.args"
+    grep -q -- "^get deployments.apps --all-namespaces --watch" "$TMP_DIR/kubectl.args"
 }
 
 @test "watch_kubectl_stream: a target carrying a namespace passes -n" {
@@ -118,7 +117,7 @@ echo "$@" >>"$TMP_DIR/kubectl.args"
 exit 0
 SH
     watch_kubectl_stream CronJob.team-a-staging >/dev/null
-    grep -q -- "CronJob -n team-a-staging" "$TMP_DIR/kubectl.args"
+    grep -q -- "cronjobs.batch -n team-a-staging" "$TMP_DIR/kubectl.args"
 }
 
 # --- watch_targets ---
@@ -603,7 +602,7 @@ echo "$@" >>"$TMP_DIR/kubectl.args"
 exit 0
 SH
     watch_kubectl_stream Deployment >/dev/null
-    ! grep -q -- "containers" "$TMP_DIR/kubectl.args"
+    if grep -q -- "containers" "$TMP_DIR/kubectl.args"; then false; fi
     ! grep -q -- "annotations" "$TMP_DIR/kubectl.args"
 }
 

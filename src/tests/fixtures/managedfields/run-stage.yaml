@@ -1,0 +1,229 @@
+# A live Deployment as kubectl get -o json --show-managed-fields returns it,
+# in YAML. The managedFields are verbatim from a real cluster, a Kaptain
+# deploy plus the controller's status entry; the values are reconstructed,
+# including the server defaults and status the owner does not own.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    deployment.kubernetes.io/revision: "7"
+    kaptain.org/build-timestamp: "2026-10-01T08:50:00Z"
+    kaptain.org/built-by: ci
+    kaptain.org/generated-by: kaptain
+    keelson.pro/policy: patch
+    keelson.pro/poll-schedule: "@every 1m"
+    keelson.pro/trigger: poll
+    kubectl.kubernetes.io/default-container: default-app
+  creationTimestamp: "2026-09-01T00:00:00Z"
+  generation: 7
+  labels:
+    app: run-stage
+    app.kubernetes.io/managed-by: Kaptain
+    app.kubernetes.io/name: run-stage
+    app.kubernetes.io/version: 1.2.2
+    kaptain.org/environment: nonprod
+    kaptain.org/project-name: run-stage
+    kaptain.org/version: 1.2.2
+  managedFields:
+  - apiVersion: apps/v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:metadata:
+        f:annotations:
+          f:kaptain.org/build-timestamp: {}
+          f:kaptain.org/built-by: {}
+          f:kaptain.org/generated-by: {}
+          f:keelson.pro/policy: {}
+          f:keelson.pro/poll-schedule: {}
+          f:keelson.pro/trigger: {}
+          f:kubectl.kubernetes.io/default-container: {}
+        f:labels:
+          f:app: {}
+          f:app.kubernetes.io/managed-by: {}
+          f:app.kubernetes.io/name: {}
+          f:app.kubernetes.io/version: {}
+          f:kaptain.org/environment: {}
+          f:kaptain.org/project-name: {}
+          f:kaptain.org/version: {}
+      f:spec:
+        f:replicas: {}
+        f:revisionHistoryLimit: {}
+        f:selector: {}
+        f:strategy:
+          f:rollingUpdate:
+            f:maxSurge: {}
+            f:maxUnavailable: {}
+          f:type: {}
+        f:template:
+          f:metadata:
+            f:annotations:
+              f:kaptain.org/build-timestamp: {}
+              f:kaptain.org/built-by: {}
+              f:kaptain.org/generated-by: {}
+              f:keelson.pro/policy: {}
+              f:keelson.pro/poll-schedule: {}
+              f:keelson.pro/trigger: {}
+            f:labels:
+              f:app: {}
+              f:app.kubernetes.io/managed-by: {}
+              f:app.kubernetes.io/name: {}
+              f:app.kubernetes.io/version: {}
+              f:kaptain.org/environment: {}
+              f:kaptain.org/project-name: {}
+              f:kaptain.org/version: {}
+          f:spec:
+            f:affinity:
+              f:podAntiAffinity:
+                f:preferredDuringSchedulingIgnoredDuringExecution: {}
+            f:automountServiceAccountToken: {}
+            f:containers:
+              k:{"name":"default-app"}:
+                .: {}
+                f:command: {}
+                f:image: {}
+                f:imagePullPolicy: {}
+                f:name: {}
+                f:resources:
+                  f:limits:
+                    f:ephemeral-storage: {}
+                    f:memory: {}
+                  f:requests:
+                    f:cpu: {}
+                    f:ephemeral-storage: {}
+                    f:memory: {}
+                f:securityContext:
+                  f:allowPrivilegeEscalation: {}
+                  f:capabilities:
+                    f:drop: {}
+                  f:readOnlyRootFilesystem: {}
+                f:volumeMounts:
+                  k:{"mountPath":"/configmap"}:
+                    .: {}
+                    f:mountPath: {}
+                    f:name: {}
+                    f:readOnly: {}
+                  k:{"mountPath":"/secret"}:
+                    .: {}
+                    f:mountPath: {}
+                    f:name: {}
+                    f:readOnly: {}
+            f:securityContext:
+              f:runAsNonRoot: {}
+            f:serviceAccountName: {}
+            f:terminationGracePeriodSeconds: {}
+            f:volumes:
+              k:{"name":"configmap"}:
+                .: {}
+                f:configMap:
+                  f:name: {}
+                f:name: {}
+              k:{"name":"secret"}:
+                .: {}
+                f:name: {}
+                f:secret:
+                  f:secretName: {}
+    manager: kaptain/meta-env/run-platform-nonprod
+    operation: Apply
+    time: "2026-10-01T08:52:15Z"
+  - apiVersion: apps/v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:metadata:
+        f:annotations:
+          f:deployment.kubernetes.io/revision: {}
+    manager: kube-controller-manager
+    operation: Update
+    subresource: status
+    time: "2026-10-01T08:52:15Z"
+  name: run-stage
+  namespace: run-platform-nonprod
+  resourceVersion: "123456"
+  uid: 0d6c1f2e-0000-0000-0000-000000000000
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: run-stage
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        kaptain.org/build-timestamp: "2026-10-01T08:50:00Z"
+        kaptain.org/built-by: ci
+        kaptain.org/generated-by: kaptain
+        keelson.pro/policy: patch
+        keelson.pro/poll-schedule: "@every 1m"
+        keelson.pro/trigger: poll
+      creationTimestamp: null
+      labels:
+        app: run-stage
+        app.kubernetes.io/managed-by: Kaptain
+        app.kubernetes.io/name: run-stage
+        app.kubernetes.io/version: 1.2.2
+        kaptain.org/environment: nonprod
+        kaptain.org/project-name: run-stage
+        kaptain.org/version: 1.2.2
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: run-stage
+              topologyKey: kubernetes.io/hostname
+            weight: 100
+      automountServiceAccountToken: true
+      containers:
+      - command: ["/kd/bin/deploy"]
+        image: 743192491936.dkr.ecr.ap-southeast-2.amazonaws.com/immutable/environments/run/run-stage:1.2.2
+        imagePullPolicy: IfNotPresent
+        name: default-app
+        resources:
+          limits:
+            ephemeral-storage: 1Gi
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            ephemeral-storage: 1Gi
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /configmap
+          name: configmap
+          readOnly: true
+        - mountPath: /secret
+          name: secret
+          readOnly: true
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        runAsNonRoot: true
+      serviceAccount: run-stage
+      serviceAccountName: run-stage
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - configMap:
+          defaultMode: 420
+          name: run-stage-configmap-abc123
+        name: configmap
+      - name: secret
+        secret:
+          defaultMode: 420
+          secretName: run-stage-secret-def456
+status:
+  availableReplicas: 2
+  replicas: 2

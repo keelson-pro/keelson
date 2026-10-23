@@ -27,9 +27,18 @@ setup() {
     # Plain format collapses to the msg= sentence and drops event/field tags.
     # Tests assert on both sentences and structured fields, so use JSON.
     KEELSON_LOG_FORMAT=json
+    # The shipped defaults: boot validation guarantees all three are set.
+    KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED=mimic
+    KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED=mimic
+    KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED=claim-patch
+    KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED=true
     export KEELSON_WATCHED_KINDS KEELSON_SCOPE KEELSON_CONFIG_MODE \
         KEELSON_RESPECT_SA_PULL_SECRETS KEELSON_REGISTRIES_FILE \
-        KEELSON_LOG_LEVEL KEELSON_LOG_FORMAT
+        KEELSON_LOG_LEVEL KEELSON_LOG_FORMAT \
+        KEELSON_FIELD_MANAGER_STRATEGY_APPLY_OWNED \
+        KEELSON_FIELD_MANAGER_STRATEGY_UPDATE_OWNED \
+        KEELSON_FIELD_MANAGER_STRATEGY_UNOWNED \
+        KEELSON_FIELD_MANAGER_STRATEGY_MIMIC_ANNOTATION_FALLBACK_ALLOWED
 
     SCRIPT_DIR="${BATS_TEST_DIRNAME}/../scripts"
     # shellcheck source=../scripts/lib/log.bash
@@ -93,6 +102,8 @@ kubectl_returns() {
     local fixture=$1
     cat > "$TMP_BIN/kubectl" <<SH
 #!/usr/bin/env bash
+# Every call recorded, so a test can say what was not asked for.
+printf '%s\\n' "\$*" >>"$TMP_DIR/kubectl.log"
 cat <<'JSON'
 $fixture
 JSON
@@ -116,6 +127,7 @@ single_deployment_json() {
       "metadata": {
         "namespace": "default",
         "name": "app",
+        "resourceVersion": "12",
         "annotations": $ann
       },
       "spec": {
@@ -265,6 +277,19 @@ SH
     [[ "$output" == *'"error":"1"'* ]]
 }
 
+@test "scan_run: skopeo's own error reaches the failure line" {
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+echo "unauthorized" >&2
+exit 1
+SH
+    run emit scan_run 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"reason":"unauthorized"'* ]]
+    [[ "$output" != *"credentials are scoped to a different repository"* ]]
+}
+
 # --- scan-start emits the configured mode ---
 
 @test "scan_run: scan-start mode is dry-run when apply=0" {
@@ -292,9 +317,23 @@ kubectl_apply_shim() {
 #!/usr/bin/env bash
 case "\$1" in
     get)
-        cat <<'JSON'
+        # A read by name gets the one item, or just its managedFields when
+        # that is what was asked for; a list read gets the list.
+        if [[ "\$*" == *jsonpath-as-json* ]]; then
+            yq -p=json -o=json '.items[0].metadata.managedFields // []' <<'JSON'
 $fixture
 JSON
+        elif [ -n "\${3:-}" ] && [ "\${3#-}" = "\$3" ]; then
+            yq -p=json -o=json '.items[0] | with(select(.metadata.uid == null); .metadata.uid = "uid-1")' <<'JSON'
+$fixture
+JSON
+        else
+            # A real list read carries no managedFields unless asked.
+            yq -p=json -o=json 'del(.items[].metadata.managedFields)' <<'JSON'
+$fixture
+JSON
+        fi
+        printf '%s\n' "\$*" >>"$TMP_DIR/kubectl.gets"
         ;;
     patch)
         printf '%s\n' "\$*" >>"$TMP_DIR/kubectl.log"
@@ -304,12 +343,34 @@ JSON
         printf '%s\n' "\$*" >>"$TMP_DIR/kubectl.log"
         exit \${KUBECTL_CREATE_EXIT:-0}
         ;;
+    apply)
+        # A server-side dry run answers with the object as it stands, so the
+        # owner's set comes back unchanged; a real apply saves its body.
+        printf '%s\n' "\$*" >>"$TMP_DIR/kubectl.log"
+        if [[ "\$*" == *--dry-run=server* ]]; then
+            cat >/dev/null
+            yq -p=json -o=json '.items[0] | with(select(.metadata.uid == null); .metadata.uid = "uid-1")' <<'JSON'
+$fixture
+JSON
+        else
+            cat >"$TMP_DIR/apply.stdin"
+        fi
+        ;;
     *)
         exit 0
         ;;
 esac
 SH
     chmod +x "$TMP_BIN/kubectl"
+}
+
+# with_argocd_owner <list-fixture>
+# The fixture with a resourceVersion on its first workload and main's image
+# owned by argocd through an Apply, as a GitOps controller leaves it.
+with_argocd_owner() {
+    yq -p=json -o=json -I0 '.items[0].metadata.resourceVersion = "7"
+        | .items[0].metadata.managedFields = [{"manager": "argocd", "operation": "Apply",
+            "fieldsV1": {"f:spec": {"f:template": {"f:spec": {"f:containers": {"k:{\"name\":\"main\"}": {"f:name": {}, "f:image": {}}}}}}}}]'
 }
 
 # Helper: emit a CronJob list with a single container.
@@ -359,7 +420,7 @@ printf '{"Tags":["1.2.3","1.3.0"]}'
 SH
     run emit scan_run 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Deployment 'app' in 'default' updated from 1.2.3 to 1.3.0 for image 'ghcr.io/x/y'"* ]]
+    [[ "$output" == *"Deployment 'app' in 'default' updated from 1.2.3 to 1.3.0 by claim-patch (as configured) for image 'ghcr.io/x/y'"* ]]
     [[ "$output" == *'"updated":"1"'* ]]
     [[ "$output" == *'"would-update":"0"'* ]]
 }
@@ -374,7 +435,8 @@ printf '{"Tags":["1.2.3","1.3.0"]}'
 SH
     run emit scan_run 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"update-failed"* ]]
+    # Once, from update_apply: scan adds no second line of its own.
+    [ "$(grep -c '"event":"update-failed"' <<<"$output")" -eq 1 ]
     [[ "$output" == *'"error":"1"'* ]]
     [[ "$output" == *'"updated":"0"'* ]]
 }
@@ -400,10 +462,10 @@ printf '{"Tags":["1.2.3","1.3.0"]}'
 SH
     KEELSON_WATCHED_KINDS=CronJob run emit scan_run 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"CronJob 'cron' in 'default' updated from 1.2.3 to 1.3.0 for image 'ghcr.io/x/y'"* ]]
+    [[ "$output" == *"CronJob 'cron' in 'default' updated from 1.2.3 to 1.3.0 by claim-patch (as configured) for image 'ghcr.io/x/y'"* ]]
     [[ "$output" =~ Job\ \'cron-[0-9]+\'\ created\ from\ CronJob\ \'cron\'\ in\ \'default\'\ with\ update\ from\ 1.2.3\ to\ 1.3.0\ for\ image\ \'ghcr.io/x/y\' ]]
     grep -q "create job" "$TMP_DIR/kubectl.log"
-    grep -q -- "--from=cronjob/cron" "$TMP_DIR/kubectl.log"
+    grep -q -- "--from=cronjobs.batch/cron" "$TMP_DIR/kubectl.log"
 }
 
 @test "scan_run apply: CronJob without trigger-job-on-update does not create a Job" {
@@ -414,7 +476,7 @@ printf '{"Tags":["1.2.3","1.3.0"]}'
 SH
     KEELSON_WATCHED_KINDS=CronJob run emit scan_run 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"CronJob 'cron' in 'default' updated from 1.2.3 to 1.3.0 for image 'ghcr.io/x/y'"* ]]
+    [[ "$output" == *"CronJob 'cron' in 'default' updated from 1.2.3 to 1.3.0 by claim-patch (as configured) for image 'ghcr.io/x/y'"* ]]
     [[ "$output" != *"created from CronJob"* ]]
     ! grep -q "create job" "$TMP_DIR/kubectl.log" 2>/dev/null || false
 }
@@ -858,8 +920,8 @@ LATE=99999999999
     kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
     scan_run 0 0 2>/dev/null
     skopeo_counting
-    # kubectl now fails: a poll must need nothing from the cluster except
-    # managedFields, which is allowed to come back empty.
+    # kubectl now fails: a dry-run poll must need nothing from the cluster.
+    # Only a write reads it, for ownership, and refuses when it cannot.
     install_shim kubectl <<'SH'
 #!/usr/bin/env bash
 exit 1
@@ -1234,7 +1296,7 @@ SH
     queue_enqueue Deployment default c
     scan_refresh_queued 0 2>/dev/null
     [ "$(wc -l <"$TMP_DIR/kubectl.calls")" -eq 1 ]
-    ! grep -q -- "--field-selector" "$TMP_DIR/kubectl.calls"
+    if grep -q -- "--field-selector" "$TMP_DIR/kubectl.calls"; then false; fi
     grep -q -- "--all-namespaces" "$TMP_DIR/kubectl.calls"
 }
 
@@ -1324,13 +1386,20 @@ printf '%s\n' "$*" >>"$TMP_DIR/kubectl.calls"
 case "$1" in
     patch|apply) exit 0 ;;
 esac
-cat <<'JSON'
-{"items":[{"metadata":{"namespace":"default","name":"app","annotations":{"keelson.pro/policy":"minor","keelson.pro/initContainers":"true"}},"spec":{"template":{"spec":{"initContainers":[{"name":"migrate","image":"ghcr.io/x/m:1.4.0"}],"containers":[{"name":"main","image":"ghcr.io/x/y:1.2.3"}]}}}}]}
-JSON
+json='{"items":[{"metadata":{"namespace":"default","name":"app","annotations":{"keelson.pro/policy":"minor","keelson.pro/initContainers":"true"}},"spec":{"template":{"spec":{"initContainers":[{"name":"migrate","image":"ghcr.io/x/m:1.4.0"}],"containers":[{"name":"main","image":"ghcr.io/x/y:1.2.3"}]}}}}]}'
+# A read by name gets the one item, or just its managedFields when that is
+# what was asked for.
+if [[ "$*" == *jsonpath-as-json* ]]; then
+    printf '%s' "$json" | yq -p=json -o=json '.items[0].metadata.managedFields // []'
+elif [ "$1" = get ] && [ -n "${3:-}" ] && [ "${3#-}" = "$3" ]; then
+    printf '%s' "$json" | yq -p=json -o=json '.items[0]'
+else
+    printf '%s\n' "$json"
+fi
 SH
     scan_run 1 2>/dev/null
-    grep -q '"initContainers":\[{"name":"migrate","image":"ghcr.io/x/m:1.5.0"}\]' "$TMP_DIR/kubectl.calls"
-    grep -q '"containers":\[{"name":"main","image":"ghcr.io/x/y:1.5.0"}\]' "$TMP_DIR/kubectl.calls"
+    grep -q '"op":"replace","path":"/spec/template/spec/initContainers/0/image","value":"ghcr.io/x/m:1.5.0"' "$TMP_DIR/kubectl.calls"
+    grep -q '"op":"replace","path":"/spec/template/spec/containers/0/image","value":"ghcr.io/x/y:1.5.0"' "$TMP_DIR/kubectl.calls"
 }
 
 @test "init containers: per-container annotations address them by name" {
@@ -1423,7 +1492,7 @@ SH
     : > "$TMP_DIR/kubectl.log"
     KEELSON_WATCHED_KINDS=CronJob scan_poll_due 1 "$LATE" 2>/dev/null
     grep -q "create job" "$TMP_DIR/kubectl.log"
-    grep -q -- "--from=cronjob/cron" "$TMP_DIR/kubectl.log"
+    grep -q -- "--from=cronjobs.batch/cron" "$TMP_DIR/kubectl.log"
 }
 
 # --- who counts as Keelson managed ---
@@ -1835,16 +1904,6 @@ EXTRACT_LIST='{"items":[
     [ "$SCAN_WL_SA_NAME" = "default" ]
 }
 
-@test "extract: managed fields come through as JSON" {
-    extract_at "$EXTRACT_LIST" Deployment 0
-    [ "$(printf '%s' "$SCAN_WL_MANAGED_FIELDS" | yq -p=json -o=y '.[0].manager')" = "argocd" ]
-}
-
-@test "extract: absent managed fields are an empty array" {
-    extract_at "$EXTRACT_LIST" Deployment 1
-    [ "$(printf '%s' "$SCAN_WL_MANAGED_FIELDS" | yq -p=json -o=y 'length')" = "0" ]
-}
-
 @test "extract: suspend is only read for CronJob" {
     extract_at "$EXTRACT_LIST" Deployment 0
     [ -z "$SCAN_WL_SUSPEND" ]
@@ -2159,7 +2218,7 @@ keelson.pro/initContainers=true' initContainers migrate
 
 @test "monitored: a non-true value leaves them out of scope" {
     KEELSON_CONFIG_MODE=keelson
-    ! scan_container_monitored 'keelson.pro/initContainers=yes' initContainers migrate
+    if scan_container_monitored 'keelson.pro/initContainers=yes' initContainers migrate; then false; fi
     ! scan_container_monitored 'keelson.pro/initContainers=' initContainers migrate
 }
 
@@ -2696,4 +2755,315 @@ SH
     [[ "$output" == *'"event":"skip-not-monitored"'* ]]
     [[ "$output" == *'"list":"imageVolumes"'* ]]
     [[ "$output" != *"dry-run-would-update"* ]]
+}
+
+# --- ownership reaches the write ---
+
+@test "scan_run apply: an Apply-owned image is updated by mimic as its owner" {
+    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor | with_argocd_owner)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    run emit scan_run 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"updated from 1.2.3 to 1.3.0 by mimic (as configured) for image 'ghcr.io/x/y'"* ]]
+    [[ "$output" == *'"manager":"argocd"'* ]]
+    grep -q -- "apply --server-side --field-manager=argocd -f -" "$TMP_DIR/kubectl.log"
+    # Ownership came from a read of the one object, since the list read
+    # carries none.
+    grep -q -- "get deployments.apps app -n default -o jsonpath-as-json" "$TMP_DIR/kubectl.gets"
+}
+
+@test "scan_run apply: a strategy annotation overrides an owned workload's setting" {
+    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor | with_argocd_owner \
+        | yq -p=json -o=json -I0 '.items[0].metadata.annotations["keelson.pro/field-manager-strategy"] = "claim-patch"')"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    run emit scan_run 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"by claim-patch (as annotated)"* ]]
+    grep -q -- "--type=json --field-manager=keelson" "$TMP_DIR/kubectl.log"
+}
+
+@test "scan_run apply: an Update-owned image is patched as its owner" {
+    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor | with_argocd_owner \
+        | yq -p=json -o=json -I0 '.items[0].metadata.managedFields[0].manager = "helm" | .items[0].metadata.managedFields[0].operation = "Update"')"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    run emit scan_run 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"by mimic (as configured)"* ]]
+    grep -q -- "--type=json --field-manager=helm" "$TMP_DIR/kubectl.log"
+}
+
+@test "scan_run apply: the workload's strategy annotation reaches the write" {
+    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor \
+        | yq -p=json -o=json -I0 '.items[0].metadata.annotations["keelson.pro/field-manager-strategy"] = "claim-apply"')"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    run emit scan_run 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"by claim-apply (as annotated)"* ]]
+}
+
+@test "scan_run apply: an image that moved since the poll counts as skipped, not errored" {
+    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    # The list (and the cache) say 1.2.3; the object read before the write
+    # says someone moved it on.
+    mv "$TMP_BIN/kubectl" "$TMP_BIN/kubectl.list"
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+if [[ "\$*" == "get deployments.apps app -n default -o json --show-managed-fields" ]]; then
+    "$TMP_BIN/kubectl.list" "\$@" | yq -p=json -o=json '.spec.template.spec.containers[0].image = "ghcr.io/x/y:1.5.0"'
+else
+    exec "$TMP_BIN/kubectl.list" "\$@"
+fi
+SH
+    run emit scan_run 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"event":"update-image-moved"'* ]]
+    [[ "$output" == *'"skip":"1"'* ]]
+    [[ "$output" == *'"updated":"0"'* ]]
+    [[ "$output" == *'"error":"0"'* ]]
+}
+
+@test "scan_run apply: an image already at the target counts as skipped, not errored" {
+    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    mv "$TMP_BIN/kubectl" "$TMP_BIN/kubectl.list"
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+if [[ "\$*" == "get deployments.apps app -n default -o json --show-managed-fields" ]]; then
+    "$TMP_BIN/kubectl.list" "\$@" | yq -p=json -o=json '.spec.template.spec.containers[0].image = "ghcr.io/x/y:1.3.0"'
+else
+    exec "$TMP_BIN/kubectl.list" "\$@"
+fi
+SH
+    run emit scan_run 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"level":"INFO","event":"update-already-applied"'* ]]
+    [[ "$output" == *'"skip":"1"'* ]]
+    [[ "$output" == *'"updated":"0"'* ]]
+    [[ "$output" == *'"error":"0"'* ]]
+}
+
+@test "scan_run apply: a skipped update records nothing against the cache" {
+    inventory_init
+    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    mv "$TMP_BIN/kubectl" "$TMP_BIN/kubectl.list"
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+if [[ "\$*" == "get deployments.apps app -n default -o json --show-managed-fields" ]]; then
+    "$TMP_BIN/kubectl.list" "\$@" | yq -p=json -o=json '.spec.template.spec.containers[0].image = "ghcr.io/x/y:1.5.0"'
+else
+    exec "$TMP_BIN/kubectl.list" "\$@"
+fi
+SH
+    scan_run 1 2>/dev/null
+    inventory_get Deployment default app
+    # What the list said, not the polled target: nothing was written.
+    [ "${INVENTORY_CONTAINER_IMAGES[0]}" = "ghcr.io/x/y:1.2.3" ]
+}
+
+@test "scan_run apply: a skipped CronJob update does not fire its trigger as an update" {
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true)"
+    # Fired before at this image set, so only an update of ours can fire it
+    # now: never triggered, the first-run rule would fire it regardless.
+    state_set_trigger_field CronJob default cron triggered-at 2026-01-01T00:00:00Z
+    state_set_trigger_field CronJob default cron containers/worker ghcr.io/x/y:1.2.3
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    mv "$TMP_BIN/kubectl" "$TMP_BIN/kubectl.list"
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+if [[ "\$*" == "get cronjobs.batch cron -n default -o json --show-managed-fields" ]]; then
+    "$TMP_BIN/kubectl.list" "\$@" | yq -p=json -o=json '.spec.jobTemplate.spec.template.spec.containers[0].image = "ghcr.io/x/y:1.5.0"'
+else
+    exec "$TMP_BIN/kubectl.list" "\$@"
+fi
+SH
+    KEELSON_WATCHED_KINDS=CronJob run emit scan_run 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"event":"update-image-moved"'* ]]
+    [[ "$output" != *"created from CronJob"* ]]
+    if grep -q "create job" "$TMP_DIR/kubectl.log"; then false; fi
+}
+
+@test "scan_run apply: a workload outside default is read and patched in its own namespace" {
+    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor | yq -p=json -o=json '.items[0].metadata.namespace = "prod"')"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    run emit scan_run 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Deployment 'app' in 'prod' updated from 1.2.3 to 1.3.0"* ]]
+    grep -q -- "^patch deployments.apps app -n prod " "$TMP_DIR/kubectl.log"
+    grep -q -- "^get deployments.apps app -n prod " "$TMP_DIR/kubectl.gets"
+    if grep -q -- "-n default" "$TMP_DIR/kubectl.log" "$TMP_DIR/kubectl.gets"; then false; fi
+}
+
+@test "scan_run apply: a CronJob's trigger names the update it made, not a later skip" {
+    # Two containers: re updates, and wait, polled after it, has moved on.
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/re:1.0 minor true | yq -p=json -o=json '.items[0].spec.jobTemplate.spec.template.spec.containers = [{"name": "re", "image": "ghcr.io/x/re:1.0"}, {"name": "wait", "image": "ghcr.io/x/wait:2.0"}]')"
+    state_set_trigger_field CronJob default cron triggered-at 2026-01-01T00:00:00Z
+    state_set_trigger_field CronJob default cron containers/re ghcr.io/x/re:1.0
+    state_set_trigger_field CronJob default cron containers/wait ghcr.io/x/wait:2.0
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+    *x/re*) printf '{"Tags":["1.0","1.1"]}' ;;
+    *) printf '{"Tags":["2.0","2.1"]}' ;;
+esac
+SH
+    mv "$TMP_BIN/kubectl" "$TMP_BIN/kubectl.list"
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+if [[ "\$*" == "get cronjobs.batch cron -n default -o json --show-managed-fields" ]]; then
+    "$TMP_BIN/kubectl.list" "\$@" | yq -p=json -o=json '(.spec.jobTemplate.spec.template.spec.containers[] | select(.name == "wait") | .image) = "ghcr.io/x/wait:2.5"'
+else
+    exec "$TMP_BIN/kubectl.list" "\$@"
+fi
+SH
+    KEELSON_WATCHED_KINDS=CronJob run emit scan_run 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"event":"update-image-moved"'*'"container":"wait"'* ]]
+    [[ "$output" == *"created from CronJob 'cron' in 'default' with update from 1.0 to 1.1 for image 'ghcr.io/x/re'"* ]]
+}
+
+@test "own update: an init container's applied image is recorded against its own list" {
+    inventory_init
+    kubectl_apply_shim '{"items":[{"metadata":{"namespace":"default","name":"app","annotations":{"keelson.pro/policy":"minor","keelson.pro/initContainers":"true"}},"spec":{"template":{"spec":{"initContainers":[{"name":"migrate","image":"ghcr.io/x/m:1.4.0"}],"containers":[{"name":"main","image":"ghcr.io/x/y:1.2.3"}]}}}}]}'
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+    *x/m*) printf '{"Tags":["1.4.0","1.5.0"]}' ;;
+    *) printf '{"Tags":["1.2.3"]}' ;;
+esac
+SH
+    scan_run 1 2>/dev/null
+    inventory_get Deployment default app
+    local i found=""
+    for i in "${!INVENTORY_CONTAINER_NAMES[@]}"; do
+        if [ "${INVENTORY_CONTAINER_LISTS[i]}/${INVENTORY_CONTAINER_NAMES[i]}" = initContainers/migrate ]; then
+            found=${INVENTORY_CONTAINER_IMAGES[i]}
+        fi
+    done
+    [ "$found" = "ghcr.io/x/m:1.5.0" ]
+}
+
+@test "scan_run apply: a workload gone since the poll counts as a skip, not an error" {
+    kubectl_apply_shim "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    mv "$TMP_BIN/kubectl" "$TMP_BIN/kubectl.list"
+    install_shim kubectl <<SH
+#!/usr/bin/env bash
+if [[ "\$1" == get ]] && [[ "\$*" == *"deployments.apps app"* ]]; then
+    echo 'Error from server (NotFound): deployments.apps "app" not found' >&2; exit 1
+fi
+exec "$TMP_BIN/kubectl.list" "\$@"
+SH
+    run emit scan_run 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"event":"update-workload-gone"'* ]]
+    [[ "$output" == *'"skip":"1"'* ]]
+    [[ "$output" == *'"updated":"0"'* ]]
+    [[ "$output" == *'"error":"0"'* ]]
+}
+
+@test "scan_run apply: a CronJob trigger that fails is logged once" {
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true true)"
+    KUBECTL_CREATE_EXIT=1
+    export KUBECTL_CREATE_EXIT
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3"]}'
+SH
+    KEELSON_WATCHED_KINDS=CronJob run emit scan_run 1
+    [ "$(grep -c '"event":"cronjob-job-trigger-failed"' <<<"$output")" -eq 1 ]
+    # Every error line, so a second one under another name is caught too.
+    [ "$(grep -c '"level":"ERROR"' <<<"$output")" -eq 1 ]
+}
+
+# --- SCAN_ERRORS: what a one-shot caller exits on ---
+# Run in this shell, not under run, so the variable is still there to read.
+
+@test "scan_run: SCAN_ERRORS counts a kind it could not list, and returns 0" {
+    install_shim kubectl <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    scan_run 0 >"$TMP_DIR/out" 2>&1
+    [ "$SCAN_ERRORS" -eq 1 ]
+}
+
+@test "scan_run: SCAN_ERRORS counts tags it could not get, and is 0 again on a clean pass" {
+    kubectl_returns "$(single_deployment_json ghcr.io/x/y:1.2.3 minor)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    scan_run 0 >"$TMP_DIR/out" 2>&1
+    [ "$SCAN_ERRORS" -eq 1 ]
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3"]}'
+SH
+    scan_run 0 >"$TMP_DIR/out" 2>&1
+    [ "$SCAN_ERRORS" -eq 0 ]
+}
+
+@test "scan_run: SCAN_ERRORS is 0 with nothing to scan" {
+    kubectl_returns '{"items": []}'
+    SCAN_ERRORS=5
+    scan_run 0 >"$TMP_DIR/out" 2>&1
+    [ "$SCAN_ERRORS" -eq 0 ]
+}
+
+@test "scan_run apply: a CronJob trigger refused for want of suspend counts in SCAN_ERRORS, not per container" {
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true false)"
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3","1.3.0"]}'
+SH
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 >"$TMP_DIR/out" 2>&1
+    grep -q '"event":"cronjob-trigger-requires-suspend"' "$TMP_DIR/out"
+    grep -q '"error":"0"' "$TMP_DIR/out"
+    [ "$SCAN_ERRORS" -eq 1 ]
+}
+
+@test "scan_run apply: a CronJob trigger that fails counts in SCAN_ERRORS" {
+    kubectl_apply_shim "$(single_cronjob_json ghcr.io/x/y:1.2.3 minor true true)"
+    KUBECTL_CREATE_EXIT=1
+    export KUBECTL_CREATE_EXIT
+    install_shim skopeo <<'SH'
+#!/usr/bin/env bash
+printf '{"Tags":["1.2.3"]}'
+SH
+    KEELSON_WATCHED_KINDS=CronJob scan_run 1 >"$TMP_DIR/out" 2>&1
+    grep -q '"event":"cronjob-job-trigger-failed"' "$TMP_DIR/out"
+    [ "$SCAN_ERRORS" -eq 1 ]
 }

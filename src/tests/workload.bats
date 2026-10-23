@@ -128,7 +128,28 @@ setup() {
     printf '#!/usr/bin/env bash\necho "$@"\n' > "$bin/kubectl"
     chmod +x "$bin/kubectl"
     PATH="$bin:$PATH" run workload_list_kind Deployment
-    [ "$output" = "get Deployment --all-namespaces -o json" ]
+    [ "$output" = "get deployments.apps --all-namespaces -o json" ]
+}
+
+@test "get_one: one workload is read by its qualified resource and a field selector" {
+    local bin="$BATS_TEST_TMPDIR/bin"
+    mkdir -p "$bin"
+    printf '#!/usr/bin/env bash\necho "$@"\n' > "$bin/kubectl"
+    chmod +x "$bin/kubectl"
+    PATH="$bin:$PATH" run workload_get_one Rollout team-b web
+    [ "$output" = "get rollouts.argoproj.io -n team-b --field-selector metadata.name=web -o json" ]
+}
+
+@test "list_kind and get_one: a kind with no resource is refused before kubectl" {
+    local bin="$BATS_TEST_TMPDIR/bin"
+    mkdir -p "$bin"
+    printf '#!/usr/bin/env bash\necho "$@" >>"%s/calls"\n' "$BATS_TEST_TMPDIR" > "$bin/kubectl"
+    chmod +x "$bin/kubectl"
+    PATH="$bin:$PATH" run workload_list_kind ReplicaSet
+    [ "$status" -eq 1 ]
+    PATH="$bin:$PATH" run workload_get_one ReplicaSet default web
+    [ "$status" -eq 1 ]
+    [ ! -e "$BATS_TEST_TMPDIR/calls" ]
 }
 
 @test "list_kind: a namespace lists that one" {
@@ -137,5 +158,5 @@ setup() {
     printf '#!/usr/bin/env bash\necho "$@"\n' > "$bin/kubectl"
     chmod +x "$bin/kubectl"
     PATH="$bin:$PATH" run workload_list_kind Deployment team-b
-    [ "$output" = "get Deployment -n team-b -o json" ]
+    [ "$output" = "get deployments.apps -n team-b -o json" ]
 }

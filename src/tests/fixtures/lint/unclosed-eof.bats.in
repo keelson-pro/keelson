@@ -1,0 +1,7 @@
+# A quoted string that never closes before the end of the file: reported
+# where it opened. Not a real test file: lint_tests.bats runs the lint on it.
+
+@test "a string left open at the end" {
+    run bash -c '
+        echo hi
+}
