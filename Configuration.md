@@ -90,23 +90,6 @@ A claim strategy on the apply-owned setting takes the image away from its owner,
 whose next apply then conflicts over it. The boot log says so beside the
 setting.
 
-#### Upgrading from `FieldManagerStrategyOwned`
-
-Earlier releases had two settings: `KEELSON_FIELD_MANAGER_STRATEGY_OWNED`
-(`Keelson/FieldManagerStrategyOwned`), `mimic` or `patch`, for an image an Apply
-entry owned; and `_UNOWNED`, `patch` or `claim`, for everything else,
-Update-owned images included.
-
-- `_OWNED` is no longer read; a value left there is silently ignored. Move it to
-  `_APPLY_OWNED`.
-- The old `_UNOWNED` covered Update-owned images too. Set its value on both
-  `_UPDATE_OWNED` and `_UNOWNED` to keep that behaviour.
-- `patch` is now `claim-patch` and `claim` is now `claim-apply`. The old
-  spellings fail validation at boot in a setting, and are refused per workload
-  (`update-invalid-strategy-annotation`) in an annotation.
-- On the new defaults, an Update-owned image moves from a patch as `keelson` to
-  `mimic`: a patch as the image's owner.
-
 ### Tick loop and scan cadence
 
 | Env Var / Kaptain Token                                                                                 | Default       | Purpose                                                                                                                                                                                                                                                                                                                                                                                                      |
