@@ -4,7 +4,7 @@
 `src/scripts/lib/` is library code, sourced and never run directly.
 
 | Script                    | Role                                                     | Lifetime       |
-| ------------------------- | -------------------------------------------------------- | -------------- |
+|---------------------------|----------------------------------------------------------|----------------|
 | `keelson`                 | The controller. The Deployment's `command`.              | Until SIGTERM. |
 | `keelson-probe`           | The `startup`, `readiness` and `liveness` probes.        | One decision.  |
 | `keelson-validate`        | Boot-time config and dependency check.                   | One run.       |
@@ -91,7 +91,7 @@ an `emptyDir` at `/keelson/work` (queue, workload cache, status files, log).
 needs.
 
 | Subcommand  | Passes when                                                                  |
-| ----------- | ---------------------------------------------------------------------------- |
+|-------------|------------------------------------------------------------------------------|
 | `startup`   | `readiness` passes and the heartbeat is fresh.                               |
 | `readiness` | Every watch target's PID is alive and its watch is streaming (`failures=0`). |
 | `liveness`  | The heartbeat is younger than `KEELSON_HEARTBEAT_MAX_AGE`.                   |
